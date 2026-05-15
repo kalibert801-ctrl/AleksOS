@@ -109,6 +109,10 @@ ESP32 GND   ─  Pico GND
 
 ESP32 3.3V  →  Pico 3V3
 
+<img width="1073" height="929" alt="Screenshot_20260515-021442_AliExpress (2)" src="https://github.com/user-attachments/assets/a8ed13d6-e5b9-4065-87f8-9d7238d9c8a2" />
+
+
+  
 ## ⚠️ Важное предупреждение по прошивке Raspberry Pi Pico
 
 Перед прошивкой Raspberry Pi Pico необходимо ОБЯЗАТЕЛЬНО 
