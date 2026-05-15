@@ -79,6 +79,8 @@ static void audio_frame(void) {
 }
 
 static int audio_init(void) {
+    // Ensure no stale I2S driver from a previous (failed) session
+    i2s_driver_uninstall(I2S_PORT); // safe to call even if not installed
     // Release pin from any LEDC usage before I2S takes it
     ledcDetachPin(AUDIO_PIN);
     pinMode(AUDIO_PIN, INPUT);
@@ -116,7 +118,15 @@ static uint16_t _pal[256];
 static uint8_t  _fb[NES_SCREEN_WIDTH * NES_SCREEN_HEIGHT];
 static bitmap_t *_bmp = nullptr;
 
-static int  drv_init(int w, int h)     { return 0; }
+// RGB565 полный кадровый буфер — выделяется из внутренней DRAM heap (не PSRAM).
+// ESP32 SPI DMA может читать только из внутренней DRAM, поэтому именно heap.
+// 256×224×2 = 112 КБ; heap_caps_malloc с MALLOC_CAP_INTERNAL гарантирует DRAM.
+static uint16_t *_frame = nullptr;
+
+static int  drv_init(int w, int h) {
+    // _frame is allocated in osd_init(); if it failed we run in fallback mode
+    return 0;
+}
 static void drv_shutdown(void)         {}
 static int  drv_set_mode(int w, int h) { return 0; }
 static void drv_clear(uint8 color)     {}
@@ -137,9 +147,6 @@ static bitmap_t *drv_lock_write(void) {
 }
 
 static void drv_free_write(int nd, rect_t *dr) {}
-
-// RGB565 строчный буфер — одна строка NES (256 пикселей × 2 байта = 512 байт)
-static uint16_t _line[NES_SCREEN_WIDTH];
 
 // NES renders lines 0..239; lines 0..7 and 232..239 are off-screen.
 // We display lines 8..231 (224 visible lines) centred on the 240-line screen.
@@ -164,16 +171,31 @@ static void blit_print_stats(void) {
 }
 
 static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
-    // pushImage построчно — LovyanGFX корректно применяет трансформацию
-    // rotation=3 к каждой строке, картинка всегда в правильной ориентации.
-    lcd.startWrite();
-    for (int y = 0; y < NES_VISIBLE_HEIGHT; y++) {
-        const uint8_t *src = bmp->line[y + VID_FIRST_LINE];
-        for (int x = 0; x < NES_SCREEN_WIDTH; x++)
-            _line[x] = _pal[src[x]];
-        lcd.pushImage(VID_X, VID_Y + y, NES_SCREEN_WIDTH, 1, _line);
+    if (_frame) {
+        // Fast path: palette-convert into DMA SRAM buffer, then single DMA burst
+        uint16_t *dst = _frame;
+        for (int y = 0; y < NES_VISIBLE_HEIGHT; y++) {
+            const uint8_t *src = bmp->line[y + VID_FIRST_LINE];
+            for (int x = 0; x < NES_SCREEN_WIDTH; x++)
+                *dst++ = _pal[src[x]];
+        }
+        lcd.startWrite();
+        lcd.setAddrWindow(VID_X, VID_Y, NES_SCREEN_WIDTH, NES_VISIBLE_HEIGHT);
+        lcd.writePixels(_frame, NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT, false);
+        lcd.endWrite();
+    } else {
+        // Fallback: line-by-line blit using a small stack buffer (~512 B)
+        static uint16_t line_buf[NES_SCREEN_WIDTH];
+        lcd.startWrite();
+        lcd.setAddrWindow(VID_X, VID_Y, NES_SCREEN_WIDTH, NES_VISIBLE_HEIGHT);
+        for (int y = 0; y < NES_VISIBLE_HEIGHT; y++) {
+            const uint8_t *src = bmp->line[y + VID_FIRST_LINE];
+            for (int x = 0; x < NES_SCREEN_WIDTH; x++)
+                line_buf[x] = _pal[src[x]];
+            lcd.writePixels(line_buf, NES_SCREEN_WIDTH, false);
+        }
+        lcd.endWrite();
     }
-    lcd.endWrite();
 
     blit_print_stats();
     audio_frame();
@@ -308,10 +330,23 @@ static int logprint(const char *s) { return printf("%s", s); }
 
 extern "C" int osd_init(void) {
     log_chain_logfunc(logprint);
+    // Allocate the DMA frame buffer first — before nofrendo and audio claim heap.
+    // MALLOC_CAP_DMA guarantees SPI DMA-accessible internal SRAM.
+    if (!_frame) {
+        size_t needed = NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT * sizeof(uint16_t);
+        size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+        printf("[OSD] DMA heap largest block: %u KB, need: %u KB\n",
+               (unsigned)(largest / 1024), (unsigned)(needed / 1024));
+        _frame = (uint16_t *)heap_caps_malloc(needed, MALLOC_CAP_DMA);
+        if (!_frame) {
+            printf("[OSD] WARNING: DMA frame buffer alloc failed — falling back to line-by-line blit\n");
+        }
+    }
     return audio_init();
 }
 
 extern "C" void osd_shutdown(void) {
     if (_bmp) { bmp_destroy(&_bmp); _bmp = nullptr; }
+    if (_frame) { heap_caps_free(_frame); _frame = nullptr; }
     audio_deinit();
 }
