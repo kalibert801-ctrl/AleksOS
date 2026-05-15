@@ -132,11 +132,14 @@ static int  drv_set_mode(int w, int h) { return 0; }
 static void drv_clear(uint8 color)     {}
 
 static void drv_set_palette(rgb_t *pal) {
+    // display_manager.h sets pc.invert=true (INVON). LovyanGFX compensates in its own
+    // drawing calls, but writePixels() is raw — the display hardware will invert every
+    // pixel we write. Pre-invert here so that display-invert(~color) == color.
     for (int i = 0; i < 256; i++) {
         uint16_t r = ((uint16_t)pal[i].r >> 3) & 0x1F;
         uint16_t g = ((uint16_t)pal[i].g >> 2) & 0x3F;
         uint16_t b = ((uint16_t)pal[i].b >> 3) & 0x1F;
-        _pal[i] = (r << 11) | (g << 5) | b;
+        _pal[i] = ~((r << 11) | (g << 5) | b); // pre-invert to cancel INVON
     }
 }
 
@@ -181,7 +184,7 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
         }
         lcd.startWrite();
         lcd.setAddrWindow(VID_X, VID_Y, NES_SCREEN_WIDTH, NES_VISIBLE_HEIGHT);
-        lcd.writePixels(_frame, NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT, false);
+        lcd.writePixels(_frame, NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT, true);
         lcd.endWrite();
     } else {
         // Fallback: line-by-line blit using a small stack buffer (~512 B)
@@ -192,7 +195,7 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
             const uint8_t *src = bmp->line[y + VID_FIRST_LINE];
             for (int x = 0; x < NES_SCREEN_WIDTH; x++)
                 line_buf[x] = _pal[src[x]];
-            lcd.writePixels(line_buf, NES_SCREEN_WIDTH, false);
+            lcd.writePixels(line_buf, NES_SCREEN_WIDTH, true);
         }
         lcd.endWrite();
     }
