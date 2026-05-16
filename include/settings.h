@@ -36,6 +36,10 @@ typedef struct {
     unsigned char diagFPS;      // FPS и память эмулятора
     unsigned char diagEmu;      // запуск / выход эмулятора
     unsigned char diagTouch;    // координаты тача
+    // ── WiFi ─────────────────────────────────────────────────
+    char          wifiSSID[64]; // сохранённая точка доступа
+    char          wifiPass[64]; // пароль
+    unsigned char wifiEnabled;  // авто-подключение при старте
 } Settings;
 
 /* ── Цвета темы RGB565 ──────────────────────────────────────────── */
@@ -76,6 +80,9 @@ inline void settingsDefault(Settings &s) {
     s.diagFPS       = 0;
     s.diagEmu       = 0;
     s.diagTouch     = 0;
+    s.wifiSSID[0]   = '\0';
+    s.wifiPass[0]   = '\0';
+    s.wifiEnabled   = 0;
 }
 
 #endif /* __cplusplus */

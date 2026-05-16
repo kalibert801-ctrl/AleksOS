@@ -7,7 +7,7 @@
 void cfgLoad() {
     File f = SD.open(CFG_FILE);
     if (!f) return;
-    StaticJsonDocument<1024> doc;
+    StaticJsonDocument<1536> doc;
     if (deserializeJson(doc, f)) { f.close(); return; }
     f.close();
 
@@ -32,6 +32,15 @@ void cfgLoad() {
     settings.diagEmu        = doc["diagemu"]      | 0;
     settings.diagTouch      = doc["diagtch"]      | 0;
 
+    // ── WiFi ────────────────────────────────────────────────────────────────
+    settings.wifiEnabled = doc["wifi_en"] | 0;
+    const char *ssid = doc["wifi_ssid"] | "";
+    const char *pass = doc["wifi_pass"] | "";
+    strncpy(settings.wifiSSID, ssid, sizeof(settings.wifiSSID) - 1);
+    settings.wifiSSID[sizeof(settings.wifiSSID) - 1] = '\0';
+    strncpy(settings.wifiPass, pass, sizeof(settings.wifiPass) - 1);
+    settings.wifiPass[sizeof(settings.wifiPass) - 1] = '\0';
+
     // Load btnMap only from configs saved by v13.4+ firmware (remap_ver >= 2).
     // remap_ver absent   → very old config (before remap existed)  → skip
     // remap_ver == 1     → v13.3 intermediate build, may have swapped map → skip
@@ -55,7 +64,7 @@ void cfgSave() {
     SD.remove(CFG_FILE);
     File f = SD.open(CFG_FILE, FILE_WRITE);
     if (!f) return;
-    StaticJsonDocument<1024> doc;
+    StaticJsonDocument<1536> doc;
 
     doc["brightness"] = settings.brightness;
     doc["volume"]     = settings.volume;
@@ -77,6 +86,11 @@ void cfgSave() {
     doc["diagfps"]    = settings.diagFPS;
     doc["diagemu"]    = settings.diagEmu;
     doc["diagtch"]    = settings.diagTouch;
+
+    // ── WiFi ───────────────────────────────────────────────────────────────
+    doc["wifi_en"]   = settings.wifiEnabled;
+    doc["wifi_ssid"] = settings.wifiSSID;
+    doc["wifi_pass"] = settings.wifiPass;
 
     doc["remap_ver"] = 2;   // v13.4+: clean identity-based remap, safe to load
     JsonArray arr = doc.createNestedArray("btnmap");

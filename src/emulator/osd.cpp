@@ -114,8 +114,10 @@ extern "C" void osd_getsoundinfo(sndinfo_t *info) {
 
 // ─── video ─────────────────────────────────────────────────────────────────
 static uint16_t _pal[256];
-// 8-bit indexed NES framebuffer in DRAM (nofrendo renders here, needs 240 lines)
-static uint8_t  _fb[NES_SCREEN_WIDTH * NES_SCREEN_HEIGHT];
+// 8-bit indexed NES framebuffer — allocated in PSRAM to keep internal DRAM free.
+// nofrendo renders palette indices here; drv_custom_blit converts to RGB565.
+// PSRAM access is fine: the CPU reads it line-by-line, no DMA involved.
+static uint8_t  *_fb  = nullptr;   // ps_malloc'd in osd_init()
 static bitmap_t *_bmp = nullptr;
 
 // RGB565 полный кадровый буфер — выделяется из внутренней DRAM heap (не PSRAM).
@@ -144,7 +146,7 @@ static void drv_set_palette(rgb_t *pal) {
 }
 
 static bitmap_t *drv_lock_write(void) {
-    if (!_bmp)
+    if (!_bmp && _fb)
         _bmp = bmp_createhw(_fb, NES_SCREEN_WIDTH, NES_SCREEN_HEIGHT, NES_SCREEN_WIDTH);
     return _bmp;
 }
@@ -371,10 +373,23 @@ static int logprint(const char *s) { return printf("%s", s); }
 
 extern "C" int osd_init(void) {
     log_chain_logfunc(logprint);
-    // Allocate the DMA frame buffer first — before nofrendo and audio claim heap.
-    // MALLOC_CAP_DMA guarantees SPI DMA-accessible internal SRAM.
+
+    // ── NES 8-bit framebuffer → PSRAM (frees ~60 KB of internal DRAM) ──────
+    // nofrendo writes palette indices here; no DMA, CPU-only access → PSRAM OK.
+    if (!_fb) {
+        _fb = (uint8_t *)ps_malloc((size_t)NES_SCREEN_WIDTH * NES_SCREEN_HEIGHT);
+        if (!_fb) {
+            printf("[OSD] FATAL: cannot allocate NES framebuffer in PSRAM!\n");
+            return -1;
+        }
+        memset(_fb, 0, (size_t)NES_SCREEN_WIDTH * NES_SCREEN_HEIGHT);
+        printf("[OSD] NES fb: %u KB in PSRAM\n",
+               (unsigned)(NES_SCREEN_WIDTH * NES_SCREEN_HEIGHT / 1024));
+    }
+
+    // ── RGB565 DMA frame buffer → internal DRAM (SPI DMA requires DRAM) ────
     if (!_frame) {
-        size_t needed = NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT * sizeof(uint16_t);
+        size_t needed  = (size_t)NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT * sizeof(uint16_t);
         size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
         printf("[OSD] DMA heap largest block: %u KB, need: %u KB\n",
                (unsigned)(largest / 1024), (unsigned)(needed / 1024));
@@ -387,7 +402,8 @@ extern "C" int osd_init(void) {
 }
 
 extern "C" void osd_shutdown(void) {
-    if (_bmp) { bmp_destroy(&_bmp); _bmp = nullptr; }
+    if (_bmp)   { bmp_destroy(&_bmp);    _bmp   = nullptr; }
     if (_frame) { heap_caps_free(_frame); _frame = nullptr; }
+    if (_fb)    { free(_fb);              _fb    = nullptr; }
     audio_deinit();
 }

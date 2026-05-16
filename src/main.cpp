@@ -14,6 +14,9 @@
 #include "system/time_manager.h"
 #include "ui/ui.h"
 #include "emulator/emu_runner.h"
+#include "network/wifi_manager.h"
+#include "network/ntp_manager.h"
+#include "network/ota_manager.h"
 
 Settings settings;
 
@@ -28,12 +31,53 @@ static int runEmulator_blocking(const char *path) {
 // STATE MACHINE
 // ─────────────────────────────────────────────────────────────
 
-enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING };
+enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB };
 static State state = S_MENU;
 
 static void toMenu()     { state = S_MENU;     menuDraw(); }
 static void toSettings() { state = S_SETTINGS; settingsDraw(); }
 static void toRemap()    { state = S_REMAP;    btnMapDraw(); }
+static void toWifi()     { state = S_WIFI;     wifiManagerDraw(); }
+
+// WiFi manager keyboard helper — opens password keyboard for selected network
+static void openWifiKeyboard() {
+    wifiKeyboardReset();
+    const char *ssid = wifiManagerSelectedSSID();
+    state = S_WIFI_KB;
+    wifiKeyboardDraw(ssid);
+}
+
+// Connect with current keyboard input, update settings, NTP sync
+static void doWifiConnect() {
+    const char *ssid = wifiManagerSelectedSSID();
+    const char *pass = wifiKeyboardGetPassword();
+
+    // Save credentials
+    strncpy(settings.wifiSSID, ssid, sizeof(settings.wifiSSID)-1);
+    settings.wifiSSID[sizeof(settings.wifiSSID)-1] = '\0';
+    strncpy(settings.wifiPass, pass, sizeof(settings.wifiPass)-1);
+    settings.wifiPass[sizeof(settings.wifiPass)-1] = '\0';
+    settings.wifiEnabled = 1;
+
+    // Show "Connecting..." popup style
+    const Theme565 &t = getTheme();
+    lcd.fillRect(30, 90, 260, 60, t.header);
+    lcd.drawRoundRect(30, 90, 260, 60, 8, t.accent);
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(t.textPri);
+    lcd.drawString("Connecting...", SCREEN_W/2, 120);
+
+    bool ok = wifiMgr.connect(ssid, pass, 12000);
+    if (ok) {
+        cfgSave();
+        ntpSync();
+        popupShow("WiFi", (String("Connected: ") + ssid).c_str(), 3000);
+    } else {
+        popupShow("WiFi", "Connection failed.", 3000);
+    }
+    toWifi();
+}
 
 static void showError(const char *title, const char *l1, const char *l2 = nullptr);
 static void runEmulator(int idx);
@@ -99,6 +143,14 @@ void setup() {
 
     // ── Время (читает settings.timeH/timeM после cfgLoad) ─────
     timeInit();
+
+    // ── WiFi ─────────────────────────────────────────────────
+    bootProgress(97, "Init WiFi...");
+    wifiMgr.init();
+    if (wifiMgr.isConnected()) {
+        bootProgress(99, "NTP sync...");
+        ntpSync();
+    }
 
     // ── Готово ────────────────────────────────────────────────
     bootProgress(100, "AleksOS Ready!");
@@ -219,13 +271,17 @@ void loop() {
         if (btnNew) {
             uint8_t r = settingsNavBtn(btnNew);
             if (r & BTN_B) { soundBack(); buttons.vibrate1(50); cfgSave(); toMenu(); break; }
-            if (r == 0x40)  { soundClick(); buttons.vibrate1(40); toRemap(); break; }  // open remap
+            if (r == 0x40) { soundClick(); buttons.vibrate1(40); toRemap(); break; }
+            if (r == 0x80) { soundClick(); cfgSave(); toWifi(); break; }
+            if (r == 0xA0) { soundClick(); otaScreen(); settingsDraw(); break; }
             soundClick(); break;
         }
         if (!tapped) break;
         uint8_t action = settingsHandleTouch(x, y);
         if (action & BTN_B)       { soundBack(); cfgSave(); toMenu(); }
-        else if (action == 0x40)  { soundClick(); toRemap(); }  // open remap
+        else if (action == 0x40)  { soundClick(); toRemap(); }
+        else if (action == 0x80)  { soundClick(); cfgSave(); toWifi(); }
+        else if (action == 0xA0)  { soundClick(); otaScreen(); settingsDraw(); }
         else if (action)            soundClick();
         break;
     }
@@ -247,6 +303,30 @@ void loop() {
 
     case S_PLAYING:
         break;
+
+    case S_WIFI: {
+        if (btnNew) {
+            uint8_t r = wifiManagerNavBtn(btnNew);
+            if (r == BTN_B) { soundBack(); buttons.vibrate1(40); cfgSave(); toSettings(); break; }
+            if (r == BTN_A) { soundClick(); openWifiKeyboard(); break; }
+            soundClick(); break;
+        }
+        if (!tapped) break;
+        uint8_t action = wifiManagerHandleTouch(x, y);
+        if (action == BTN_B) { soundBack(); cfgSave(); toSettings(); }
+        else if (action == BTN_A) { soundClick(); openWifiKeyboard(); }
+        break;
+    }
+
+    case S_WIFI_KB: {
+        if (btnNew & BTN_B) { soundBack(); toWifi(); break; }
+        if (!tapped) break;
+        uint8_t action = wifiKeyboardHandleTouch(x, y);
+        if (action == BTN_B) { soundBack(); toWifi(); }
+        else if (action == BTN_A) { soundClick(); doWifiConnect(); }
+        break;
+    }
+
     }
 
     delay(16);

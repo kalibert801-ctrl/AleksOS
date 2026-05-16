@@ -1,5 +1,8 @@
 // ui.cpp — RetroESP UI — редизайн меню в стиле AleksOS v2
 #include "ui/ui.h"
+#include "network/wifi_manager.h"
+#include "network/ntp_manager.h"
+#include "network/ota_manager.h"
 
 // ── Forward declarations для иконок (используются до определения) ─────────
 static void iconTag(int cx,int cy,uint16_t c);
@@ -460,30 +463,40 @@ void showRomInfo(int idx) {
 // ══════════════════════════════════════════════════════════════
 
 static const char *_catName[] = {
-    "Display", "Audio", "Appearance", "System", "Controls", "Info", "Debug"
+    "Display", "Audio", "Appearance", "System", "Controls", "Info",
+    "Debug"   // cat=6: виртуальная — только для sub-экрана из System
 };
 
-static const int _catItems[][5] = {
-    { 0, 4, 7, -1, -1  },  // Display
-    { 1, 14, 8, 9, -1  },  // Audio
-    { 2, 3, -1, -1, -1 },  // Appearance
-    { 5, 6, 17, 18, 19 },  // System: FPS, AutoSave, Hour, Minute, AutoScroll
-    { 12, 13, 15, 16, -1}, // Controls
-    { 10, 11, -1, -1, -1}, // Info
-    { 20, 21, 22, 23, -1}, // Debug
+// ── _catItems[][8]: максимум 8 пунктов на категорию ─────────────────────
+// cat=6 (Debug) не отображается в сетке (CAT_COUNT=6), только через gi=25.
+// gi=24 → WiFi manager (сигнал 0x80 в main.cpp)
+// gi=25 → открыть sub-экран Debug (cat=6 внутри)
+// gi=26 → OTA check (сигнал 0xA0 в main.cpp)
+static const int _catItems[][8] = {
+    { 0, 4, 7, -1, -1, -1, -1, -1 },          // Display
+    { 1, 14, 8, 9, -1, -1, -1, -1 },           // Audio
+    { 2, 3, -1, -1, -1, -1, -1, -1 },          // Appearance
+    { 5, 6, 17, 18, 19, 24, 25, 26 },          // System
+    { 12, 13, 15, 16, -1, -1, -1, -1 },        // Controls
+    { 10, 11, -1, -1, -1, -1, -1, -1 },        // Info
+    { 20, 21, 22, 23, -1, -1, -1, -1 },        // Debug (virtual sub-screen)
 };
-#define CAT_COUNT 7
+#define CAT_COUNT 6  // в сетке видны только 0..5; cat=6 — виртуальная
 
-static int _settingsCat  = -1;
-static int _catItemIdx   =  0;
-static int _gridSelected = -1;
-static int _detailRowH   = 32;  // реальная высота строки в текущем detail
-static int _detailListTop= 44;  // реальный Y начала списка
-static uint32_t _detailOpenedMs = 0;  // момент открытия — debounce тача  // тайл подсвечен (ожидает второго тапа)
+static int _prevCat = -1;   // для возврата из Debug sub-экрана в System
+
+static int _settingsCat    = -1;
+static int _catItemIdx     =  0;
+static int _gridSelected   = -1;
+static int _detailRowH     = 32;  // реальная высота строки в текущем detail
+static int _detailListTop  = 44;  // реальный Y начала списка
+static int _detailOffset   =  0;  // первая видимая строка (scroll)
+static int _detailVisible  =  5;  // сколько строк влезает на экран
+static uint32_t _detailOpenedMs = 0;  // момент открытия — debounce тача
 
 static int catItemCount(int cat) {
     int n = 0;
-    while (n < 5 && _catItems[cat][n] >= 0) n++;
+    while (n < 8 && _catItems[cat][n] >= 0) n++;
     return n;
 }
 
@@ -521,6 +534,12 @@ static String settingValue(int gi) {
         case 21: return settings.diagFPS     ? "On" : "Off";
         case 22: return settings.diagEmu     ? "On" : "Off";
         case 23: return settings.diagTouch   ? "On" : "Off";
+        case 24: {  // WiFi
+            if (wifiMgr.isConnected()) return wifiMgr.getSSID();
+            return settings.wifiSSID[0] ? settings.wifiSSID : "Tap >";
+        }
+        case 25: return "Edit >";   // Debug sub-screen
+        case 26: return "Check >";  // OTA update
     }
     return "";
 }
@@ -1009,6 +1028,22 @@ static void iconMinute(int cx,int cy,uint16_t c) {
     lcd.drawFastHLine(cx,cy,5,c);
     lcd.fillCircle(cx,cy,1,c);
 }
+static void iconWifi(int cx,int cy,uint16_t c) {
+    // 3 arcs radiating from a point (WiFi symbol)
+    lcd.drawLine(cx-8, cy+1, cx, cy-8, c);
+    lcd.drawLine(cx+8, cy+1, cx, cy-8, c);
+    lcd.drawLine(cx-5, cy+1, cx, cy-5, c);
+    lcd.drawLine(cx+5, cy+1, cx, cy-5, c);
+    lcd.drawLine(cx-2, cy+1, cx, cy-2, c);
+    lcd.drawLine(cx+2, cy+1, cx, cy-2, c);
+    lcd.fillCircle(cx, cy+4, 2, c);
+}
+static void iconDownload(int cx,int cy,uint16_t c) {
+    // Arrow pointing down + baseline
+    lcd.drawFastVLine(cx, cy-8, 10, c);
+    lcd.fillTriangle(cx-5, cy+3, cx+5, cy+3, cx, cy+8, c);
+    lcd.drawFastHLine(cx-7, cy+9, 15, c);
+}
 
 static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
     switch(gi) {
@@ -1034,6 +1069,15 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
         case 21:            iconClock2(cx,cy,c); break;  // diagFPS
         case 22:            iconChip(cx,cy,c); break;    // diagEmu
         case 23:            iconLook(cx,cy,c); break;    // diagTouch
+        case 24:            iconWifi(cx,cy,c); break;    // WiFi
+        case 25:            // Debug sub — terminal icon
+            lcd.fillRect(cx-9, cy-6, 18, 13, c);
+            lcd.fillRect(cx-8, cy-5, 16, 11, 0x1082);
+            lcd.drawLine(cx-6, cy-1, cx-3, cy+1, c);
+            lcd.drawLine(cx-6, cy+3, cx-3, cy+1, c);
+            lcd.drawFastHLine(cx-2, cy+1, 6, c);
+            break;
+        case 26:            iconDownload(cx,cy,c); break; // OTA
         default:            iconInfo(cx,cy,c); break;
     }
 }
@@ -1053,6 +1097,9 @@ static const char* getLabelForGi(int gi) {
         case 21: return "FPS Log";
         case 22: return "Emu Log";
         case 23: return "Touch Log";
+        case 24: return "WiFi";
+        case 25: return "Debug";
+        case 26: return "Check Update";
     }
     return "";
 }
@@ -1062,55 +1109,65 @@ static void drawCategoryDetail() {
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
 
-    // ── Заголовок (золотой) ───────────────────────────────────
+    // ── Заголовок ─────────────────────────────────────────────
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
     flg(); lcd.setTextDatum(MC_DATUM);
     lcd.setTextColor((uint16_t)COL_GOLD);
     lcd.drawString(_catName[_settingsCat], SCREEN_W/2, HDR_H/2);
-    // Синяя линия под заголовком (как в Image 2)
     lcd.drawFastHLine(0, HDR_H,   SCREEN_W, t.accent);
     lcd.drawFastHLine(0, HDR_H+1, SCREEN_W, t.accent);
 
-    // ── Карточка со строками ──────────────────────────────────
-    int n = catItemCount(_settingsCat);
+    // ── Геометрия ─────────────────────────────────────────────
+    int n       = catItemCount(_settingsCat);
     int listTop = HDR_H + 4;
     int listH   = DPAD_Y - listTop - 5;
-    // Адаптивная высота строки (больше дышит при малом кол-ве)
-    int rowH = min(52, max(30, listH / max(n, 1)));
-    _detailRowH    = rowH;    // сохраняем для touch handler
-    _detailListTop = listTop; // сохраняем для touch handler
 
-    // Фон карточки
-    lcd.fillRoundRect(4, listTop, SCREEN_W-8, n*rowH+4, 6, t.header);
-    // Синяя линия над нижней панелью
+    // Фиксированная высота строки: 34px — одинаково для любого числа пунктов.
+    // При n <= 4 есть запас, при n > 4 появляется прокрутка.
+    const int rowH = 34;
+    int visible = listH / rowH;            // сколько строк влезает (~4–5)
+    if (visible < 1) visible = 1;
+
+    // Clamp scroll: выбранный элемент всегда виден
+    if (_catItemIdx < _detailOffset) _detailOffset = _catItemIdx;
+    if (_catItemIdx >= _detailOffset + visible) _detailOffset = _catItemIdx - visible + 1;
+    if (_detailOffset < 0) _detailOffset = 0;
+    if (_detailOffset + visible > n) _detailOffset = max(0, n - visible);
+
+    // Сохраняем для touch-handler
+    _detailRowH    = rowH;
+    _detailListTop = listTop;
+    _detailVisible = visible;
+
+    // Фон карточки (высота = сколько строк реально видно)
+    int cardH = min(n, visible) * rowH + 4;
+    lcd.fillRoundRect(4, listTop, SCREEN_W-8, cardH, 6, t.header);
     lcd.drawFastHLine(0, DPAD_Y-2, SCREEN_W, t.accent);
     lcd.drawFastHLine(0, DPAD_Y-1, SCREEN_W, t.accent);
 
-    for (int i = 0; i < n; i++) {
-        int gi  = globalSettingIdx(_settingsCat, i);
-        int y   = listTop + 2 + i * rowH;
+    // ── Строки ────────────────────────────────────────────────
+    int end = min(_detailOffset + visible, n);
+    for (int i = _detailOffset; i < end; i++) {
+        int gi   = globalSettingIdx(_settingsCat, i);
+        int slot = i - _detailOffset;          // позиция на экране (0-based)
+        int y    = listTop + 2 + slot * rowH;
         bool sel = (i == _catItemIdx);
 
-        // Подсветка выбранной строки
         if (sel) {
             lcd.fillRoundRect(5, y+1, SCREEN_W-10, rowH-2, 4, t.rowOdd);
-            lcd.fillRect(5, y+2, 3, rowH-4, t.accent);  // левый акцент
+            lcd.fillRect(5, y+2, 3, rowH-4, t.accent);
         }
-        // Разделитель между строками
-        if (i > 0) lcd.drawFastHLine(12, y, SCREEN_W-24, 0x2104);
+        if (slot > 0) lcd.drawFastHLine(12, y, SCREEN_W-24, 0x2104);
 
-        // Иконка
         uint16_t icCol = sel ? t.accent : (uint16_t)COL_GOLD;
         drawSettingIcon(gi, 22, y + rowH/2, icCol);
 
-        // Название (белое, bold при выборе)
         fmd(); lcd.setTextDatum(ML_DATUM);
         lcd.setTextColor((uint16_t)COL_WHITE);
         const char *lbl = getLabelForGi(gi);
         lcd.drawString(lbl, 40, y + rowH/2);
-        if (sel) lcd.drawString(lbl, 41, y + rowH/2);  // bold
+        if (sel) lcd.drawString(lbl, 41, y + rowH/2);
 
-        // Значение (голубое/золотое, bold при выборе)
         uint16_t vCol = sel ? t.accent : (uint16_t)COL_GOLD;
         lcd.setTextColor(vCol);
         lcd.setTextDatum(MR_DATUM);
@@ -1119,7 +1176,18 @@ static void drawCategoryDetail() {
         if (sel) lcd.drawString(val.c_str(), SCREEN_W-11, y + rowH/2);
     }
 
-    // Нижняя панель: только Back + time (чисто, как в Image 2)
+    // ── Индикаторы прокрутки ──────────────────────────────────
+    if (_detailOffset > 0) {
+        // ▲ справа вверху
+        int ax = SCREEN_W - 10, ay = listTop + 6;
+        lcd.fillTriangle(ax, ay, ax-5, ay+8, ax+5, ay+8, t.accent);
+    }
+    if (_detailOffset + visible < n) {
+        // ▼ справа внизу
+        int ax = SCREEN_W - 10, ay = DPAD_Y - 14;
+        lcd.fillTriangle(ax, ay+8, ax-5, ay, ax+5, ay, t.accent);
+    }
+
     drawSettingsBar(true, 0);
 }
 
@@ -1151,7 +1219,8 @@ static uint8_t handleCategoryGrid(int x, int y) {
                 _gridSelected   = -1;
                 _settingsCat    = i;
                 _catItemIdx     = 0;
-                _detailOpenedMs = millis();  // фиксируем момент открытия
+                _detailOffset   = 0;
+                _detailOpenedMs = millis();
                 drawCategoryDetail();
             } else {
                 // ── Первый тап — подсвечиваем (инверт + bold) ────
@@ -1167,12 +1236,20 @@ static uint8_t handleCategoryGrid(int x, int y) {
 static uint8_t handleCategoryDetail(int x, int y) {
     // ── Нижняя панель ─────────────────────────────────────────
     if (y >= DPAD_Y) {
-        // Только BACK (x < 80). Остальные зоны не используем на тач —
-        // значения меняются прямым тапом по строке.
         if (x < 80) {
-            _settingsCat = -1;
-            _gridSelected = -1;
-            drawCategoryGrid();
+            // BACK
+            if (_settingsCat == 6) {
+                // Debug sub-экран → возврат в родительскую категорию (System)
+                _settingsCat = (_prevCat >= 0) ? _prevCat : -1;
+                _prevCat = -1;
+                _detailOffset = 0;  // drawCategoryDetail auto-scrolls to _catItemIdx
+                if (_settingsCat >= 0) drawCategoryDetail();
+                else { _gridSelected = -1; drawCategoryGrid(); }
+            } else {
+                _settingsCat = -1;
+                _gridSelected = -1;
+                drawCategoryGrid();
+            }
             return 0;
         }
         // Info: скролл в правой половине
@@ -1199,7 +1276,10 @@ static uint8_t handleCategoryDetail(int x, int y) {
     // Используем АКТУАЛЬНУЮ геометрию из drawCategoryDetail()
     int n = catItemCount(_settingsCat);
     if (y >= _detailListTop && y < DPAD_Y - 2) {
-        int row = (y - _detailListTop) / _detailRowH;
+        // slot = визуальная позиция строки на экране (0, 1, 2 …)
+        // Реальный индекс с учётом прокрутки:
+        int slot = (y - _detailListTop) / _detailRowH;
+        int row  = _detailOffset + slot;
         if (row < 0 || row >= n) return 0;
 
         int gi = globalSettingIdx(_settingsCat, row);
@@ -1211,9 +1291,18 @@ static uint8_t handleCategoryDetail(int x, int y) {
             return 0;  // НЕ BTN_A — просто обновление экрана
         }
         // Второй тап по той же строке — меняем значение
-        if (gi == 12) {
-            // Remap Buttons — явный тап: сигнал открыть remap (0x40)
-            return 0x40;
+        if (gi == 12) return 0x40;   // Remap Buttons → открыть remap
+        if (gi == 24) return 0x80;   // WiFi → открыть WiFi менеджер
+        if (gi == 26) return 0xA0;   // Check Update → OTA screen
+        if (gi == 25) {
+            // Debug sub-экран — открываем кат=6 (виртуальный)
+            _prevCat = _settingsCat;
+            _settingsCat = 6;
+            _catItemIdx  = 0;
+            _detailOffset = 0;
+            _detailOpenedMs = millis();
+            drawCategoryDetail();
+            return 0;
         }
         settingInc(gi);
         drawCategoryDetail();
@@ -1350,6 +1439,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             _gridSelected   = -1;
             _settingsCat    = _gridCur;
             _catItemIdx     = 0;
+            _detailOffset   = 0;
             _detailOpenedMs = millis();
             drawCategoryDetail();
         }
@@ -1358,6 +1448,25 @@ uint8_t settingsNavBtn(uint8_t btn) {
         if (btn & BTN_UP)   infoScrollBy(-INFO_ROW_H * 3);
         if (btn & BTN_DOWN) infoScrollBy( INFO_ROW_H * 3);
         if (btn & BTN_B) { _settingsCat = -1; _gridSelected = -1; drawCategoryGrid(); }
+    } else if (_settingsCat == 6) {
+        // Debug virtual sub-экран
+        int n = catItemCount(6);
+        if (btn & BTN_UP)   { if(_catItemIdx>0){_catItemIdx--;drawCategoryDetail();} }
+        if (btn & BTN_DOWN) { if(_catItemIdx<n-1){_catItemIdx++;drawCategoryDetail();} }
+        if (btn & BTN_RIGHT) {
+            int gi = globalSettingIdx(6, _catItemIdx);
+            settingInc(gi); drawCategoryDetail();
+        }
+        if (btn & BTN_LEFT) {
+            int gi = globalSettingIdx(6, _catItemIdx);
+            settingDec(gi); drawCategoryDetail();
+        }
+        if (btn & BTN_B) {
+            _settingsCat = (_prevCat >= 0) ? _prevCat : -1;
+            _prevCat = -1;
+            if (_settingsCat >= 0) drawCategoryDetail();
+            else { _gridSelected = -1; drawCategoryGrid(); }
+        }
     } else {
         int n = catItemCount(_settingsCat);
         if (btn & BTN_UP)   { if(_catItemIdx>0){_catItemIdx--;drawCategoryDetail();} }
@@ -1365,11 +1474,25 @@ uint8_t settingsNavBtn(uint8_t btn) {
         if (btn & BTN_RIGHT) {
             int gi = globalSettingIdx(_settingsCat, _catItemIdx);
             if (gi == 12) return 0x40;  // open remap signal
+            if (gi == 24) return 0x80;  // open WiFi
+            if (gi == 26) return 0xA0;  // OTA check
+            if (gi == 25) {
+                _prevCat = _settingsCat; _settingsCat = 6;
+                _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
+                drawCategoryDetail(); return 0;
+            }
             settingInc(gi); drawCategoryDetail();
         }
         if (btn & BTN_LEFT) {
             int gi = globalSettingIdx(_settingsCat, _catItemIdx);
             if (gi == 12) return 0x40;  // open remap signal
+            if (gi == 24) return 0x80;  // open WiFi
+            if (gi == 26) return 0xA0;  // OTA check
+            if (gi == 25) {
+                _prevCat = _settingsCat; _settingsCat = 6;
+                _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
+                drawCategoryDetail(); return 0;
+            }
             settingDec(gi); drawCategoryDetail();
         }
         if (btn & BTN_B) { _settingsCat = -1; _gridSelected = -1; drawCategoryGrid(); }
@@ -1390,4 +1513,529 @@ uint8_t btnMapNavBtn(uint8_t btn) {
     }
     if (btn & BTN_B) return BTN_B;
     return 0;
+}
+
+// ══════════════════════════════════════════════════════════════
+// POPUP (generic)
+// ══════════════════════════════════════════════════════════════
+
+void popupShow(const char *title, const char *msg, uint32_t timeoutMs) {
+    const Theme565 &t = getTheme();
+    int pw = 260, ph = 100;
+    int px = (SCREEN_W - pw) / 2, py = (SCREEN_H - ph) / 2;
+    lcd.fillRoundRect(px+3, py+3, pw, ph, 10, 0x0841);
+    lcd.fillRoundRect(px, py, pw, ph, 10, t.header);
+    lcd.drawRoundRect(px, py, pw, ph, 10, t.accent);
+    lcd.drawFastHLine(px+8, py+30, pw-16, 0x2945);
+    fmd(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(t.accent);
+    lcd.drawString(title, SCREEN_W/2, py+15);
+    fsm(); lcd.setTextColor(t.textPri);
+    lcd.drawString(msg, SCREEN_W/2, py+54);
+    lcd.setTextColor(t.textSec);
+    lcd.drawString("Tap to close", SCREEN_W/2, py+78);
+    uint32_t dl = millis() + timeoutMs;
+    while (millis() < dl) { if (touch.isTouched()) break; delay(20); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// WIFI MANAGER SCREEN
+// ══════════════════════════════════════════════════════════════
+
+#define WIFI_ROW_H     28
+#define WIFI_MAX_ROWS  5      // rows visible (matches the available area)
+#define WIFI_AREA_TOP  HDR_H
+#define WIFI_AREA_BOT  DPAD_Y
+
+static int  _wifiSel    = 0;
+static int  _wifiOffset = 0;
+static bool _wifiScanned = false;
+
+// Signal strength bars (0..4 bars)
+static int rssiToBars(int rssi) {
+    if (rssi >= -50) return 4;
+    if (rssi >= -65) return 3;
+    if (rssi >= -75) return 2;
+    if (rssi >= -85) return 1;
+    return 0;
+}
+
+static void drawSignalBars(int cx, int cy, int bars, uint16_t c) {
+    // 4 bars, each slightly taller
+    int heights[4] = {4, 7, 10, 13};
+    int bw = 3, gap = 2;
+    int totalW = 4*bw + 3*gap;
+    int bx = cx - totalW/2;
+    for (int i = 0; i < 4; i++) {
+        uint16_t col = (i < bars) ? c : (uint16_t)0x2945;
+        int h = heights[i];
+        lcd.fillRect(bx + i*(bw+gap), cy - h + 4, bw, h, col);
+    }
+}
+
+void wifiManagerDraw() {
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+
+    // Header
+    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+    flg(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("WiFi", SCREEN_W/2, HDR_H/2);
+    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+
+    // Status chip (top-right)
+    fsm(); lcd.setTextDatum(MR_DATUM);
+    if (wifiMgr.isConnected()) {
+        lcd.setTextColor(t.ok);
+        String s = wifiMgr.getSSID();
+        if (s.length() > 14) s = s.substring(0, 12) + "..";
+        lcd.drawString(s.c_str(), SCREEN_W-6, HDR_H/2);
+    } else {
+        lcd.setTextColor(t.danger);
+        lcd.drawString("Not connected", SCREEN_W-6, HDR_H/2);
+    }
+
+    // Network list
+    int count = wifiMgr.getScanCount();
+    if (!_wifiScanned) {
+        fmd(); lcd.setTextDatum(MC_DATUM);
+        lcd.setTextColor(t.textSec);
+        lcd.drawString("Press Scan to find networks", SCREEN_W/2, (HDR_H + DPAD_Y)/2 - 10);
+        fsm(); lcd.setTextColor(t.textSec);
+        lcd.drawString("(tap SCAN button below)", SCREEN_W/2, (HDR_H + DPAD_Y)/2 + 14);
+    } else if (count == 0) {
+        fmd(); lcd.setTextDatum(MC_DATUM);
+        lcd.setTextColor(t.textSec);
+        lcd.drawString("No networks found", SCREEN_W/2, (HDR_H + DPAD_Y)/2);
+    } else {
+        // Clamp scroll
+        if (_wifiSel < _wifiOffset) _wifiOffset = _wifiSel;
+        if (_wifiSel >= _wifiOffset + WIFI_MAX_ROWS) _wifiOffset = _wifiSel - WIFI_MAX_ROWS + 1;
+        if (_wifiOffset < 0) _wifiOffset = 0;
+
+        int end = min(_wifiOffset + WIFI_MAX_ROWS, count);
+        for (int i = _wifiOffset; i < end; i++) {
+            int row = i - _wifiOffset;
+            int y   = WIFI_AREA_TOP + row * WIFI_ROW_H;
+            bool sel = (i == _wifiSel);
+
+            uint16_t bg = sel ? t.selected : (row%2 ? t.rowOdd : t.rowEven);
+            lcd.fillRect(0, y, SCREEN_W, WIFI_ROW_H, bg);
+            if (sel) lcd.fillRect(0, y, 3, WIFI_ROW_H, t.accent);
+
+            // Lock icon
+            uint16_t txtCol = sel ? t.bg : t.textPri;
+            if (wifiMgr.getScanEncrypted(i)) {
+                fsm(); lcd.setTextColor(sel ? t.bg : t.textSec);
+                lcd.setTextDatum(ML_DATUM);
+                lcd.drawString("*", 8, y + WIFI_ROW_H/2);
+            }
+            // SSID
+            fsm(); lcd.setTextColor(txtCol); lcd.setTextDatum(ML_DATUM);
+            String ssid = wifiMgr.getScanSSID(i);
+            if (ssid.length() > 28) ssid = ssid.substring(0, 26) + "..";
+            lcd.drawString(ssid.c_str(), 18, y + WIFI_ROW_H/2);
+            // Signal bars
+            int bars = rssiToBars(wifiMgr.getScanRSSI(i));
+            drawSignalBars(SCREEN_W - 24, y + WIFI_ROW_H/2, bars, sel ? t.bg : t.accent);
+        }
+
+        // Scroll indicators
+        if (_wifiOffset > 0) {
+            int ax = SCREEN_W-14, ay = WIFI_AREA_TOP + 6;
+            lcd.fillTriangle(ax, ay+6, ax-5, ay+12, ax+5, ay+12, t.accent);
+        }
+        if (_wifiOffset + WIFI_MAX_ROWS < count) {
+            int ax = SCREEN_W-14, ay = WIFI_AREA_BOT - 14;
+            lcd.fillTriangle(ax, ay+6, ax-5, ay, ax+5, ay, t.accent);
+        }
+    }
+
+    // Bottom bar: [← Back] [SCAN] [CONNECT]
+    int by = DPAD_Y;
+    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+    // BACK (0..106)
+    lcd.fillRoundRect(4, by+5, 102, 34, 8, t.rowOdd);
+    int ax = 16, ty = by + BTNBAR_H/2;
+    lcd.fillTriangle(ax, ty, ax+8, ty-6, ax+8, ty+6, (uint16_t)COL_GOLD);
+    fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(ML_DATUM);
+    lcd.drawString(S().back, ax+12, ty);
+    // SCAN (107..213)
+    lcd.drawFastVLine(107, by+6, BTNBAR_H-12, 0x3186);
+    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("SCAN", 160, ty);
+    // CONNECT (214..319)
+    lcd.drawFastVLine(214, by+6, BTNBAR_H-12, 0x3186);
+    bool hasNet = (_wifiScanned && wifiMgr.getScanCount() > 0);
+    lcd.setTextColor(hasNet ? (uint16_t)COL_GOLD : t.textSec);
+    lcd.drawString("CONNECT", 267, ty);
+}
+
+uint8_t wifiManagerHandleTouch(int x, int y) {
+    if (y >= DPAD_Y) {
+        if (x < 107) return BTN_B;   // Back
+        if (x >= 107 && x < 214) {
+            // SCAN
+            const Theme565 &t = getTheme();
+            // Show "Scanning..." message
+            lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
+            fmd(); lcd.setTextDatum(MC_DATUM);
+            lcd.setTextColor(t.textSec);
+            lcd.drawString("Scanning...", SCREEN_W/2, (HDR_H + DPAD_Y)/2);
+            _wifiScanned = true;
+            _wifiSel = 0; _wifiOffset = 0;
+            wifiMgr.scan();
+            wifiManagerDraw();
+        } else if (x >= 214) {
+            // CONNECT
+            if (_wifiScanned && wifiMgr.getScanCount() > 0)
+                return BTN_A;   // signal to main: open keyboard
+        }
+        return 0;
+    }
+    if (y < HDR_H) return 0;
+
+    // List tap
+    int count = wifiMgr.getScanCount();
+    if (_wifiScanned && count > 0) {
+        int row = (y - WIFI_AREA_TOP) / WIFI_ROW_H;
+        int idx = _wifiOffset + row;
+        if (idx >= 0 && idx < count) {
+            if (idx != _wifiSel) {
+                _wifiSel = idx;
+                wifiManagerDraw();
+            } else {
+                return BTN_A;   // double tap same row → connect
+            }
+        }
+    }
+    return 0;
+}
+
+uint8_t wifiManagerNavBtn(uint8_t btn) {
+    int count = wifiMgr.getScanCount();
+    if (btn & BTN_UP)   { if(_wifiSel>0){_wifiSel--;wifiManagerDraw();} }
+    if (btn & BTN_DOWN) { if(_wifiSel<count-1){_wifiSel++;wifiManagerDraw();} }
+    if (btn & BTN_A)    return BTN_A;  // proceed to keyboard
+    if (btn & BTN_B)    return BTN_B;  // back
+    return 0;
+}
+
+// Get selected SSID from the scan list
+const char *wifiManagerSelectedSSID() {
+    static String _s;
+    _s = wifiMgr.getScanSSID(_wifiSel);
+    return _s.c_str();
+}
+bool wifiManagerSelectedEncrypted() {
+    return wifiMgr.getScanEncrypted(_wifiSel);
+}
+
+// ══════════════════════════════════════════════════════════════
+// WIFI PASSWORD KEYBOARD
+// ══════════════════════════════════════════════════════════════
+
+static char  _kbPassword[65] = {};
+static int   _kbLen    = 0;
+static bool  _kbCaps   = false;
+static bool  _kbSymMode = false;
+static char  _kbSSID[64] = {};
+
+static const char *_kbAlpha[3] = {
+    "QWERTYUIOP",
+    "ASDFGHJKL",
+    "ZXCVBNM"
+};
+static const char *_kbSym[3] = {
+    "1234567890",
+    "!@#$%^&*()",
+    "-_=+[];',"
+};
+
+static const int KB_HDR_H  = 40;
+static const int KB_INP_Y  = 40;
+static const int KB_INP_H  = 30;
+static const int KB_ROW_Y  = 74;   // keyboard starts here
+static const int KB_ROW_H  = 34;
+static const int KB_KEY_W  = 32;
+
+// Draw a single key
+static void drawKey(int x, int y, int w, int h, const char *label, uint16_t bg, uint16_t fg) {
+    lcd.fillRoundRect(x+1, y+1, w-2, h-2, 4, bg);
+    lcd.drawRoundRect(x, y, w, h, 4, 0x2945);
+    fsm(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(fg);
+    lcd.drawString(label, x + w/2, y + h/2);
+}
+
+void wifiKeyboardDraw(const char *ssid) {
+    strncpy(_kbSSID, ssid, 63); _kbSSID[63] = '\0';
+
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+
+    // Header
+    lcd.fillRect(0, 0, SCREEN_W, KB_HDR_H, t.header);
+    fsm(); lcd.setTextDatum(ML_DATUM);
+    lcd.setTextColor(t.textSec);
+    lcd.drawString("Network:", 6, KB_HDR_H/2 - 8);
+    fmd(); lcd.setTextColor((uint16_t)COL_GOLD);
+    String sn = String(ssid); if(sn.length()>22) sn=sn.substring(0,20)+"..";
+    lcd.drawString(sn.c_str(), 6, KB_HDR_H/2 + 8);
+
+    // Input field
+    lcd.fillRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, t.rowOdd);
+    lcd.drawRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, t.accent);
+    // Show password as dots (or last char visible)
+    String dots = "";
+    for (int i = 0; i < _kbLen; i++) dots += (i < _kbLen-1) ? '*' : _kbPassword[i];
+    dots += "|";  // cursor
+    fsm(); lcd.setTextDatum(ML_DATUM);
+    lcd.setTextColor(t.textPri);
+    lcd.drawString(dots.c_str(), 10, KB_INP_Y + KB_INP_H/2);
+
+    // Keyboard rows
+    const char **rows = _kbSymMode ? _kbSym : _kbAlpha;
+
+    // Row 1 (10 keys × 32px)
+    for (int i = 0; i < 10; i++) {
+        char ch[3] = {0};
+        if (_kbSymMode) {
+            ch[0] = rows[0][i];
+        } else {
+            ch[0] = _kbCaps ? toupper(rows[0][i]) : tolower(rows[0][i]);
+        }
+        drawKey(i*KB_KEY_W, KB_ROW_Y, KB_KEY_W, KB_ROW_H, ch, t.header, (uint16_t)COL_WHITE);
+    }
+
+    // Row 2 (9 keys, centered: offset 16px)
+    int r2off = 16;
+    for (int i = 0; i < 9; i++) {
+        char ch[3] = {0};
+        if (_kbSymMode) {
+            ch[0] = rows[1][i];
+        } else {
+            ch[0] = _kbCaps ? toupper(rows[1][i]) : tolower(rows[1][i]);
+        }
+        drawKey(r2off + i*KB_KEY_W, KB_ROW_Y + KB_ROW_H, KB_KEY_W, KB_ROW_H, ch, t.header, (uint16_t)COL_WHITE);
+    }
+
+    // Row 3: [⇧/123](44px) + 7 keys + [⌫](44px)
+    int shiftW = 44, backW = 44;
+    int r3keysW = SCREEN_W - shiftW - backW;
+    int r3keyW  = r3keysW / 7;
+    int r3start = shiftW;
+    drawKey(0, KB_ROW_Y + KB_ROW_H*2, shiftW, KB_ROW_H,
+            _kbSymMode ? "ABC" : (_kbCaps ? "abc" : "ABC"),
+            _kbCaps ? t.accent : t.rowOdd, (uint16_t)COL_WHITE);
+    for (int i = 0; i < 7; i++) {
+        char ch[3] = {0};
+        if (_kbSymMode) {
+            ch[0] = rows[2][i];
+        } else {
+            ch[0] = _kbCaps ? toupper(rows[2][i]) : tolower(rows[2][i]);
+        }
+        drawKey(r3start + i*r3keyW, KB_ROW_Y + KB_ROW_H*2, r3keyW, KB_ROW_H, ch, t.header, (uint16_t)COL_WHITE);
+    }
+    drawKey(SCREEN_W - backW, KB_ROW_Y + KB_ROW_H*2, backW, KB_ROW_H, "<", t.rowOdd, (uint16_t)COL_GOLD);
+
+    // Row 4: [SYM/123](64px) [SPACE] [OK](64px)
+    int r4y = KB_ROW_Y + KB_ROW_H*3;
+    drawKey(0,         r4y, 64, KB_ROW_H, _kbSymMode ? "ABC" : "123", t.rowOdd, (uint16_t)COL_WHITE);
+    drawKey(65,        r4y, 190, KB_ROW_H, "SPACE", t.header, (uint16_t)COL_WHITE);
+    drawKey(256,       r4y, 64, KB_ROW_H, "OK", t.accent, (uint16_t)COL_WHITE);
+}
+
+uint8_t wifiKeyboardHandleTouch(int x, int y) {
+    // Row 1: y in [KB_ROW_Y, KB_ROW_Y+KB_ROW_H)
+    auto addChar = [&](char c) {
+        if (_kbLen < 63) { _kbPassword[_kbLen++] = c; _kbPassword[_kbLen] = '\0'; }
+        wifiKeyboardDraw(_kbSSID);
+    };
+    auto delChar = [&]() {
+        if (_kbLen > 0) { _kbPassword[--_kbLen] = '\0'; }
+        wifiKeyboardDraw(_kbSSID);
+    };
+
+    const char **rows = _kbSymMode ? _kbSym : _kbAlpha;
+
+    if (y >= KB_ROW_Y && y < KB_ROW_Y + KB_ROW_H) {
+        // Row 1 — 10 keys
+        int ki = x / KB_KEY_W;
+        if (ki >= 0 && ki < 10) {
+            char c = rows[0][ki];
+            if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
+            addChar(c);
+        }
+    } else if (y >= KB_ROW_Y + KB_ROW_H && y < KB_ROW_Y + KB_ROW_H*2) {
+        // Row 2 — 9 keys, offset 16px
+        int ki = (x - 16) / KB_KEY_W;
+        if (ki >= 0 && ki < 9) {
+            char c = rows[1][ki];
+            if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
+            addChar(c);
+        }
+    } else if (y >= KB_ROW_Y + KB_ROW_H*2 && y < KB_ROW_Y + KB_ROW_H*3) {
+        // Row 3 — Shift | 7 keys | Backspace
+        int shiftW = 44, backW = 44;
+        int r3keysW = SCREEN_W - shiftW - backW;
+        int r3keyW  = r3keysW / 7;
+        if (x < shiftW) {
+            // Toggle caps / sym-mode if sym active toggle back
+            if (_kbSymMode) { _kbSymMode = false; }
+            else             { _kbCaps = !_kbCaps; }
+            wifiKeyboardDraw(_kbSSID);
+        } else if (x >= SCREEN_W - backW) {
+            delChar();
+        } else {
+            int ki = (x - shiftW) / r3keyW;
+            if (ki >= 0 && ki < 7) {
+                char c = rows[2][ki];
+                if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
+                addChar(c);
+            }
+        }
+    } else if (y >= KB_ROW_Y + KB_ROW_H*3 && y < KB_ROW_Y + KB_ROW_H*4) {
+        // Row 4 — 123/ABC | SPACE | OK
+        if (x < 64) {
+            _kbSymMode = !_kbSymMode;
+            _kbCaps = false;
+            wifiKeyboardDraw(_kbSSID);
+        } else if (x < 256) {
+            addChar(' ');
+        } else {
+            return BTN_A;   // OK
+        }
+    }
+    return 0;
+}
+
+uint8_t wifiKeyboardNavBtn(uint8_t btn) {
+    if (btn & BTN_B) return BTN_B;  // Cancel
+    if (btn & BTN_A) return BTN_A;  // OK
+    return 0;
+}
+
+const char *wifiKeyboardGetPassword() {
+    return _kbPassword;
+}
+
+// Clear keyboard state (call before opening keyboard for a new network)
+void wifiKeyboardReset() {
+    _kbPassword[0] = '\0'; _kbLen = 0;
+    _kbCaps = false; _kbSymMode = false;
+}
+
+// ══════════════════════════════════════════════════════════════
+// OTA SCREEN
+// ══════════════════════════════════════════════════════════════
+
+void otaScreen() {
+    const Theme565 &t = getTheme();
+
+    if (!wifiMgr.isConnected()) {
+        popupShow("Update", "Connect WiFi first!", 3000);
+        return;
+    }
+
+    // Show "Checking..." overlay
+    lcd.fillScreen(t.bg);
+    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+    flg(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("Update", SCREEN_W/2, HDR_H/2);
+    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+
+    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Checking for update...", SCREEN_W/2, 110);
+    lcd.fillCircle(SCREEN_W/2, 150, 16, t.accent);
+    fsm(); lcd.setTextColor(t.bg);
+    lcd.drawString("...", SCREEN_W/2, 150);
+
+    OTAInfo info;
+    bool ok = otaCheckUpdate(info);
+    if (!ok) {
+        popupShow("Update", "Check failed. No internet?", 4000);
+        return;
+    }
+
+    lcd.fillScreen(t.bg);
+    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+    flg(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("Update", SCREEN_W/2, HDR_H/2);
+    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+
+    if (!info.available) {
+        fmd(); lcd.setTextColor(t.ok); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("Up to date!", SCREEN_W/2, 100);
+        fsm(); lcd.setTextColor(t.textSec);
+        lcd.drawString(FIRMWARE_VERSION, SCREEN_W/2, 125);
+        popupShow("Update", "You have the latest version.", 4000);
+        return;
+    }
+
+    // Update available!
+    fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Update available!", SCREEN_W/2, 80);
+    fsm(); lcd.setTextColor(t.textSec);
+    lcd.drawString(String("Current:  ") + FIRMWARE_VERSION, SCREEN_W/2, 105);
+    lcd.drawString(String("Latest:   ") + info.latestVersion, SCREEN_W/2, 125);
+    fmd(); lcd.setTextColor(t.textPri);
+    lcd.drawString("Tap to install", SCREEN_W/2, 155);
+    lcd.setTextColor(t.textSec);
+    fsm(); lcd.drawString("(device will reboot)", SCREEN_W/2, 175);
+
+    // CANCEL / INSTALL buttons
+    int by = DPAD_Y;
+    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+    int ty = by + BTNBAR_H/2;
+    lcd.fillRoundRect(4, by+5, 148, 34, 8, t.rowOdd);
+    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Cancel", 80, ty);
+    lcd.fillRoundRect(156, by+5, 160, 34, 8, t.accent);
+    lcd.setTextColor(t.bg);
+    lcd.drawString("Install", 237, ty);
+
+    // Wait for user decision
+    uint32_t deadline = millis() + 30000;
+    while (millis() < deadline) {
+        if (!touch.isTouched()) { delay(20); continue; }
+        int tx, ty2;
+        touch.getXY(tx, ty2);
+        if (ty2 >= by) {
+            if (tx < 156) return;   // Cancel
+            // Install
+            break;
+        }
+        delay(20);
+    }
+    if (millis() >= deadline) return;   // timeout → cancel
+
+    // Show progress bar
+    lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
+    fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Downloading...", SCREEN_W/2, 90);
+    int barX = 20, barY = 120, barW = SCREEN_W - 40, barH = 18;
+    lcd.drawRoundRect(barX, barY, barW, barH, 4, t.accent);
+
+    auto progressCb = [](int pct) {
+        const Theme565 &t2 = getTheme();
+        int barX2 = 20, barY2 = 120, barW2 = SCREEN_W - 40, barH2 = 18;
+        int filled = (barW2 - 2) * pct / 100;
+        lcd.fillRoundRect(barX2+1, barY2+1, filled, barH2-2, 3, t2.accent);
+        char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+        lcd.fillRect(barX2, barY2 + barH2 + 4, barW2, 16, t2.bg);
+        fsm(); lcd.setTextDatum(MC_DATUM);
+        lcd.setTextColor(t2.textSec);
+        lcd.drawString(pctStr, SCREEN_W/2, barY2 + barH2 + 12);
+    };
+
+    otaDownloadAndFlash(info.downloadUrl.c_str(), progressCb);
+
+    // If we reach here, the flash failed (success reboots)
+    popupShow("Update", "Flash failed!", 5000);
 }
