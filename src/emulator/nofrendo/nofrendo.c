@@ -225,9 +225,17 @@ int nofrendo_main(int argc, char *argv[])
 int main_loop(const char *filename, system_t type)
 {
    vidinfo_t video;
+   int ret = 0;
 
-   /* register shutdown, in case of assertions, etc. */
-//   atexit(shutdown_everything);
+   /* Reset static console state from any previous session.
+   ** We call main_loop() directly (skipping nofrendo_main()), so the static
+   ** 'console' struct may still have quit=true or stale filenames from the
+   ** last run. Without this reset the while-loop below exits immediately. */
+   console.quit = false;
+   console.type = system_unknown;
+   console.nexttype = system_unknown;
+   if (console.filename)     { free(console.filename);     console.filename     = NULL; }
+   if (console.nextfilename) { free(console.nextfilename); console.nextfilename = NULL; }
 
    if (config.open())
       return -1;
@@ -237,15 +245,24 @@ int main_loop(const char *filename, system_t type)
    event_init();
 
    if (osd_init())
+   {
+      config.close();
       return -1;
+   }
 
    if (gui_init())
+   {
+      config.close();
       return -1;
+   }
 
    osd_getvideoinfo(&video);
    if (vid_init(video.default_width, video.default_height, video.driver))
+   {
+      gui_shutdown();
+      config.close();
       return -1;
-	printf("vid_init done\n");
+   }
 
    console.nextfilename = strdup(filename);
    console.nexttype = type;
@@ -253,10 +270,21 @@ int main_loop(const char *filename, system_t type)
    while (false == console.quit)
    {
       if (internal_insert(console.nextfilename, console.nexttype))
-         return 1;
+      {
+         ret = 1;
+         break;
+      }
    }
 
-   return 0;
+   /* Full teardown — must happen every time main_loop() exits so that
+   ** config/gui/vid subsystems are clean for the next call. Without this
+   ** config.open(), gui_init(), vid_init() crash on the second launch. */
+   vid_shutdown();
+   gui_shutdown();
+   log_shutdown();
+   config.close();
+
+   return ret;
 }
 
 /*
