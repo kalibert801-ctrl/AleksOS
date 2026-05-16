@@ -7,7 +7,7 @@
 void cfgLoad() {
     File f = SD.open(CFG_FILE);
     if (!f) return;
-    StaticJsonDocument<896> doc;
+    StaticJsonDocument<1024> doc;
     if (deserializeJson(doc, f)) { f.close(); return; }
     f.close();
 
@@ -27,24 +27,35 @@ void cfgLoad() {
     settings.timeH          = doc["timeh"]        | 12;
     settings.timeM          = doc["timem"]        | 0;
     settings.autoScroll     = doc["autoscroll"]   | 1;
+    settings.diagButtons    = doc["diagbtn"]      | 0;
+    settings.diagFPS        = doc["diagfps"]      | 0;
+    settings.diagEmu        = doc["diagemu"]      | 0;
+    settings.diagTouch      = doc["diagtch"]      | 0;
 
-    if (doc.containsKey("btnmap")) {
-        JsonArray arr = doc["btnmap"].as<JsonArray>();
-        for (int i = 0; i < BTN_MAP_COUNT && i < (int)arr.size(); i++) {
-            uint8_t v = arr[i];
-            if (v == 0x01 || v == 0x02 || v == 0x04 || v == 0x08 ||
-                v == 0x10 || v == 0x20 || v == 0x40 || v == 0x80 || v == 0x00) {
-                settings.btnMap[i] = v;
+    // Load btnMap only from configs saved by v13.4+ firmware (remap_ver >= 2).
+    // remap_ver absent   → very old config (before remap existed)  → skip
+    // remap_ver == 1     → v13.3 intermediate build, may have swapped map → skip
+    // remap_ver >= 2     → v13.4+, clean mapping saved → load it
+    if ((doc["remap_ver"] | 0) >= 2) {
+        if (doc.containsKey("btnmap")) {
+            JsonArray arr = doc["btnmap"].as<JsonArray>();
+            for (int i = 0; i < BTN_MAP_COUNT && i < (int)arr.size(); i++) {
+                uint8_t v = arr[i];
+                if (v == 0x01 || v == 0x02 || v == 0x04 || v == 0x08 ||
+                    v == 0x10 || v == 0x20 || v == 0x40 || v == 0x80 || v == 0x00) {
+                    settings.btnMap[i] = v;
+                }
             }
         }
     }
+    // else: old / intermediate config → keep identity default from settingsDefault()
 }
 
 void cfgSave() {
     SD.remove(CFG_FILE);
     File f = SD.open(CFG_FILE, FILE_WRITE);
     if (!f) return;
-    StaticJsonDocument<896> doc;
+    StaticJsonDocument<1024> doc;
 
     doc["brightness"] = settings.brightness;
     doc["volume"]     = settings.volume;
@@ -62,7 +73,12 @@ void cfgSave() {
     doc["timeh"]      = settings.timeH;
     doc["timem"]      = settings.timeM;
     doc["autoscroll"] = settings.autoScroll;
+    doc["diagbtn"]    = settings.diagButtons;
+    doc["diagfps"]    = settings.diagFPS;
+    doc["diagemu"]    = settings.diagEmu;
+    doc["diagtch"]    = settings.diagTouch;
 
+    doc["remap_ver"] = 2;   // v13.4+: clean identity-based remap, safe to load
     JsonArray arr = doc.createNestedArray("btnmap");
     for (int i = 0; i < BTN_MAP_COUNT; i++) arr.add(settings.btnMap[i]);
 

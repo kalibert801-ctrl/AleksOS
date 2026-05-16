@@ -31,6 +31,11 @@ typedef struct {
     unsigned char timeH;    // часы   0–23
     unsigned char timeM;    // минуты 0–59
     unsigned char autoScroll; // авто-прокрутка при удержании кнопки
+    // ── Диагностика (вывод в Serial) ────────────────────────
+    unsigned char diagButtons;  // нажатия кнопок
+    unsigned char diagFPS;      // FPS и память эмулятора
+    unsigned char diagEmu;      // запуск / выход эмулятора
+    unsigned char diagTouch;    // координаты тача
 } Settings;
 
 /* ── Цвета темы RGB565 ──────────────────────────────────────────── */
@@ -67,6 +72,10 @@ inline void settingsDefault(Settings &s) {
     s.timeH         = 12;
     s.timeM         = 0;
     s.autoScroll    = 1;
+    s.diagButtons   = 0;
+    s.diagFPS       = 0;
+    s.diagEmu       = 0;
+    s.diagTouch     = 0;
 }
 
 #endif /* __cplusplus */

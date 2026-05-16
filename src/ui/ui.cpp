@@ -460,7 +460,7 @@ void showRomInfo(int idx) {
 // ══════════════════════════════════════════════════════════════
 
 static const char *_catName[] = {
-    "Display", "Audio", "Appearance", "System", "Controls", "Info"
+    "Display", "Audio", "Appearance", "System", "Controls", "Info", "Debug"
 };
 
 static const int _catItems[][5] = {
@@ -470,8 +470,9 @@ static const int _catItems[][5] = {
     { 5, 6, 17, 18, 19 },  // System: FPS, AutoSave, Hour, Minute, AutoScroll
     { 12, 13, 15, 16, -1}, // Controls
     { 10, 11, -1, -1, -1}, // Info
+    { 20, 21, 22, 23, -1}, // Debug
 };
-#define CAT_COUNT 6
+#define CAT_COUNT 7
 
 static int _settingsCat  = -1;
 static int _catItemIdx   =  0;
@@ -515,7 +516,11 @@ static String settingValue(int gi) {
         case 16: return String(settings.vibroStrength)+"%";
         case 17: { char b[4]; snprintf(b,4,"%02d", timeGetH()); return String(b)+"h"; }
         case 18: { char b[4]; snprintf(b,4,"%02d", timeGetM()); return String(b)+"m"; }
-        case 19: return settings.autoScroll ? "On" : "Off";
+        case 19: return settings.autoScroll  ? "On" : "Off";
+        case 20: return settings.diagButtons ? "On" : "Off";
+        case 21: return settings.diagFPS     ? "On" : "Off";
+        case 22: return settings.diagEmu     ? "On" : "Off";
+        case 23: return settings.diagTouch   ? "On" : "Off";
     }
     return "";
 }
@@ -537,7 +542,11 @@ static void settingInc(int gi) {
         case 16: settings.vibroStrength=min(100,(int)settings.vibroStrength+10); break;
         case 17: timeSet((timeGetH()+1)%24, timeGetM()); break;
         case 18: timeSet(timeGetH(), (timeGetM()+1)%60); break;
-        case 19: settings.autoScroll = !settings.autoScroll; break;
+        case 19: settings.autoScroll  = !settings.autoScroll;  break;
+        case 20: settings.diagButtons = !settings.diagButtons; break;
+        case 21: settings.diagFPS     = !settings.diagFPS;     break;
+        case 22: settings.diagEmu     = !settings.diagEmu;     break;
+        case 23: settings.diagTouch   = !settings.diagTouch;   break;
     }
 }
 
@@ -558,7 +567,11 @@ static void settingDec(int gi) {
         case 16: settings.vibroStrength=(settings.vibroStrength<10)?10:settings.vibroStrength-10; break;
         case 17: timeSet((timeGetH()-1+24)%24, timeGetM()); break;
         case 18: timeSet(timeGetH(), (timeGetM()-1+60)%60); break;
-        case 19: settings.autoScroll = !settings.autoScroll; break;
+        case 19: settings.autoScroll  = !settings.autoScroll;  break;
+        case 20: settings.diagButtons = !settings.diagButtons; break;
+        case 21: settings.diagFPS     = !settings.diagFPS;     break;
+        case 22: settings.diagEmu     = !settings.diagEmu;     break;
+        case 23: settings.diagTouch   = !settings.diagTouch;   break;
     }
 }
 
@@ -570,6 +583,13 @@ static void drawCatIcon(int cat, int cx, int cy, uint16_t c) {
         case 3: iconSystem  (cx, cy, c); break;
         case 4: iconControls(cx, cy, c); break;
         case 5: iconInfo    (cx, cy, c); break;
+        case 6: // Debug — иконка терминала (окно с курсором)
+            lcd.fillRect(cx-9, cy-6, 18, 13, c);
+            lcd.fillRect(cx-8, cy-5, 16, 11, 0x1082);
+            lcd.drawLine(cx-6, cy-1, cx-3, cy+1, c);
+            lcd.drawLine(cx-6, cy+3, cx-3, cy+1, c);
+            lcd.drawFastHLine(cx-2, cy+1, 6, c);
+            break;
     }
 }
 
@@ -627,7 +647,7 @@ static void drawCategoryGrid() {
     lcd.drawFastHLine(8, HDR_H, SCREEN_W-16, (uint16_t)COL_GOLD);
 
     // ── Сетка тайлов ─────────────────────────────────────────
-    const int COLS = 3, ROWS = 2, PAD = 6;
+    const int COLS = 3, ROWS = (CAT_COUNT + COLS - 1) / COLS, PAD = 6;
     int cw = (SCREEN_W - PAD*(COLS+1)) / COLS;
     int ch = (DPAD_Y - HDR_H - 3 - PAD*(ROWS+1)) / ROWS;
 
@@ -1009,7 +1029,11 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
         case 15: case 16:   iconVibrate(cx,cy,c); break;
         case 17:            iconHour(cx,cy,c); break;
         case 18:            iconMinute(cx,cy,c); break;
-        case 19:            iconClock2(cx,cy,c); break;  // auto-scroll
+        case 19:            iconClock2(cx,cy,c); break;   // auto-scroll
+        case 20:            iconGamepad(cx,cy,c); break; // diagButtons
+        case 21:            iconClock2(cx,cy,c); break;  // diagFPS
+        case 22:            iconChip(cx,cy,c); break;    // diagEmu
+        case 23:            iconLook(cx,cy,c); break;    // diagTouch
         default:            iconInfo(cx,cy,c); break;
     }
 }
@@ -1024,6 +1048,11 @@ static const char* getLabelForGi(int gi) {
         case 16: return "Vibro Strength";
         case 17: return "Hour";
         case 18: return "Minute";
+        case 19: return "Auto Scroll";
+        case 20: return "Buttons Log";
+        case 21: return "FPS Log";
+        case 22: return "Emu Log";
+        case 23: return "Touch Log";
     }
     return "";
 }
@@ -1108,7 +1137,7 @@ static uint8_t handleCategoryGrid(int x, int y) {
     }
     if (y < HDR_H) return 0;
 
-    const int COLS = 3, ROWS = 2, PAD = 6;
+    const int COLS = 3, ROWS = (CAT_COUNT + COLS - 1) / COLS, PAD = 6;
     int cw = (SCREEN_W - PAD*(COLS+1)) / COLS;
     int ch = (DPAD_Y - HDR_H - 3 - PAD*(ROWS+1)) / ROWS;
 

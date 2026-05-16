@@ -164,10 +164,12 @@ static void blit_print_stats(void) {
     uint32_t now     = millis();
     uint32_t elapsed = now - _lastMs;
     if (elapsed >= 3000) {
-        float fps      = _frameCount * 1000.0f / elapsed;
-        uint32_t heap  = ESP.getFreeHeap()  / 1024;
-        uint32_t psram = ESP.getFreePsram() / 1024;
-        printf("[EMU] FPS=%.1f  heap=%u KB  psram=%u KB\n", fps, heap, psram);
+        if (settings.diagFPS) {
+            float fps      = _frameCount * 1000.0f / elapsed;
+            uint32_t heap  = ESP.getFreeHeap()  / 1024;
+            uint32_t psram = ESP.getFreePsram() / 1024;
+            printf("[EMU] FPS=%.1f  heap=%u KB  psram=%u KB\n", fps, heap, psram);
+        }
         _frameCount = 0;
         _lastMs     = now;
     }
@@ -234,23 +236,33 @@ extern "C" int osd_installtimer(int frequency, void *func, int funcsize,
 }
 
 // ─── input ─────────────────────────────────────────────────────────────────
-// Bit layout of _pad matches NES pad exactly (same as BTN_* / INP_PAD_* bitmasks)
+//
+// Физическая разводка Pico → биты пакета (подтверждено диагностикой):
+//   бит 0 = START  (BTN_A   = 0x01)
+//   бит 1 = SELECT (BTN_B   = 0x02)
+//   бит 2 = A      (BTN_SEL = 0x04)
+//   бит 3 = B      (BTN_STA = 0x08)
+//   бит 4 = UP  / бит 5 = DOWN / бит 6 = LEFT / бит 7 = RIGHT
+//
+// Комбо выхода: SELECT + START (биты 0+1) удерживать 3 секунды.
+//
 extern "C" void osd_getinput(void) {
-    // Poll Pico controller over Serial2 — loop() is blocked in emu_run(),
-    // so we must call buttons.update() here every frame.
+    // Опрашиваем Pico по Serial2 каждый кадр (loop() заблокирован в emu_run).
     buttons.update();
-    _pad = buttons.readCurrent();
 
-    // ── Exit combo: hold SELECT + START for ~120 frames (~2 seconds) ──────────
-    // Skip the first 90 frames after start to ignore Pico init noise.
+    // Применяем таблицу ремапа: физический бит i → settings.btnMap[i]
+    uint8_t pad = buttons.applyBtnMap(buttons.readCurrent());
+
+    // ── Комбо выхода: SELECT + START удерживаются ~3 секунды (180 кадров) ──────
+    // Физические SELECT (бит 1 = BTN_B) + START (бит 0 = BTN_A).
+    // Первые 90 кадров игнорируем — Pico ещё инициализируется.
     static int frameCount = 0;
     static int exitFrames = 0;
     frameCount++;
-    if (frameCount > 90 && (_pad & (BTN_SEL | BTN_STA)) == (BTN_SEL | BTN_STA)) {
-        if (++exitFrames >= 120) {
+    if (frameCount > 90 && (pad & (BTN_A | BTN_B)) == (BTN_A | BTN_B)) {
+        if (++exitFrames >= 180) {
             exitFrames = 0;
             frameCount = 0;
-            // Fire the quit event — causes nes_emulate() to exit cleanly
             event_t h = event_get(event_quit);
             if (h) h(0);
             return;
@@ -259,27 +271,53 @@ extern "C" void osd_getinput(void) {
         exitFrames = 0;
     }
 
-    static uint8_t prev = 0;
-    uint8_t cur     = _pad;
-    uint8_t changed = cur ^ prev;
-    prev = cur;
-
+    // ── Передаём изменения состояния кнопок в nofrendo ───────────────────────
+    //
+    // АППАРАТНАЯ РАЗВОДКА контроллера (подтверждена диагностикой):
+    //   бит 0 (физ. STA / кнопка START)  → NES START
+    //   бит 1 (физ. SEL / кнопка SELECT) → NES SELECT
+    //   бит 2 (физ. A)                   → NES A
+    //   бит 3 (физ. B)                   → NES B
+    //
     static const int ev[8] = {
-        event_joypad1_a,
-        event_joypad1_b,
-        event_joypad1_select,
-        event_joypad1_start,
-        event_joypad1_up,
-        event_joypad1_down,
-        event_joypad1_left,
-        event_joypad1_right,
+        event_joypad1_start,   // бит 0  физ. START  → NES START
+        event_joypad1_select,  // бит 1  физ. SELECT → NES SELECT
+        event_joypad1_a,       // бит 2  физ. A      → NES A
+        event_joypad1_b,       // бит 3  физ. B      → NES B
+        event_joypad1_up,      // бит 4  UP
+        event_joypad1_down,    // бит 5  DOWN
+        event_joypad1_left,    // бит 6  LEFT
+        event_joypad1_right,   // бит 7  RIGHT
     };
+
+    static uint8_t prev = 0;
+    uint8_t changed = pad ^ prev;
+    prev = pad;
+
+    // Диагностика нажатий в эмуляторе
+    if (settings.diagButtons && changed) {
+        uint8_t raw = buttons.readCurrent();
+        printf("[EMU] raw=0x%02X map=0x%02X |", raw, pad);
+        if (pad & 0x01) printf(" STA");
+        if (pad & 0x02) printf(" SEL");
+        if (pad & 0x04) printf(" A");
+        if (pad & 0x08) printf(" B");
+        if (pad & 0x10) printf(" UP");
+        if (pad & 0x20) printf(" DOWN");
+        if (pad & 0x40) printf(" LEFT");
+        if (pad & 0x80) printf(" RIGHT");
+        if (pad == 0)   printf(" (release)");
+        printf("\n");
+    }
 
     for (int i = 0; i < 8; i++) {
         if (!(changed & (1 << i))) continue;
         event_t h = event_get(ev[i]);
-        if (h) h((cur & (1 << i)) ? INP_STATE_MAKE : INP_STATE_BREAK);
+        if (h) h((pad & (1 << i)) ? INP_STATE_MAKE : INP_STATE_BREAK);
     }
+
+    // Синхронизируем глобальный _pad (используется emu_setController извне)
+    _pad = pad;
 }
 
 extern "C" void osd_getmouse(int *x, int *y, int *button) {}

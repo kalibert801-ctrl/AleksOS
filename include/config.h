@@ -2,7 +2,7 @@
 // ── Версионирование ───────────────────────────────────────
 // Правило: minor изменения = вторая цифра +1 (v8.4→v8.5)
 //          major изменения = первая цифра +1, вторая = 0 (v8.x→v9.0)
-#define FIRMWARE_VERSION "AleksOS BETA v13.2"
+#define FIRMWARE_VERSION "AleksOS BETA v13.8"
 
 // ── Дисплей (VSPI) ────────────────────────────────────────
 #define TFT_CS   15
@@ -57,7 +57,7 @@
 #define PICO_CMD_PING    0x01  // data=0  → Pico отвечает PONG (0x50)
 #define PICO_CMD_LED     0x10  // data=RGB565 ниблы (будущее)
 #define PICO_CMD_HAPTIC  0x20  // data=длительность×10мс (будущее)
-#define PICO_BTN_PKT     0x42  // Pico→ESP32: байт состояния кнопок
+#define PICO_BTN_PKT     0x42  // Pico→ESP32: байт состояния кнопо к
 
 // ── Индексы физических кнопок в btnMap[] ─────────────────
 // Порядок соответствует битам в протоколе Pico (бит i = 1<<i)

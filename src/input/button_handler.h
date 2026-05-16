@@ -33,6 +33,11 @@ public:
     uint8_t read();
     uint8_t readNew();
     uint8_t readCurrent() const { return _state; }  // текущее состояние (для авто-прокрутки)
+
+    // Применяет таблицу переназначения кнопок (settings.btnMap) к произвольному
+    // байту физического состояния. Бит i физ. кнопки → settings.btnMap[i].
+    // Используется везде кроме экрана ремапа (там нужны сырые физ. кнопки).
+    uint8_t applyBtnMap(uint8_t raw) const;
     bool    isConnected() const;
     void    sendCmd(uint8_t cmd, uint8_t data);
     void    sendCmd2(uint8_t cmd, uint8_t d1, uint8_t d2);

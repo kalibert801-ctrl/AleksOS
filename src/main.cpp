@@ -65,6 +65,13 @@ void setup() {
     if (sdOk) {
         bootProgress(40, "Loading config...");
         cfgLoad();
+        // Диагностика: печатаем что загрузилось из конфига
+        Serial.printf("[CFG] btnMap: A=%02X B=%02X SEL=%02X STA=%02X UP=%02X DN=%02X LT=%02X RT=%02X\n",
+            settings.btnMap[0], settings.btnMap[1], settings.btnMap[2], settings.btnMap[3],
+            settings.btnMap[4], settings.btnMap[5], settings.btnMap[6], settings.btnMap[7]);
+        Serial.printf("[CFG] identity=%s  (A=01 B=02 SEL=04 STA=08 UP=10 DN=20 LT=40 RT=80)\n",
+            (settings.btnMap[0]==0x01 && settings.btnMap[1]==0x02 &&
+             settings.btnMap[2]==0x04 && settings.btnMap[3]==0x08) ? "YES" : "NO ← MISMATCH!");
         setBrightness(settings.brightness);
         ledSet(LED_GREEN);
 
@@ -110,10 +117,27 @@ void loop() {
     updateAutoBrightness();
     buttons.update();
 
-    uint8_t btnNew = buttons.readNew();
+    // btnPhys  — сырые физические кнопки (для экрана ремапа, где нужен физ. ввод)
+    // btnNew   — кнопки после применения таблицы переназначения (для всего остального)
+    uint8_t btnPhys = buttons.readNew();
+    uint8_t btnNew  = buttons.applyBtnMap(btnPhys);
+    // Диагностика нажатий в оболочке
+    if (settings.diagButtons && btnPhys) {
+        Serial.printf("[SHELL] phys=0x%02X mapped=0x%02X |", btnPhys, btnNew);
+        if (btnNew & BTN_A)     Serial.print(" STA");
+        if (btnNew & BTN_B)     Serial.print(" SEL");
+        if (btnNew & BTN_SEL)   Serial.print(" A");
+        if (btnNew & BTN_STA)   Serial.print(" B");
+        if (btnNew & BTN_UP)    Serial.print(" UP");
+        if (btnNew & BTN_DOWN)  Serial.print(" DOWN");
+        if (btnNew & BTN_LEFT)  Serial.print(" LEFT");
+        if (btnNew & BTN_RIGHT) Serial.print(" RIGHT");
+        Serial.println();
+    }
     int x = 0, y = 0;
     bool tapped = touch.isTouched();
     if (tapped) touch.getXY(x, y);
+    if (settings.diagTouch && tapped) Serial.printf("[TOUCH] x=%d y=%d\n", x, y);
 
     switch (state) {
 
@@ -127,7 +151,7 @@ void loop() {
             static uint32_t lastStep    = 0;
             static bool     autoActive  = false;
 
-            uint8_t cur = buttons.readCurrent();  // текущее состояние кнопок
+            uint8_t cur = buttons.applyBtnMap(buttons.readCurrent());  // текущее состояние с учётом ремапа
 
             if (btnNew & BTN_UP)   { holdDir = BTN_UP;   holdStart = millis(); autoActive = false; }
             if (btnNew & BTN_DOWN) { holdDir = BTN_DOWN; holdStart = millis(); autoActive = false; }
@@ -207,9 +231,11 @@ void loop() {
     }
 
     case S_REMAP: {
-        if (btnNew) {
-            uint8_t r = btnMapNavBtn(btnNew);
-            if (r & BTN_B) { soundBack(); buttons.vibrate1(50); btnMapApply(); cfgSave(); toSettings(); break; }
+        // Экран ремапа: используем ФИЗИЧЕСКИЕ кнопки (btnPhys), иначе
+        // пользователь не сможет управлять экраном если переназначил кнопки.
+        if (btnPhys) {
+            uint8_t r = btnMapNavBtn(btnPhys);
+            if (r & BTN_B) { soundBack(); buttons.vibrate1(50); cfgSave(); toSettings(); break; }
             soundClick(); break;
         }
         if (!tapped) break;
@@ -252,9 +278,10 @@ static void runEmulator(int idx) {
     const ROMInfo &rom = sdMgr.get(idx);
     const char *path   = rom.path.c_str();
 
-    Serial.printf("[UI]  Starting '%s' %uKB  heap=%uKB\n",
-                  path, (unsigned)(rom.size/1024),
-                  (unsigned)(ESP.getFreeHeap()/1024));
+    if (settings.diagEmu)
+        Serial.printf("[UI]  Starting '%s' %uKB  heap=%uKB\n",
+                      path, (unsigned)(rom.size/1024),
+                      (unsigned)(ESP.getFreeHeap()/1024));
 
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
@@ -283,10 +310,11 @@ static void runEmulator(int idx) {
                    SCREEN_W/2, 207);
     delay(400);
 
-    Serial.printf("[SYS] Starting nofrendo NES emulator\n");
+    if (settings.diagEmu) Serial.printf("[SYS] Starting nofrendo NES emulator\n");
     int result = emu_run(path);
-    Serial.printf("[SYS] Emulator exited: result=%d  heap=%uKB\n",
-                  result, (unsigned)(ESP.getFreeHeap()/1024));
+    if (settings.diagEmu)
+        Serial.printf("[SYS] Emulator exited: result=%d  heap=%uKB\n",
+                      result, (unsigned)(ESP.getFreeHeap()/1024));
 
     initDisplay();
     touch.init();

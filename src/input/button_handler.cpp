@@ -38,6 +38,20 @@ void ButtonHandler::_handlePacket() {
     switch (type) {
         case PICO_BTN_PKT:               // 0x42 — кнопки
             if (chk == (uint8_t)(~data)) {
+                if (data != _state && settings.diagButtons) {
+                    // Диагностика: печатаем когда состояние кнопок меняется
+                    Serial.printf("[PICO] raw=0x%02X ->", data);
+                    if (data & 0x01) Serial.print(" STA");
+                    if (data & 0x02) Serial.print(" SEL");
+                    if (data & 0x04) Serial.print(" A");
+                    if (data & 0x08) Serial.print(" B");
+                    if (data & 0x10) Serial.print(" UP");
+                    if (data & 0x20) Serial.print(" DOWN");
+                    if (data & 0x40) Serial.print(" LEFT");
+                    if (data & 0x80) Serial.print(" RIGHT");
+                    if (data == 0)   Serial.print(" (release)");
+                    Serial.println();
+                }
                 _state   = data;
                 _lastPkt = millis();
             }
@@ -63,6 +77,15 @@ uint8_t ButtonHandler::readNew() {
     uint8_t newly = _state & ~_prev;
     _prev = _state;
     return newly;
+}
+
+uint8_t ButtonHandler::applyBtnMap(uint8_t raw) const {
+    // Каждый физический бит i заменяется на settings.btnMap[i].
+    // settings.btnMap[i] == 0x00 означает «кнопка отключена».
+    uint8_t out = 0;
+    for (int i = 0; i < 8; i++)
+        if (raw & (1 << i)) out |= settings.btnMap[i];
+    return out;
 }
 
 bool ButtonHandler::isConnected() const {
