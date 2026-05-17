@@ -230,13 +230,16 @@ bool picoOtaUpdate(const char *binUrl, void (*progressCb)(int pct)) {
     http.end();
 
     // ── Крок 5: чекаємо сигнал "done" від Pico ──────────────────────────────
-    Serial2.setTimeout(5000);
-    uint8_t done[4];
+    // Фаза 2 (запис flash): ~4-6 секунд для 96KB прошивки
+    // Таймаут 15с — з великим запасом
+    Serial2.setTimeout(15000);
+    uint8_t done[4] = {0, 0, 0, 0};
     if (Serial2.readBytes(done, 4) == 4 &&
         done[0] == 0xAA && done[1] == 0xF4) {
-        Serial.println("[PICOTA] Done! Pico is rebooting...");
+        Serial.println("[PICOTA] Done! Pico firmware written, rebooting...");
     } else {
-        Serial.println("[PICOTA] Done (no done-pkt, firmware written anyway)");
+        Serial.printf("[PICOTA] No done signal (got %02X %02X) — firmware may still be written\n",
+                      done[0], done[1]);
     }
 
     // Чекаємо перезавантаження Pico і очищуємо буфер
