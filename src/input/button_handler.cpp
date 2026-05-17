@@ -118,3 +118,15 @@ void ButtonHandler::vibrate2(uint16_t duration_ms) {
     if (dur == 0) dur = 1;
     sendCmd(PICO_CMD_HAPTIC2, dur);
 }
+
+void ButtonHandler::vibrateBoth(uint16_t duration_ms) {
+    if (!isConnected() || !settings.vibroEnabled) return;
+    uint8_t dur = (uint8_t)min((int)(duration_ms / 10), 255);
+    if (dur == 0) dur = 1;
+    sendCmd(PICO_CMD_HAPTIC_B, dur);  // 0x22 — оба мотора одновременно
+}
+
+void ButtonHandler::picoHapticEnable(bool en) {
+    if (!isConnected()) return;
+    sendCmd(PICO_CMD_HAPTIC_EN, en ? 1 : 0);  // 0x23
+}

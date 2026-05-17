@@ -144,6 +144,8 @@ void setup() {
 
     bootProgress(98, "Reading Pico fw...");
     settingsPrefetchPicoVer();
+    // Синхронизация настройки виброотклика кнопок с Pico
+    buttons.picoHapticEnable(settings.vibroEnabled);
 
     // ── Время (читает settings.timeH/timeM после cfgLoad) ─────
     timeInit();
@@ -192,7 +194,10 @@ void loop() {
     }
     int x = 0, y = 0;
     bool tapped = touch.isTouched();
-    if (tapped) touch.getXY(x, y);
+    if (tapped) {
+        touch.getXY(x, y);
+        buttons.vibrateBoth(30);  // тач — оба мотора 30мс
+    }
     if (settings.diagTouch && tapped) Serial.printf("[TOUCH] x=%d y=%d\n", x, y);
 
     switch (state) {

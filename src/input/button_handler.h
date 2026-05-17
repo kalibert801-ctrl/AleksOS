@@ -24,8 +24,10 @@
 // ═══════════════════════════════════════════════════════════════════
 
 // Команды вибро
-#define PICO_CMD_HAPTIC1  0x20
-#define PICO_CMD_HAPTIC2  0x21
+#define PICO_CMD_HAPTIC1   0x20   // мотор 1
+#define PICO_CMD_HAPTIC2   0x21   // мотор 2
+#define PICO_CMD_HAPTIC_B  0x22   // оба мотора одновременно (тач, UI)
+#define PICO_CMD_HAPTIC_EN 0x23   // data=0/1 — вкл/выкл авто-вибро от кнопок на Pico
 
 class ButtonHandler {
 public:
@@ -44,8 +46,11 @@ public:
     void    update();
 
     // Вибро-отклик: duration_ms — длительность в мс (макс 2550)
-    void vibrate1(uint16_t duration_ms);   // мотор 1 — UI / кнопки
-    void vibrate2(uint16_t duration_ms);   // мотор 2 — игровые события
+    void vibrate1(uint16_t duration_ms);        // мотор 1
+    void vibrate2(uint16_t duration_ms);        // мотор 2
+    void vibrateBoth(uint16_t duration_ms);     // оба мотора (тач, события)
+    // Включить/выключить авто-вибро от кнопок на стороне Pico (по умолчанию вкл)
+    void picoHapticEnable(bool en);
 
 private:
     uint8_t  _state  = 0;

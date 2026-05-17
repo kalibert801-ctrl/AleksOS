@@ -594,7 +594,8 @@ static void settingInc(int gi) {
         case 8: settings.soundEnabled=!settings.soundEnabled; break;
         case 9: settings.soundType=(SoundType)(((int)settings.soundType+1)%SND_COUNT); break;
         case 14: settings.emuVolume=min(100,(int)settings.emuVolume+10); break;
-        case 15: settings.vibroEnabled=!settings.vibroEnabled; break;
+        case 15: settings.vibroEnabled=!settings.vibroEnabled;
+                 buttons.picoHapticEnable(settings.vibroEnabled); break;
         case 16: settings.vibroStrength=min(100,(int)settings.vibroStrength+10); break;
         case 17: timeSet((timeGetH()+1)%24, timeGetM()); break;
         case 18: timeSet(timeGetH(), (timeGetM()+1)%60); break;
@@ -619,7 +620,8 @@ static void settingDec(int gi) {
         case 8: settings.soundEnabled=!settings.soundEnabled; break;
         case 9: settings.soundType=(SoundType)(((int)settings.soundType-1+SND_COUNT)%SND_COUNT); break;
         case 14: settings.emuVolume=(settings.emuVolume<10)?0:settings.emuVolume-10; break;
-        case 15: settings.vibroEnabled=!settings.vibroEnabled; break;
+        case 15: settings.vibroEnabled=!settings.vibroEnabled;
+                 buttons.picoHapticEnable(settings.vibroEnabled); break;
         case 16: settings.vibroStrength=(settings.vibroStrength<10)?10:settings.vibroStrength-10; break;
         case 17: timeSet((timeGetH()-1+24)%24, timeGetM()); break;
         case 18: timeSet(timeGetH(), (timeGetM()-1+60)%60); break;
