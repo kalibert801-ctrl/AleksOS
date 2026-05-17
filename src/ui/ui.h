@@ -33,6 +33,9 @@ void    btnMapDraw();
 uint8_t btnMapHandleTouch(int x, int y);
 void    btnMapApply();
 
+// Запросить версию Pico при старте ESP32 (вызывать после buttons.init())
+void settingsPrefetchPicoVer();
+
 // ── Навигация с кнопок Pico ───────────────────────────────
 uint8_t settingsNavBtn(uint8_t btn);
 uint8_t btnMapNavBtn(uint8_t btn);
@@ -52,10 +55,12 @@ uint8_t wifiKeyboardNavBtn(uint8_t btn);
 // Получить введённый пароль (заполняется при BTN_A).
 const char *wifiKeyboardGetPassword();
 
-// ── Экран OTA-обновления ───────────────────────────────────
-// Показывает статус проверки / прогресс прошивки.
-// Вызывается из main.cpp после получения сигнала 0xA0.
+// ── Экран OTA-обновления ESP32 ────────────────────────────
 void otaScreen();
+
+// ── Экран OTA-обновления Pico ─────────────────────────────
+// picoUrl — прямая ссылка на pico_firmware.bin (info.picoUrl из otaCheckUpdate).
+void picoOtaScreen(const char *picoUrl);
 
 // ── Всплывающее окно ──────────────────────────────────────
 // Показывает popup с заголовком title и строкой msg.
@@ -70,6 +75,3 @@ bool wifiManagerSelectedEncrypted();
 // Сбросить буфер клавиатуры (вызвать перед открытием).
 void wifiKeyboardReset();
 
-// ── OTA screen ────────────────────────────────────────────
-// Показывает экран проверки / установки обновления.
-void otaScreen();

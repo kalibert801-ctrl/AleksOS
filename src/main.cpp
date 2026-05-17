@@ -17,6 +17,7 @@
 #include "network/wifi_manager.h"
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
+#include "network/pico_ota.h"
 
 Settings settings;
 
@@ -140,6 +141,9 @@ void setup() {
 
     bootProgress(97, "Init buttons...");
     buttons.init();
+
+    bootProgress(98, "Reading Pico fw...");
+    settingsPrefetchPicoVer();
 
     // ── Время (читает settings.timeH/timeM после cfgLoad) ─────
     timeInit();

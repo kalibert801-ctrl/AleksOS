@@ -4,9 +4,11 @@
 #include <Arduino.h>
 
 struct OTAInfo {
-    String latestVersion;   // tag_name from GitHub, e.g. "v14.1"
-    String downloadUrl;     // direct URL to firmware.bin asset
-    bool   available;       // true if latestVersion != FIRMWARE_VERSION
+    String latestVersion;   // tag_name from GitHub, e.g. "v14.5"
+    String downloadUrl;     // direct URL to firmware.bin  (ESP32)
+    String picoUrl;         // direct URL to pico_firmware.bin — пустой если файла нет в релизе
+    bool   available;       // true если ESP32 нужно обновить
+    bool   picoAvailable;   // true если pico_firmware.bin есть в этом релизе
 };
 
 // Query GitHub releases API for the latest version.

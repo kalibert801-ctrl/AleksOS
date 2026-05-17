@@ -58,26 +58,32 @@ bool otaCheckUpdate(OTAInfo &out) {
         return false;
     }
 
-    out.latestVersion = doc["tag_name"].as<String>();
-    Serial.printf("[OTA] Latest version: %s  Current: %s\n",
+    out.latestVersion  = doc["tag_name"].as<String>();
+    out.picoUrl        = "";
+    out.picoAvailable  = false;
+    Serial.printf("[OTA] Latest release: %s  Current ESP32: %s\n",
                   out.latestVersion.c_str(), FIRMWARE_VERSION);
 
-    // Find the firmware.bin asset
+    // Ищем оба файла в списке ассетов релиза
     JsonArray assets = doc["assets"].as<JsonArray>();
     for (JsonObject asset : assets) {
         String name = asset["name"].as<String>();
-        if (name == "firmware.bin") {
-            out.downloadUrl = asset["browser_download_url"].as<String>();
-            break;
-        }
+        String url  = asset["browser_download_url"].as<String>();
+        if (name == "firmware.bin")      out.downloadUrl = url;
+        if (name == "pico_firmware.bin") { out.picoUrl = url; out.picoAvailable = true; }
     }
+
+    // Fallback для ESP32 если API не вернул URL (редко, но на всякий случай)
     if (out.downloadUrl.isEmpty()) {
-        // Fall back to direct URL pattern
         out.downloadUrl = String("https://github.com/") + GH_OWNER + "/" + GH_REPO +
                           "/releases/download/" + out.latestVersion + "/firmware.bin";
     }
 
     out.available = isNewerVersion(out.latestVersion);
+
+    Serial.printf("[OTA] ESP32 update: %s  Pico firmware in release: %s\n",
+                  out.available ? "YES" : "no",
+                  out.picoAvailable ? "YES" : "no");
     return true;
 }
 

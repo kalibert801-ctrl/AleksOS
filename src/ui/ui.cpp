@@ -3,6 +3,7 @@
 #include "network/wifi_manager.h"
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
+#include "network/pico_ota.h"
 
 // ── Forward declarations для иконок (используются до определения) ─────────
 static void iconTag(int cx,int cy,uint16_t c);
@@ -477,13 +478,48 @@ static const int _catItems[][8] = {
     { 1, 14, 8, 9, -1, -1, -1, -1 },           // Audio
     { 2, 3, -1, -1, -1, -1, -1, -1 },          // Appearance
     { 5, 6, 17, 18, 19, 24, 25, 26 },          // System
-    { 12, 13, 15, 16, -1, -1, -1, -1 },        // Controls
+    { 12, 13, 15, 16, 28, -1, -1, -1 },        // Controls  (gi=28 = Pico version)
     { 10, 11, -1, -1, -1, -1, -1, -1 },        // Info
     { 20, 21, 22, 23, -1, -1, -1, -1 },        // Debug (virtual sub-screen)
 };
 #define CAT_COUNT 6  // в сетке видны только 0..5; cat=6 — виртуальная
 
 static int _prevCat = -1;   // для возврата из Debug sub-экрана в System
+
+// ── Кеш версії Pico (запит по UART, оновлюється раз на 60с) ─────────────────
+// -2 = ещё не запрашивали, -1 = Pico не ответил, >0 = MAJOR*100+MINOR
+static int      _cachedPicoVer   = -2;
+static uint32_t _picoVerCacheMs  = 0;
+
+static int getCachedPicoVer() {
+    // Если кеш свежий (< 60с) — возвращаем без запроса
+    uint32_t now = millis();
+    if (_cachedPicoVer != -2 && now - _picoVerCacheMs < 60000UL)
+        return _cachedPicoVer;
+    // Запрашиваем у Pico
+    _cachedPicoVer  = picoOtaGetVersion();
+    _picoVerCacheMs = millis();
+    return _cachedPicoVer;
+}
+
+static String picoVerStr() {
+    int v = getCachedPicoVer();
+    if (v <= 0) return "N/A";
+    char buf[12];
+    snprintf(buf, sizeof(buf), "v%d.%d", v / 100, v % 100);
+    return String(buf);
+}
+
+// ── Публичная функция: вызвать из setup() после buttons.init() ───────────────
+// Запрашивает версию Pico и кешует её — потом Settings и Info открываются мгновенно.
+void settingsPrefetchPicoVer() {
+    _cachedPicoVer  = picoOtaGetVersion();
+    _picoVerCacheMs = millis();
+    if (_cachedPicoVer > 0)
+        Serial.printf("[UI] Pico fw: v%d.%d\n", _cachedPicoVer/100, _cachedPicoVer%100);
+    else
+        Serial.println("[UI] Pico fw: N/A (not connected or old fw)");
+}
 
 static int _settingsCat    = -1;
 static int _catItemIdx     =  0;
@@ -538,8 +574,9 @@ static String settingValue(int gi) {
             if (wifiMgr.isConnected()) return wifiMgr.getSSID();
             return settings.wifiSSID[0] ? settings.wifiSSID : "Tap >";
         }
-        case 25: return "Edit >";   // Debug sub-screen
-        case 26: return "Check >";  // OTA update
+        case 25: return "Edit >";      // Debug sub-screen
+        case 26: return "Check >";     // OTA update
+        case 28: return picoVerStr();  // Pico firmware version (read-only)
     }
     return "";
 }
@@ -721,7 +758,9 @@ static void buildInfoRows() {
 
     // ── Прошивка ──────────────────────────────────────────────
     d("FIRMWARE");
-    r("Version:",      FIRMWARE_VERSION,                   0x4EF0);
+    r("ESP32:",        FIRMWARE_VERSION,                   0x4EF0);
+    r("Pico Controller:", picoVerStr(),
+      getCachedPicoVer() > 0 ? (uint16_t)0x4EF0 : (uint16_t)0xFD20);
     r("Build Date:",   String(__DATE__) + " " + __TIME__);
 
     // ── Процессор ─────────────────────────────────────────────
@@ -1078,6 +1117,7 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
             lcd.drawFastHLine(cx-2, cy+1, 6, c);
             break;
         case 26:            iconDownload(cx,cy,c); break; // OTA
+        case 28:            iconChip(cx,cy,c); break;    // Pico version (read-only)
         default:            iconInfo(cx,cy,c); break;
     }
 }
@@ -1100,6 +1140,7 @@ static const char* getLabelForGi(int gi) {
         case 24: return "WiFi";
         case 25: return "Debug";
         case 26: return "Check Update";
+        case 28: return "Pico Controller";
     }
     return "";
 }
@@ -1970,23 +2011,56 @@ void otaScreen() {
 
     if (!info.available) {
         fmd(); lcd.setTextColor(t.ok); lcd.setTextDatum(MC_DATUM);
-        lcd.drawString("Up to date!", SCREEN_W/2, 100);
+        lcd.drawString("ESP32 up to date!", SCREEN_W/2, 90);
         fsm(); lcd.setTextColor(t.textSec);
-        lcd.drawString(FIRMWARE_VERSION, SCREEN_W/2, 125);
-        popupShow("Update", "You have the latest version.", 4000);
+        lcd.drawString(FIRMWARE_VERSION, SCREEN_W/2, 112);
+
+        if (info.picoAvailable) {
+            // В этом релизе есть pico_firmware.bin — предлагаем обновить Pico
+            fmd(); lcd.setTextColor(t.textPri);
+            lcd.drawString("Pico firmware available!", SCREEN_W/2, 145);
+            fsm(); lcd.setTextColor(t.textSec);
+            lcd.drawString("Update Pico controller?", SCREEN_W/2, 163);
+
+            int by2 = DPAD_Y;
+            lcd.fillRect(0, by2, SCREEN_W, BTNBAR_H, t.header);
+            lcd.drawFastHLine(0, by2, SCREEN_W, (uint16_t)COL_TOPBAR);
+            lcd.fillRoundRect(4, by2+5, 148, 34, 8, t.rowOdd);
+            fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+            lcd.drawString("Skip", 80, by2 + BTNBAR_H/2);
+            lcd.fillRoundRect(156, by2+5, 160, 34, 8, t.accent);
+            lcd.setTextColor(t.bg);
+            lcd.drawString("Update Pico", 237, by2 + BTNBAR_H/2);
+
+            uint32_t dl2 = millis() + 15000;
+            while (millis() < dl2) {
+                if (!touch.isTouched()) { delay(20); continue; }
+                int tx2, ty2; touch.getXY(tx2, ty2);
+                if (ty2 >= by2) {
+                    if (tx2 >= 156) picoOtaScreen(info.picoUrl.c_str());
+                    break;
+                }
+                delay(20);
+            }
+        } else {
+            // pico_firmware.bin не загружен в этот релиз — просто показываем статус
+            fsm(); lcd.setTextColor(t.textSec);
+            lcd.drawString("No Pico firmware in this release.", SCREEN_W/2, 148);
+            popupShow("Update", "Everything is up to date!", 3000);
+        }
         return;
     }
 
     // Update available!
     fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("Update available!", SCREEN_W/2, 80);
+    lcd.drawString("ESP32 update available!", SCREEN_W/2, 75);
     fsm(); lcd.setTextColor(t.textSec);
-    lcd.drawString(String("Current:  ") + FIRMWARE_VERSION, SCREEN_W/2, 105);
-    lcd.drawString(String("Latest:   ") + info.latestVersion, SCREEN_W/2, 125);
+    lcd.drawString(String("Current: ") + FIRMWARE_VERSION, SCREEN_W/2, 98);
+    lcd.drawString(String("Latest:  ") + info.latestVersion, SCREEN_W/2, 114);
     fmd(); lcd.setTextColor(t.textPri);
-    lcd.drawString("Tap to install", SCREEN_W/2, 155);
+    lcd.drawString("Install ESP32 firmware?", SCREEN_W/2, 148);
     lcd.setTextColor(t.textSec);
-    fsm(); lcd.drawString("(device will reboot)", SCREEN_W/2, 175);
+    fsm(); lcd.drawString("(ESP32 will reboot after)", SCREEN_W/2, 168);
 
     // CANCEL / INSTALL buttons
     int by = DPAD_Y;
@@ -2038,4 +2112,110 @@ void otaScreen() {
 
     // If we reach here, the flash failed (success reboots)
     popupShow("Update", "Flash failed!", 5000);
+}
+
+// ── Pico OTA screen ───────────────────────────────────────────────────────────
+// Прошивает Pico из pico_firmware.bin в GitHub релизе (picoUrl).
+// Версии ESP32 и Pico независимы — сравнивать их между собой не нужно.
+// Единственный сигнал "есть обновление для Pico" = наличие pico_firmware.bin
+// в данном релизе (проверяется в otaCheckUpdate → info.picoAvailable).
+void picoOtaScreen(const char *picoUrl) {
+    const Theme565 &t = getTheme();
+
+    if (!wifiMgr.isConnected()) {
+        popupShow("Pico Update", "Connect WiFi first!", 3000);
+        return;
+    }
+
+    // ── Читаємо поточну версію Pico (тільки для відображення) ────────────────
+    lcd.fillScreen(t.bg);
+    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+    flg(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("Pico Update", SCREEN_W/2, HDR_H/2);
+    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Reading Pico version...", SCREEN_W/2, 110);
+
+    // Запрашиваем версию Pico — только для отображения, не для сравнения
+    int picoVer = picoOtaGetVersion();
+
+    // ── Экран подтверждения ───────────────────────────────────────────────────
+    lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
+
+    fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Pico firmware update", SCREEN_W/2, 78);
+
+    fsm(); lcd.setTextColor(t.textSec);
+    if (picoVer > 0) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Pico current version: v%d.%d",
+                 picoVer / 100, picoVer % 100);
+        lcd.drawString(buf, SCREEN_W/2, 102);
+    } else {
+        lcd.setTextColor(t.danger);
+        lcd.drawString("Pico not responding (old fw?)", SCREEN_W/2, 102);
+        lcd.setTextColor(t.textSec);
+    }
+    lcd.drawString("New firmware found in this release.", SCREEN_W/2, 120);
+
+    fmd(); lcd.setTextColor(t.textPri);
+    lcd.drawString("Flash Pico now?", SCREEN_W/2, 150);
+    fsm(); lcd.setTextColor(t.textSec);
+    lcd.drawString("Buttons off ~30 sec during flash", SCREEN_W/2, 168);
+
+    // ── Кнопки Cancel / Flash ─────────────────────────────────────────────────
+    int by = DPAD_Y;
+    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+    int ty = by + BTNBAR_H/2;
+    lcd.fillRoundRect(4, by+5, 148, 34, 8, t.rowOdd);
+    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Cancel", 80, ty);
+    lcd.fillRoundRect(156, by+5, 160, 34, 8, t.accent);
+    lcd.setTextColor(t.bg);
+    lcd.drawString("Flash Pico", 237, ty);
+
+    // Чекаємо вибір користувача
+    uint32_t deadline = millis() + 20000;
+    bool confirmed = false;
+    while (millis() < deadline) {
+        if (!touch.isTouched()) { delay(20); continue; }
+        int tx, ty2; touch.getXY(tx, ty2);
+        if (ty2 >= by) {
+            if (tx >= 156) { confirmed = true; }
+            break;
+        }
+        delay(20);
+    }
+    if (!confirmed) return;
+
+    // ── Прогрес бар ──────────────────────────────────────────────────────────
+    lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
+    fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Flashing Pico...", SCREEN_W/2, 85);
+    fsm(); lcd.setTextColor(t.textSec);
+    lcd.drawString("Do not power off!", SCREEN_W/2, 108);
+    int barX = 20, barY = 128, barW = SCREEN_W-40, barH = 18;
+    lcd.drawRoundRect(barX, barY, barW, barH, 4, t.accent);
+
+    auto progressCb = [](int pct) {
+        const Theme565 &t2 = getTheme();
+        int bx = 20, by2 = 128, bw = SCREEN_W-40, bh = 18;
+        int filled = (bw - 2) * pct / 100;
+        lcd.fillRoundRect(bx+1, by2+1, filled > 1 ? filled : 1, bh-2, 3, t2.accent);
+        char s[8]; snprintf(s, sizeof(s), "%d%%", pct);
+        lcd.fillRect(bx, by2+bh+4, bw, 16, t2.bg);
+        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t2.textSec);
+        lcd.drawString(s, SCREEN_W/2, by2+bh+12);
+    };
+
+    // picoUrl — прямой CDN-адрес из GitHub API (info.picoUrl), не нужно строить вручную
+    bool ok = picoOtaUpdate(picoUrl, progressCb);
+
+    if (ok) {
+        popupShow("Pico Update", "Done! Pico rebooted.", 4000);
+    } else {
+        popupShow("Pico Update", "Failed! Check Serial log.", 5000);
+    }
 }
