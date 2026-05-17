@@ -3,7 +3,7 @@
 // ── Версія прошивки Pico ──────────────────────────────────────────────────────
 // Правило: при кожному оновленні міняй PICO_VER_MINOR (або MAJOR).
 #define PICO_VER_MAJOR  5
-#define PICO_VER_MINOR  2
+#define PICO_VER_MINOR  3
 // ─────────────────────────────────────────────────────────────────────────────
 // ПРОТОКОЛ (звичайний режим):
 //   Pico→ESP32: [0xAA][0x42][btns][~btns]       — 4 байти, кожні 16мс
@@ -31,6 +31,7 @@
 #include <hardware/flash.h>    // flash_range_erase / flash_range_program (в RAM)
 #include <hardware/sync.h>     // save_and_disable_interrupts / restore_interrupts
 #include <hardware/uart.h>     // uart0_hw — прямий доступ до регістрів UART0
+#include <hardware/irq.h>      // irq_set_enabled — вимкнення UART0 IRQ перед OTA
 
 // ── Піни ─────────────────────────────────────────────────────────────────────
 #define PIN_UP     2
@@ -218,7 +219,9 @@ void rxByte(uint8_t b) {
             Serial1.write(ack, 4);
             Serial1.flush();
 
-            Serial1.setTimeout(5000);
+            // 30с таймаут: ESP32 спочатку завантажує прошивку (HTTP GET),
+            // тільки потім надсилає розмір — може зайняти 5-20с
+            Serial1.setTimeout(30000);
             uint8_t szBuf[4] = {0,0,0,0};
             Serial1.readBytes(szBuf, 4);
             uint32_t fwSize = (uint32_t)szBuf[0]
@@ -229,6 +232,18 @@ void rxByte(uint8_t b) {
             uint8_t sack[4] = {0xAA, 0xF2, 0x00, 0xF2};
             Serial1.write(sack, 4);
             Serial1.flush();
+
+            // ── КРИТИЧНО: вимикаємо UART0 interrupt перед OTA ────────────────
+            // Arduino UART interrupt перехоплює байти з апаратного FIFO у свій
+            // software ring buffer. OTA_RX() читає прямо з uart0_hw->dr (FIFO).
+            // Якщо interrupt активний — він забирає байти раніше OTA_RX(),
+            // OTA_RX() зависає у нескінченному spin-wait на порожньому FIFO,
+            // ESP32 отримує тайм-аут, Pico залишається заблокованим назавжди.
+            // Рішення: вимкнути IRQ → всі вхідні байти йдуть прямо у FIFO.
+            while (Serial1.available()) Serial1.read(); // дренуємо software buffer
+            irq_set_enabled(UART0_IRQ, false);          // вимикаємо UART0 IRQ
+            irq_clear(UART0_IRQ);                       // прибираємо pending IRQ
+            // ─────────────────────────────────────────────────────────────────
 
             picoOtaRun(fwSize);
             break;

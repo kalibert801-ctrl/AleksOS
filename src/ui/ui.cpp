@@ -1975,6 +1975,43 @@ void wifiKeyboardReset() {
 // OTA SCREEN
 // ══════════════════════════════════════════════════════════════
 
+// ── Вспомогательная: рисует шапку экрана обновления ─────────────────────────
+static void _otaDrawHeader(const char *title) {
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+    flg(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString(title, SCREEN_W/2, HDR_H/2);
+    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+}
+
+// ── Вспомогательная: рисует кнопки Cancel(Skip)/Action ──────────────────────
+// Возвращает true если нажали Action (правая кнопка), false — Cancel/таймаут
+static bool _otaAskUser(const char *cancelLabel, const char *actionLabel,
+                        uint32_t timeoutMs = 20000) {
+    const Theme565 &t = getTheme();
+    int by = DPAD_Y;
+    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+    int ty = by + BTNBAR_H/2;
+    lcd.fillRoundRect(4, by+5, 148, 34, 8, t.rowOdd);
+    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString(cancelLabel, 80, ty);
+    lcd.fillRoundRect(156, by+5, 160, 34, 8, t.accent);
+    lcd.setTextColor(t.bg);
+    lcd.drawString(actionLabel, 237, ty);
+
+    uint32_t deadline = millis() + timeoutMs;
+    while (millis() < deadline) {
+        if (!touch.isTouched()) { delay(20); continue; }
+        int tx, ty2; touch.getXY(tx, ty2);
+        if (ty2 >= by) return (tx >= 156);
+        delay(20);
+    }
+    return false;   // timeout → cancel
+}
+
 void otaScreen() {
     const Theme565 &t = getTheme();
 
@@ -1983,14 +2020,8 @@ void otaScreen() {
         return;
     }
 
-    // Show "Checking..." overlay
-    lcd.fillScreen(t.bg);
-    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
-    flg(); lcd.setTextDatum(MC_DATUM);
-    lcd.setTextColor((uint16_t)COL_GOLD);
-    lcd.drawString("Update", SCREEN_W/2, HDR_H/2);
-    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
-
+    // ── Проверяем обновления ──────────────────────────────────────────────────
+    _otaDrawHeader("Update");
     fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
     lcd.drawString("Checking for update...", SCREEN_W/2, 110);
     lcd.fillCircle(SCREEN_W/2, 150, 16, t.accent);
@@ -1998,122 +2029,103 @@ void otaScreen() {
     lcd.drawString("...", SCREEN_W/2, 150);
 
     OTAInfo info;
-    bool ok = otaCheckUpdate(info);
-    if (!ok) {
+    if (!otaCheckUpdate(info)) {
         popupShow("Update", "Check failed. No internet?", 4000);
         return;
     }
 
-    lcd.fillScreen(t.bg);
-    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
-    flg(); lcd.setTextDatum(MC_DATUM);
-    lcd.setTextColor((uint16_t)COL_GOLD);
-    lcd.drawString("Update", SCREEN_W/2, HDR_H/2);
-    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+    bool anyAction = false;
 
-    if (!info.available) {
-        fmd(); lcd.setTextColor(t.ok); lcd.setTextDatum(MC_DATUM);
-        lcd.drawString("ESP32 up to date!", SCREEN_W/2, 90);
+    // ════════════════════════════════════════════════════════════════════════
+    // ШАГ 1: Обновление ESP32 (если доступно)
+    // ════════════════════════════════════════════════════════════════════════
+    if (info.available) {
+        anyAction = true;
+        _otaDrawHeader("Update");
+
+        fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("ESP32 update available!", SCREEN_W/2, 72);
         fsm(); lcd.setTextColor(t.textSec);
-        lcd.drawString(FIRMWARE_VERSION, SCREEN_W/2, 112);
-
+        lcd.drawString(String("Current: ") + FIRMWARE_VERSION, SCREEN_W/2, 95);
+        lcd.drawString(String("Latest:  v") + info.latestVersion, SCREEN_W/2, 110);
+        fmd(); lcd.setTextColor(t.textPri);
+        lcd.drawString("Install ESP32 firmware?", SCREEN_W/2, 140);
+        fsm(); lcd.setTextColor(t.textSec);
+        lcd.drawString("ESP32 reboots after install", SCREEN_W/2, 158);
         if (info.picoAvailable) {
-            // В этом релизе есть pico_firmware.bin — предлагаем обновить Pico
-            fmd(); lcd.setTextColor(t.textPri);
-            lcd.drawString("Pico firmware available!", SCREEN_W/2, 145);
-            fsm(); lcd.setTextColor(t.textSec);
-            lcd.drawString("Update Pico controller?", SCREEN_W/2, 163);
+            lcd.setTextColor(t.ok);
+            lcd.drawString("Pico firmware also in this release", SCREEN_W/2, 175);
+        }
 
-            int by2 = DPAD_Y;
-            lcd.fillRect(0, by2, SCREEN_W, BTNBAR_H, t.header);
-            lcd.drawFastHLine(0, by2, SCREEN_W, (uint16_t)COL_TOPBAR);
-            lcd.fillRoundRect(4, by2+5, 148, 34, 8, t.rowOdd);
-            fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-            lcd.drawString("Skip", 80, by2 + BTNBAR_H/2);
-            lcd.fillRoundRect(156, by2+5, 160, 34, 8, t.accent);
-            lcd.setTextColor(t.bg);
-            lcd.drawString("Update Pico", 237, by2 + BTNBAR_H/2);
+        if (_otaAskUser("Skip", "Install", 30000)) {
+            // Показываем прогресс
+            lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
+            fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(MC_DATUM);
+            lcd.drawString("Downloading ESP32...", SCREEN_W/2, 90);
+            int barX = 20, barY = 120, barW = SCREEN_W-40, barH = 18;
+            lcd.drawRoundRect(barX, barY, barW, barH, 4, t.accent);
 
-            uint32_t dl2 = millis() + 15000;
-            while (millis() < dl2) {
-                if (!touch.isTouched()) { delay(20); continue; }
-                int tx2, ty2; touch.getXY(tx2, ty2);
-                if (ty2 >= by2) {
-                    if (tx2 >= 156) picoOtaScreen(info.picoUrl.c_str());
-                    break;
-                }
-                delay(20);
-            }
+            auto progressCb = [](int pct) {
+                const Theme565 &t2 = getTheme();
+                int bx=20, by2=120, bw=SCREEN_W-40, bh=18;
+                int filled = (bw-2) * pct / 100;
+                lcd.fillRoundRect(bx+1, by2+1, filled > 1 ? filled : 1, bh-2, 3, t2.accent);
+                char s[8]; snprintf(s, sizeof(s), "%d%%", pct);
+                lcd.fillRect(bx, by2+bh+4, bw, 16, t2.bg);
+                fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t2.textSec);
+                lcd.drawString(s, SCREEN_W/2, by2+bh+12);
+            };
+
+            otaDownloadAndFlash(info.downloadUrl.c_str(), progressCb);
+            // При успехе ESP32 перезагрузится — сюда не дойдёт
+            popupShow("Update", "ESP32 flash failed!", 5000);
+            return;
+        }
+        // Пользователь нажал Skip → переходим к Pico (если есть)
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ШАГ 2: Обновление Pico (если доступно)
+    // ════════════════════════════════════════════════════════════════════════
+    if (info.picoAvailable) {
+        anyAction = true;
+        _otaDrawHeader("Update");
+
+        fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("Pico firmware available!", SCREEN_W/2, 72);
+        fsm(); lcd.setTextColor(t.textSec);
+        int picoVer = getCachedPicoVer();
+        if (picoVer > 0) {
+            char buf[40];
+            snprintf(buf, sizeof(buf), "Current Pico: v%d.%d",
+                     picoVer/100, picoVer%100);
+            lcd.drawString(buf, SCREEN_W/2, 95);
         } else {
-            // pico_firmware.bin не загружен в этот релиз — просто показываем статус
-            fsm(); lcd.setTextColor(t.textSec);
-            lcd.drawString("No Pico firmware in this release.", SCREEN_W/2, 148);
-            popupShow("Update", "Everything is up to date!", 3000);
+            lcd.drawString("Current Pico: unknown", SCREEN_W/2, 95);
         }
-        return;
+        lcd.drawString("New firmware found in this release", SCREEN_W/2, 112);
+        fmd(); lcd.setTextColor(t.textPri);
+        lcd.drawString("Flash Pico controller?", SCREEN_W/2, 145);
+        fsm(); lcd.setTextColor(t.textSec);
+        lcd.drawString("Buttons off ~30 sec during flash", SCREEN_W/2, 163);
+
+        if (_otaAskUser("Skip", "Flash Pico", 20000)) {
+            picoOtaScreen(info.picoUrl.c_str());
+        }
     }
 
-    // Update available!
-    fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("ESP32 update available!", SCREEN_W/2, 75);
-    fsm(); lcd.setTextColor(t.textSec);
-    lcd.drawString(String("Current: ") + FIRMWARE_VERSION, SCREEN_W/2, 98);
-    lcd.drawString(String("Latest:  ") + info.latestVersion, SCREEN_W/2, 114);
-    fmd(); lcd.setTextColor(t.textPri);
-    lcd.drawString("Install ESP32 firmware?", SCREEN_W/2, 148);
-    lcd.setTextColor(t.textSec);
-    fsm(); lcd.drawString("(ESP32 will reboot after)", SCREEN_W/2, 168);
-
-    // CANCEL / INSTALL buttons
-    int by = DPAD_Y;
-    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
-    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
-    int ty = by + BTNBAR_H/2;
-    lcd.fillRoundRect(4, by+5, 148, 34, 8, t.rowOdd);
-    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("Cancel", 80, ty);
-    lcd.fillRoundRect(156, by+5, 160, 34, 8, t.accent);
-    lcd.setTextColor(t.bg);
-    lcd.drawString("Install", 237, ty);
-
-    // Wait for user decision
-    uint32_t deadline = millis() + 30000;
-    while (millis() < deadline) {
-        if (!touch.isTouched()) { delay(20); continue; }
-        int tx, ty2;
-        touch.getXY(tx, ty2);
-        if (ty2 >= by) {
-            if (tx < 156) return;   // Cancel
-            // Install
-            break;
-        }
-        delay(20);
+    // ════════════════════════════════════════════════════════════════════════
+    // Ничего не было доступно
+    // ════════════════════════════════════════════════════════════════════════
+    if (!anyAction) {
+        _otaDrawHeader("Update");
+        fmd(); lcd.setTextColor(t.ok); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("Everything is up to date!", SCREEN_W/2, 110);
+        fsm(); lcd.setTextColor(t.textSec);
+        lcd.drawString(FIRMWARE_VERSION, SCREEN_W/2, 135);
+        lcd.drawString("No Pico firmware in this release", SCREEN_W/2, 153);
+        delay(3000);
     }
-    if (millis() >= deadline) return;   // timeout → cancel
-
-    // Show progress bar
-    lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
-    fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("Downloading...", SCREEN_W/2, 90);
-    int barX = 20, barY = 120, barW = SCREEN_W - 40, barH = 18;
-    lcd.drawRoundRect(barX, barY, barW, barH, 4, t.accent);
-
-    auto progressCb = [](int pct) {
-        const Theme565 &t2 = getTheme();
-        int barX2 = 20, barY2 = 120, barW2 = SCREEN_W - 40, barH2 = 18;
-        int filled = (barW2 - 2) * pct / 100;
-        lcd.fillRoundRect(barX2+1, barY2+1, filled, barH2-2, 3, t2.accent);
-        char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
-        lcd.fillRect(barX2, barY2 + barH2 + 4, barW2, 16, t2.bg);
-        fsm(); lcd.setTextDatum(MC_DATUM);
-        lcd.setTextColor(t2.textSec);
-        lcd.drawString(pctStr, SCREEN_W/2, barY2 + barH2 + 12);
-    };
-
-    otaDownloadAndFlash(info.downloadUrl.c_str(), progressCb);
-
-    // If we reach here, the flash failed (success reboots)
-    popupShow("Update", "Flash failed!", 5000);
 }
 
 // ── Pico OTA screen ───────────────────────────────────────────────────────────
@@ -2216,6 +2228,10 @@ void picoOtaScreen(const char *picoUrl) {
     bool ok = picoOtaUpdate(picoUrl, progressCb);
 
     if (ok) {
+        // Обновляем кеш версии Pico после успешной прошивки
+        delay(500);
+        _cachedPicoVer  = picoOtaGetVersion();
+        _picoVerCacheMs = millis();
         popupShow("Pico Update", "Done! Pico rebooted.", 4000);
     } else {
         popupShow("Pico Update", "Failed! Check Serial log.", 5000);
