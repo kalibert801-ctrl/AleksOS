@@ -229,17 +229,53 @@ bool picoOtaUpdate(const char *binUrl, void (*progressCb)(int pct)) {
 
     http.end();
 
-    // ── Крок 5: чекаємо сигнал "done" від Pico ──────────────────────────────
-    // Фаза 2 (запис flash): ~4-6 секунд для 96KB прошивки
-    // Таймаут 15с — з великим запасом
-    Serial2.setTimeout(15000);
-    uint8_t done[4] = {0, 0, 0, 0};
-    if (Serial2.readBytes(done, 4) == 4 &&
-        done[0] == 0xAA && done[1] == 0xF4) {
-        Serial.println("[PICOTA] Done! Pico firmware written, rebooting...");
-    } else {
-        Serial.printf("[PICOTA] No done signal (got %02X %02X) — firmware may still be written\n",
-                      done[0], done[1]);
+    // ── Крок 5: чекаємо сигнали від Pico ─────────────────────────────────────
+    //
+    // Pico виконує дві фази:
+    //   F8 — [0xAA][0xF8] — надсилається ПЕРЕД будь-якими операціями flash
+    //                        (підтверджує що picoOtaFlash стартувала в SRAM4)
+    //   F4 — [0xAA][0xF4] — надсилається ПІСЛЯ завершення запису flash
+    //                        (підтверджує що вся прошивка записана успішно)
+    //
+    // Якщо F8 не прийшов → picoOtaFlash так і не стартувала (проблема секції)
+    // Якщо F8 прийшов, але F4 — ні → краш під час операцій flash
+
+    // ── 5a: чекаємо F8 "flash phase started" (таймаут 3с) ──────────────────
+    {
+        Serial2.setTimeout(3000);
+        uint8_t f8[4] = {0, 0, 0, 0};
+        bool gotF8 = false;
+        uint32_t f8deadline = millis() + 3000;
+        while (millis() < f8deadline) {
+            if (Serial2.readBytes(f8, 4) != 4) break;
+            if (f8[0] == 0xAA && f8[1] == 0xF8) { gotF8 = true; break; }
+            // Ігноруємо сторонні пакети (кнопки тощо)
+        }
+        if (!gotF8) {
+            Serial.println("[PICOTA] picoOtaFlash was never entered — section placement issue or crash before flash");
+            // Pico може все одно перезавантажитись, чекаємо і чистимо буфер
+            delay(2000);
+            while (Serial2.available()) Serial2.read();
+            return false;
+        }
+        Serial.println("[PICOTA] Flash phase started (F8). Waiting for completion...");
+    }
+
+    // ── 5b: чекаємо F4 "flash done" (таймаут 15с) ──────────────────────────
+    // ~4-6с для 96KB + великий запас
+    {
+        Serial2.setTimeout(15000);
+        uint8_t done[4] = {0, 0, 0, 0};
+        if (Serial2.readBytes(done, 4) == 4 &&
+            done[0] == 0xAA && done[1] == 0xF4) {
+            Serial.println("[PICOTA] Done! Pico firmware written, rebooting...");
+        } else {
+            Serial.printf("[PICOTA] picoOtaFlash crashed during flash ops (got %02X %02X) — firmware NOT written\n",
+                          done[0], done[1]);
+            delay(1500);
+            while (Serial2.available()) Serial2.read();
+            return false;
+        }
     }
 
     // Чекаємо перезавантаження Pico і очищуємо буфер

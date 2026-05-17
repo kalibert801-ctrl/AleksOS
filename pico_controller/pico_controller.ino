@@ -2,7 +2,7 @@
 //
 // ── Версія прошивки Pico ──────────────────────────────────────────────────────
 #define PICO_VER_MAJOR  5
-#define PICO_VER_MINOR  5
+#define PICO_VER_MINOR  6
 // ─────────────────────────────────────────────────────────────────────────────
 // ПРОТОКОЛ (звичайний режим):
 //   Pico→ESP32: [0xAA][0x42][btns][~btns]       — 4 байти, кожні 16мс
@@ -89,17 +89,32 @@ static uint16_t __no_inline_not_in_flash_func(crc16_ota)(const uint8_t *data, in
 // ═══════════════════════════════════════════════════════════════════════════════
 // OTA Фаза 2: запис SRAM буфера у flash + сигнал "готово" + ARM reset
 //
-// ОБОВ'ЯЗКОВО в RAM:
-//   - Ця функція стирає та перезаписує весь flash (включно з собою у flash)
-//   - __no_inline_not_in_flash_func кладе функцію у .time_critical → SRAM
-//   - Використовує тільки uart0_hw для TX (hardware регістри, не flash-код)
-//   - Serial1 / Arduino функції НЕ викликаються (їх код може бути стертий)
+// СЕКЦІЯ .scratch_x (SRAM4, 0x20040000) — ГАРАНТОВАНО у SRAM:
+//   .scratch_x — це фізично ОКРЕМИЙ банк пам'яті (не striped SRAM).
+//   Flash операції НІКОЛИ не торкаються SRAM4.
+//   На відміну від .time_critical (залежить від toolchain), .scratch_x
+//   завжди в SRAM у будь-якому компіляторі для RP2040.
+//
+// Ця функція:
+//   - Надсилає F8 "flash started" до початку будь-яких flash операцій
+//   - Стирає та перезаписує весь flash з SRAM буфера
+//   - Надсилає F4 "done" після завершення
+//   - Виконує ARM reset
 // ═══════════════════════════════════════════════════════════════════════════════
-static void __no_inline_not_in_flash_func(picoOtaFlash)(const uint8_t *buf, uint32_t totalSize) {
+void __attribute__((section(".scratch_x.picoOtaFlash"), noinline))
+picoOtaFlash(const uint8_t *buf, uint32_t totalSize) {
+
+    // Макрос TX — прямий запис у hardware UART TX FIFO (не потребує flash-коду)
     #define OTA_TX(b) do {                                       \
         while (uart0_hw->fr & UART_UARTFR_TXFF_BITS);           \
         uart0_hw->dr = (uint8_t)(b);                            \
     } while(0)
+
+    // Сигнал [0xAA][0xF8]: "Flash phase started"
+    // Надсилається ДО будь-яких flash операцій.
+    // Якщо ESP32 отримає F8 але не F4 — значить flash операція впала.
+    // Якщо ESP32 не отримає навіть F8 — функція не виконалась.
+    OTA_TX(0xAA); OTA_TX(0xF8); OTA_TX(0x00); OTA_TX(0xF8);
 
     const uint32_t PAGE = FLASH_PAGE_SIZE;     // 256 байт
     const uint32_t SECT = FLASH_SECTOR_SIZE;   // 4096 байт
@@ -107,31 +122,40 @@ static void __no_inline_not_in_flash_func(picoOtaFlash)(const uint8_t *buf, uint
     uint32_t totalPages = (totalSize + PAGE - 1) / PAGE;
     uint32_t offset = 0;
 
+    // ── КРИТИЧНО: вимикаємо переривання ОДИН РАЗ для всього циклу ────────────
+    // ПОМИЛКА якщо робити per-operation disable/enable:
+    //   flash_range_erase(0, SECT)  → сектор 0 стертий, boot2 + вектор таблиця
+    //                                 за адресою 0x10000100 стає 0xFF
+    //   restore_interrupts()        → SysTick вмикається
+    //   SysTick читає вектор 0x10000100 = 0xFFFFFFFF → Hard Fault
+    //   flash_range_program() вже не виконується → boot2 стертий → BOOTSEL
+    //
+    // Рішення: один disable перед циклом, один restore ПІСЛЯ передачі F4.
+    // 376 сторінок × (erase ~50мс/сектор + program ~1мс/стор) ≈ 1.5с — прийнятно.
+    uint32_t ints = save_and_disable_interrupts();
+
     for (uint32_t p = 0; p < totalPages; p++, offset += PAGE) {
-        // Стираємо сектор на початку кожного нового сектора
         if ((offset % SECT) == 0) {
-            uint32_t ints = save_and_disable_interrupts();
             flash_range_erase(offset, SECT);
-            restore_interrupts(ints);
         }
-        // Записуємо сторінку з SRAM буфера
-        {
-            uint32_t ints = save_and_disable_interrupts();
-            flash_range_program(offset, buf + p * PAGE, PAGE);
-            restore_interrupts(ints);
-        }
+        flash_range_program(offset, buf + p * PAGE, PAGE);
     }
 
-    // Надсилаємо сигнал "готово" через hardware UART TX
+    // Сигнал [0xAA][0xF4]: "Done, rebooting"
+    // Надсилаємо поки переривання ще вимкнені: нова прошивка вже в flash,
+    // але ми не хочемо щоб нові обробники переривань конфліктували з UART.
     OTA_TX(0xAA); OTA_TX(0xF4); OTA_TX(0x00); OTA_TX(0xF4);
 
-    // Чекаємо поки TX FIFO повністю спорожниться (всі байти відправлені)
+    // Чекаємо поки TX FIFO та shift register порожні (байти точно передані)
     while (!(uart0_hw->fr & UART_UARTFR_TXFE_BITS));
+    while (uart0_hw->fr & UART_UARTFR_BUSY_BITS);
 
-    // Невелика пауза щоб ESP32 гарантовано отримав сигнал до перезавантаження
+    restore_interrupts(ints);
+
+    // Пауза ~16мс — щоб ESP32 гарантовано обробив сигнал до reset
     for (volatile uint32_t i = 0; i < 2000000UL; i++);
 
-    // ARM Cortex-M System Reset (завжди доступний — регістр ARM, не flash)
+    // ARM Cortex-M System Reset (SCB AIRCR, завжди доступний — регістр ARM)
     *((volatile uint32_t*)0xE000ED0C) = 0x5FA0004UL;
     while (1);
 
