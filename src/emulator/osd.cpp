@@ -33,9 +33,26 @@ extern "C" {
 #define NES_FRAG_SAMPLES 128
 #define I2S_PORT         I2S_NUM_0
 
-// NES image centered on 320×240 screen
-#define VID_X  ((SCREEN_W - NES_SCREEN_WIDTH) / 2)   // 32
-#define VID_Y  ((SCREEN_H - NES_VISIBLE_HEIGHT) / 2) //  8
+// Defaults for 1:1 mode (pixel-perfect, centred)
+#define VID_X_DEFAULT  ((SCREEN_W - NES_SCREEN_WIDTH) / 2)    // 32
+#define VID_Y_DEFAULT  ((SCREEN_H - NES_VISIBLE_HEIGHT) / 2)  //  8
+
+// ── Scale parameters ────────────────────────────────────────────────────────
+// Computed once per blit from settings.scale.
+// outX/outY — top-left corner on display; outW/outH — output size.
+struct ScaleParams { int outX, outY, outW, outH; };
+
+static ScaleParams getScaleParams() {
+    switch (settings.scale) {
+        case SCALE_FIT:  // Full stretch — fill entire 320×240
+            return { 0, 0, SCREEN_W, SCREEN_H };
+        case SCALE_43:   // Stretch width to 320, keep NES height (224) centred
+            return { 0, VID_Y_DEFAULT, SCREEN_W, NES_VISIBLE_HEIGHT };
+        case SCALE_11:   // Pixel-perfect 256×224, centred
+        default:
+            return { VID_X_DEFAULT, VID_Y_DEFAULT, NES_SCREEN_WIDTH, NES_VISIBLE_HEIGHT };
+    }
+}
 
 // ─── controller state (set from main task via emu_setController) ───────────
 static volatile uint8_t _pad = 0;
@@ -177,9 +194,17 @@ static void blit_print_stats(void) {
     }
 }
 
+// Line buffer широкий на весь дисплей — используется при масштабировании.
+// 320 px × 2 байт = 640 байт, статический — не грузит стек каждый кадр.
+static uint16_t _line_buf[SCREEN_W];
+
 static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
-    if (_frame) {
-        // Fast path: palette-convert into DMA SRAM buffer, then single DMA burst
+    const ScaleParams sp = getScaleParams();
+    const bool pixel_perfect = (sp.outW == NES_SCREEN_WIDTH &&
+                                 sp.outH == NES_VISIBLE_HEIGHT);
+
+    if (pixel_perfect && _frame) {
+        // ── Быстрый путь: 1:1, DMA burst ─────────────────────────────────
         uint16_t *dst = _frame;
         for (int y = 0; y < NES_VISIBLE_HEIGHT; y++) {
             const uint8_t *src = bmp->line[y + VID_FIRST_LINE];
@@ -187,19 +212,26 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
                 *dst++ = _pal[src[x]];
         }
         lcd.startWrite();
-        lcd.setAddrWindow(VID_X, VID_Y, NES_SCREEN_WIDTH, NES_VISIBLE_HEIGHT);
-        lcd.writePixels(_frame, NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT, true);
+        lcd.setAddrWindow(sp.outX, sp.outY, sp.outW, sp.outH);
+        lcd.writePixels(_frame, sp.outW * sp.outH, true);
         lcd.endWrite();
+
     } else {
-        // Fallback: line-by-line blit using a small stack buffer (~512 B)
-        static uint16_t line_buf[NES_SCREEN_WIDTH];
+        // ── Масштабирование: ближайший сосед, строка за строкой ───────────
+        // Работает как для SCALE_43 (320×224), так и для SCALE_FIT (320×240).
+        // При pixel_perfect без DMA-буфера тоже использует этот путь.
         lcd.startWrite();
-        lcd.setAddrWindow(VID_X, VID_Y, NES_SCREEN_WIDTH, NES_VISIBLE_HEIGHT);
-        for (int y = 0; y < NES_VISIBLE_HEIGHT; y++) {
-            const uint8_t *src = bmp->line[y + VID_FIRST_LINE];
-            for (int x = 0; x < NES_SCREEN_WIDTH; x++)
-                line_buf[x] = _pal[src[x]];
-            lcd.writePixels(line_buf, NES_SCREEN_WIDTH, true);
+        lcd.setAddrWindow(sp.outX, sp.outY, sp.outW, sp.outH);
+        for (int oy = 0; oy < sp.outH; oy++) {
+            // Исходная строка NES (ближайший сосед по Y)
+            int sy = (oy * NES_VISIBLE_HEIGHT) / sp.outH;
+            const uint8_t *src = bmp->line[sy + VID_FIRST_LINE];
+            // Масштаб по X
+            for (int ox = 0; ox < sp.outW; ox++) {
+                int sx = (ox * NES_SCREEN_WIDTH) / sp.outW;
+                _line_buf[ox] = _pal[src[sx]];
+            }
+            lcd.writePixels(_line_buf, sp.outW, true);
         }
         lcd.endWrite();
     }
@@ -398,6 +430,11 @@ extern "C" int osd_init(void) {
             printf("[OSD] WARNING: DMA frame buffer alloc failed — falling back to line-by-line blit\n");
         }
     }
+    // ── Заливаем весь экран чёрным ────────────────────────────────────────────
+    // Бордюры вокруг игры (32px слева/справа при 1:1, 8px сверху/снизу при 4:3)
+    // остаются чёрными на протяжении всей игровой сессии — больше не "вырви глаз".
+    lcd.fillScreen(TFT_BLACK);
+
     return audio_init();
 }
 
