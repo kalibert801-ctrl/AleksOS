@@ -299,7 +299,7 @@ extern "C" void osd_getinput(void) {
     static int exitFrames = 0;
     frameCount++;
     if (frameCount > 90 && (pad & (BTN_A | BTN_B)) == (BTN_A | BTN_B)) {
-        if (++exitFrames >= 180) {
+        if (++exitFrames >= 60) {
             exitFrames = 0;
             frameCount = 0;
             event_t h = event_get(event_quit);

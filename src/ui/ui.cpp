@@ -455,8 +455,15 @@ void showRomInfo(int idx) {
 
     delay(300);
     extern TouchHandler touch;
+    extern ButtonHandler buttons;
     uint32_t until = millis()+8000;
-    while (millis()<until) { if(touch.isTouched()) break; delay(20); }
+    while (millis()<until) {
+        if (touch.isTouched()) break;
+        // LEFT кнопка или любая кнопка закрывает инфо
+        buttons.update();
+        if (buttons.readNew()) break;
+        delay(20);
+    }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1477,8 +1484,8 @@ uint8_t settingsNavBtn(uint8_t btn) {
             drawCategoryGrid();
         }
 
-        // BTN_A — открываем сразу (кнопки не требуют двойного тапа)
-        if (btn & BTN_A) {
+        // START — открываем категорию (кнопки не требуют двойного тапа)
+        if (btn & BTN_STA) {
             _gridSelected   = -1;
             _settingsCat    = _gridCur;
             _catItemIdx     = 0;
@@ -1486,11 +1493,11 @@ uint8_t settingsNavBtn(uint8_t btn) {
             _detailOpenedMs = millis();
             drawCategoryDetail();
         }
-        if (btn & BTN_B) { _gridSelected = -1; return BTN_B; }
+        if (btn & BTN_SEL) { _gridSelected = -1; return BTN_B; }  // SELECT = назад
     } else if (_settingsCat == 5) {
         if (btn & BTN_UP)   infoScrollBy(-INFO_ROW_H * 3);
         if (btn & BTN_DOWN) infoScrollBy( INFO_ROW_H * 3);
-        if (btn & BTN_B) { _settingsCat = -1; _gridSelected = -1; drawCategoryGrid(); }
+        if (btn & BTN_SEL) { _settingsCat = -1; _gridSelected = -1; drawCategoryGrid(); }
     } else if (_settingsCat == 6) {
         // Debug virtual sub-экран
         int n = catItemCount(6);
@@ -1504,7 +1511,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             int gi = globalSettingIdx(6, _catItemIdx);
             settingDec(gi); drawCategoryDetail();
         }
-        if (btn & BTN_B) {
+        if (btn & BTN_SEL) {  // SELECT = назад
             _settingsCat = (_prevCat >= 0) ? _prevCat : -1;
             _prevCat = -1;
             if (_settingsCat >= 0) drawCategoryDetail();
@@ -1538,7 +1545,20 @@ uint8_t settingsNavBtn(uint8_t btn) {
             }
             settingDec(gi); drawCategoryDetail();
         }
-        if (btn & BTN_B) { _settingsCat = -1; _gridSelected = -1; drawCategoryGrid(); }
+        if (btn & BTN_STA) {
+            // START = подтвердить / открыть (то же что раньше делал BTN_A)
+            int gi = globalSettingIdx(_settingsCat, _catItemIdx);
+            if (gi == 12) return 0x40;
+            if (gi == 24) return 0x80;
+            if (gi == 26) return 0xA0;
+            if (gi == 25) {
+                _prevCat = _settingsCat; _settingsCat = 6;
+                _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
+                drawCategoryDetail(); return 0;
+            }
+            settingInc(gi); drawCategoryDetail();
+        }
+        if (btn & BTN_SEL) { _settingsCat = -1; _gridSelected = -1; drawCategoryGrid(); }  // SELECT = назад
     }
     return 0;
 }
@@ -1554,7 +1574,7 @@ uint8_t btnMapNavBtn(uint8_t btn) {
         int fi=(nesFuncIndex(settings.btnMap[_rmIdx])-1+_nesFuncCount)%_nesFuncCount;
         settings.btnMap[_rmIdx]=_nesFunc[fi].mask; btnMapDraw();
     }
-    if (btn & BTN_B) return BTN_B;
+    if (btn & BTN_SEL) return BTN_B;  // SELECT = назад
     return 0;
 }
 
@@ -1761,8 +1781,8 @@ uint8_t wifiManagerNavBtn(uint8_t btn) {
     int count = wifiMgr.getScanCount();
     if (btn & BTN_UP)   { if(_wifiSel>0){_wifiSel--;wifiManagerDraw();} }
     if (btn & BTN_DOWN) { if(_wifiSel<count-1){_wifiSel++;wifiManagerDraw();} }
-    if (btn & BTN_A)    return BTN_A;  // proceed to keyboard
-    if (btn & BTN_B)    return BTN_B;  // back
+    if (btn & BTN_STA)  return BTN_A;  // START = подключить
+    if (btn & BTN_SEL)  return BTN_B;  // SELECT = назад
     return 0;
 }
 

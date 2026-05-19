@@ -222,7 +222,7 @@ void loop() {
             }
 
             if (settings.autoScroll && holdDir && !autoActive
-                && millis() - holdStart >= 1800) {
+                && millis() - holdStart >= 1000) {
                 autoActive = true;
                 lastStep   = millis();
             }
@@ -242,7 +242,17 @@ void loop() {
             soundBack(); buttons.vibrate1(60); ledSet(LED_YELLOW); delay(120); ledSet(LED_OFF);
             toSettings(); break;
         }
-        if (btnNew & BTN_A) {
+        if (btnNew & BTN_RIGHT) {
+            // RIGHT → показать информацию о выбранной игре
+            int sel = menuSelected();
+            if (sel >= 0 && sel < sdMgr.count()) {
+                soundClick(); buttons.vibrate1(30);
+                showRomInfo(sel); menuDraw();
+            }
+            break;
+        }
+        if (btnNew & BTN_STA) {
+            // START → запуск игры
             int sel = menuSelected();
             if (sel >= 0 && sel < sdMgr.count()) {
                 soundSelect();
@@ -253,6 +263,7 @@ void loop() {
             }
             break;
         }
+        // BTN_A, BTN_B — ничего не делают в главном меню
         if (!tapped) break;
         int romAction = 0;
         uint8_t action = menuHandleTouch(x, y, romAction);
@@ -298,6 +309,7 @@ void loop() {
     case S_REMAP: {
         // Экран ремапа: используем ФИЗИЧЕСКИЕ кнопки (btnPhys), иначе
         // пользователь не сможет управлять экраном если переназначил кнопки.
+        // btnMapNavBtn проверяет BTN_SEL (SELECT физ.) для возврата.
         if (btnPhys) {
             uint8_t r = btnMapNavBtn(btnPhys);
             if (r & BTN_B) { soundBack(); buttons.vibrate1(50); cfgSave(); toSettings(); break; }
@@ -328,7 +340,7 @@ void loop() {
     }
 
     case S_WIFI_KB: {
-        if (btnNew & BTN_B) { soundBack(); toWifi(); break; }
+        if (btnNew & BTN_SEL) { soundBack(); toWifi(); break; }
         if (!tapped) break;
         uint8_t action = wifiKeyboardHandleTouch(x, y);
         if (action == BTN_B) { soundBack(); toWifi(); }

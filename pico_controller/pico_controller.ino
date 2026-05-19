@@ -2,7 +2,7 @@
 //
 // ── Версія прошивки Pico ──────────────────────────────────────────────────────
 #define PICO_VER_MAJOR  5
-#define PICO_VER_MINOR  6
+#define PICO_VER_MINOR  7
 // ─────────────────────────────────────────────────────────────────────────────
 // ПРОТОКОЛ (звичайний режим):
 //   Pico→ESP32: [0xAA][0x42][btns][~btns]       — 4 байти, кожні 16мс
@@ -50,7 +50,6 @@
 #define PIN_SELECT 8
 #define PIN_START  9
 #define PIN_MOT1   10
-#define PIN_MOT2   11
 #define LED_PIN    25
 
 // ── Параметри авто-вібро від кнопок ──────────────────────────────────────────
@@ -165,23 +164,17 @@ picoOtaFlash(const uint8_t *buf, uint32_t totalSize) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Мотори
 // ═══════════════════════════════════════════════════════════════════════════════
-static uint32_t mot1_end = 0, mot2_end = 0;
+static uint32_t mot1_end = 0;
 
 void motorUpdate() {
     uint32_t now = millis();
     if (mot1_end && now >= mot1_end) { analogWrite(PIN_MOT1, 0); mot1_end = 0; }
-    if (mot2_end && now >= mot2_end) { analogWrite(PIN_MOT2, 0); mot2_end = 0; }
 }
 
-void motorRun(int n, uint8_t dur10ms) {
+void motorRun(uint8_t dur10ms) {
     uint32_t ms = (uint32_t)dur10ms * 10;
-    if (n == 1) { mot1_end = millis() + ms; analogWrite(PIN_MOT1, 255); }
-    else        { mot2_end = millis() + ms; analogWrite(PIN_MOT2, 255); }
-}
-
-void motorRunBoth(uint8_t dur10ms) {
-    motorRun(1, dur10ms);
-    motorRun(2, dur10ms);
+    mot1_end = millis() + ms;
+    analogWrite(PIN_MOT1, 255);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -223,22 +216,10 @@ void rxByte(uint8_t b) {
         }
 
         case 0x20: // MOT1
+        case 0x21: // (MOT2 removed — mapped to MOT1)
+        case 0x22: // BOTH — mapped to single motor
             if (data == 0) { analogWrite(PIN_MOT1, 0); mot1_end = 0; }
-            else motorRun(1, data);
-            break;
-
-        case 0x21: // MOT2
-            if (data == 0) { analogWrite(PIN_MOT2, 0); mot2_end = 0; }
-            else motorRun(2, data);
-            break;
-
-        case 0x22: // BOTH — обидва мотори
-            if (data == 0) {
-                analogWrite(PIN_MOT1, 0); mot1_end = 0;
-                analogWrite(PIN_MOT2, 0); mot2_end = 0;
-            } else {
-                motorRunBoth(data);
-            }
+            else motorRun(data);
             break;
 
         case 0x23: // HAPTIC_EN
@@ -356,10 +337,9 @@ void setup() {
                         PIN_A, PIN_B, PIN_SELECT, PIN_START};
     for (int p : btns) pinMode(p, INPUT_PULLUP);
     pinMode(PIN_MOT1, OUTPUT); analogWrite(PIN_MOT1, 0);
-    pinMode(PIN_MOT2, OUTPUT); analogWrite(PIN_MOT2, 0);
     pinMode(LED_PIN,  OUTPUT);
-    // Старт-сигнал: обидва мотори 80мс
-    motorRunBoth(8);
+    // Старт-сигнал: вібро 80мс
+    motorRun(8);
 }
 
 void loop() {
@@ -375,7 +355,7 @@ void loop() {
         // Авто-вібро при натисканні кнопок (локально на Pico — без ESP32)
         if (hapticEnabled) {
             uint8_t newPress = b & ~prevBtn;
-            if (newPress) motorRunBoth(BTN_HAPTIC_DUR);
+            if (newPress) motorRun(BTN_HAPTIC_DUR);
         }
         prevBtn = b;
 
