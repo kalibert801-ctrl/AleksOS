@@ -8,6 +8,7 @@
 #include "config.h"
 #include "settings.h"
 #include "driver/i2s.h"
+#include "driver/rtc_io.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
 #include "esp_attr.h"
@@ -121,6 +122,10 @@ static int audio_init(void) {
 
 static void audio_deinit(void) {
     i2s_driver_uninstall(I2S_PORT);
+    // Відновлюємо GPIO25 (XPT2046 touch CLK) у цифровий режим.
+    // i2s_driver_uninstall в DAC-режимі викликає dac_output_disable для GPIO25
+    // → переводить його в RTC/аналоговий режим → touch перестає відповідати.
+    rtc_gpio_deinit(GPIO_NUM_25);
     pinMode(AUDIO_PIN, INPUT_PULLDOWN);
 }
 

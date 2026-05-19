@@ -26,6 +26,12 @@
 #include "settings.h"
 #include <SD.h>
 #include "driver/i2s.h"
+#include "driver/rtc_io.h"   // rtc_gpio_deinit — відновлення GPIO25 після I2S DAC
+
+// i2s_driver_uninstall в DAC-режимі викликає dac_output_disable для GPIO25 та GPIO26.
+// GPIO25 переходить в RTC/аналоговий режим → SPI для XPT2046 (touch CLK) перестає
+// працювати. Виклик rtc_gpio_deinit(GPIO_NUM_25) повертає пін у цифровий режим.
+static inline void restoreTouch() { rtc_gpio_deinit(GPIO_NUM_25); }
 
 #define AUDIO_CH      1        // LEDC канал (0 зайнятий підсвіткою)
 #define AUDIO_BITS    8        // LEDC розрядність
@@ -150,6 +156,7 @@ static void wavPlayerTask(void*) {
         pinMode(AUDIO_PIN, INPUT);
         // Знімаємо драйвер якщо залишився від попереднього сеансу
         i2s_driver_uninstall(WAV_I2S);
+        restoreTouch();   // відновлюємо GPIO25 після можливого попереднього uninstall
 
         i2s_config_t cfg = {};
         cfg.mode              = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN);
@@ -228,6 +235,9 @@ static void wavPlayerTask(void*) {
         }
 
         i2s_driver_uninstall(WAV_I2S);
+        restoreTouch();   // i2s_driver_uninstall переводить GPIO25 в RTC/DAC режим
+                          // → XPT2046 touch CLK перестає працювати.
+                          // rtc_gpio_deinit повертає GPIO25 у цифровий режим.
         pinMode(AUDIO_PIN, INPUT_PULLDOWN);
 
         f.close();
