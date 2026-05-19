@@ -109,9 +109,9 @@ static int audio_init(void) {
     cfg.channel_format    = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
     cfg.intr_alloc_flags  = 0;
-    cfg.dma_buf_count     = 4;
+    cfg.dma_buf_count     = 6;
     cfg.dma_buf_len       = NES_FRAG_SAMPLES;
-    cfg.use_apll          = false;
+    cfg.use_apll          = false;  // APLL несумісний з WiFi на ESP32 → нестабільний clock
 
     if (i2s_driver_install(I2S_PORT, &cfg, 0, nullptr) != ESP_OK) return -1;
     i2s_set_pin(I2S_PORT, nullptr);
