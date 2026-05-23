@@ -63,6 +63,13 @@ static volatile uint8_t _pad = 0;
 
 extern "C" void emu_setController(uint8_t state) { _pad = state; }
 
+// ─── чистый выход из эмулятора ────────────────────────────────────────────────
+// Флаг выставляется из osd_getinput() когда HOME удержана 20 кадров.
+// main_loop() в nofrendo.c проверяет его после возврата из nes_emulate()
+// и вызывает main_eject() — UЖЕ вне стека frame-callback, без краша.
+static volatile bool _emuExitReq = false;
+extern "C" bool osd_exit_requested(void) { return _emuExitReq; }
+
 // ─── audio ─────────────────────────────────────────────────────────────────
 static void (*_audio_cb)(void *buf, int len) = nullptr;
 
@@ -441,12 +448,20 @@ extern "C" void osd_getvideoinfo(vidinfo_t *info) {
 }
 
 // ─── timer ─────────────────────────────────────────────────────────────────
+static TimerHandle_t _nesTimer = nullptr;   // BUG-1 fix: track handle to avoid leak
+
 extern "C" int osd_installtimer(int frequency, void *func, int funcsize,
                                 void *counter, int countersize) {
-    TimerHandle_t t = xTimerCreate("nes",
+    // Stop and delete any timer from the previous emulator session.
+    if (_nesTimer) {
+        xTimerStop(_nesTimer, 0);
+        xTimerDelete(_nesTimer, portMAX_DELAY);
+        _nesTimer = nullptr;
+    }
+    _nesTimer = xTimerCreate("nes",
         configTICK_RATE_HZ / frequency, pdTRUE, nullptr,
         (TimerCallbackFunction_t)func);
-    xTimerStart(t, 0);
+    xTimerStart(_nesTimer, 0);
     return 0;
 }
 
@@ -478,25 +493,24 @@ extern "C" void osd_getinput(void) {
     if (frameCount > 90 && (buttons.readSysCurrent() & BTN_SYS_HOME)) {
         if (++homeFrames >= 20) {
             homeFrames = 0;
-            printf("[EMU] HOME held → quit\n");
-            event_t h = event_get(event_quit);
-            if (h) h(0);
+            printf("[EMU] HOME held → exit\n");
+            _emuExitReq = true;  // main_loop() увидит флаг после возврата nes_emulate()
+            nes_poweroff();      // выходим из while(false==nes.poweroff) безопасно
             return;
         }
     } else {
-        homeFrames = 0;  // сбрасываем если кнопка отпущена
+        homeFrames = 0;
     }
 
-    // ── Комбо выхода: SELECT + START удерживаются ~3 секунды (180 кадров) ──────
-    // Резервный вариант если нет кнопки HOME.
-    // Физические SELECT (бит 1 = BTN_B) + START (бит 0 = BTN_A).
+    // ── Комбо выхода: SELECT + START ~3 секунды ─────────────────────────────────
+    // Резервный вариант (без кнопки HOME). Та же безопасная механика.
     static int exitFrames = 0;
     if (frameCount > 90 && (pad & (BTN_A | BTN_B)) == (BTN_A | BTN_B)) {
         if (++exitFrames >= 60) {
             exitFrames = 0;
-            frameCount = 0;
-            event_t h = event_get(event_quit);
-            if (h) h(0);
+            printf("[EMU] SELECT+START held → exit\n");
+            _emuExitReq = true;
+            nes_poweroff();
             return;
         }
     } else {
@@ -602,6 +616,7 @@ extern "C" int osd_main(int argc, char *argv[]) { return 0; }
 static int logprint(const char *s) { return printf("%s", s); }
 
 extern "C" int osd_init(void) {
+    _emuExitReq = false;  // сбрасываем флаг при каждом запуске эмулятора
     log_chain_logfunc(logprint);
 
     // ── NES 8-bit framebuffer → PSRAM (frees ~60 KB of internal DRAM) ──────
@@ -637,6 +652,12 @@ extern "C" int osd_init(void) {
 }
 
 extern "C" void osd_shutdown(void) {
+    // Stop timer before tearing down audio/video (timer callback touches ring buf)
+    if (_nesTimer) {
+        xTimerStop(_nesTimer, 0);
+        xTimerDelete(_nesTimer, portMAX_DELAY);
+        _nesTimer = nullptr;
+    }
     if (_bmp)   { bmp_destroy(&_bmp);    _bmp   = nullptr; }
     if (_frame) { heap_caps_free(_frame); _frame = nullptr; }
     if (_fb)    { free(_fb);              _fb    = nullptr; }

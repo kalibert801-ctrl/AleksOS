@@ -35,6 +35,12 @@
 #include <gui.h>
 #include <vid_drv.h>
 
+/* Declared in osd.cpp — set when HOME/EXIT button held; checked here after
+** nes_emulate() returns so we can call main_eject() safely outside the frame
+** callback stack (calling it from osd_getinput() crashed: nes_destroy() was
+** invoked while nes_emulate() was still on the call stack). */
+extern bool osd_exit_requested(void);
+
 /* emulated system includes */
 #include <nes.h>
 
@@ -272,6 +278,14 @@ int main_loop(const char *filename, system_t type)
       if (internal_insert(console.nextfilename, console.nexttype))
       {
          ret = 1;
+         break;
+      }
+      /* Clean exit requested via HOME/EXIT button (set in osd_getinput).
+      ** nes_emulate() already returned (nes_poweroff was called), so calling
+      ** main_eject() here is safe — we are NOT inside the frame callback stack. */
+      if (osd_exit_requested())
+      {
+         main_eject();
          break;
       }
    }

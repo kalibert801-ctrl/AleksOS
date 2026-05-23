@@ -32,13 +32,38 @@ static int runEmulator_blocking(const char *path) {
 // STATE MACHINE
 // ─────────────────────────────────────────────────────────────
 
-enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB };
+enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
+             S_FILEMGR, S_FILEMGR_KB };
 static State state = S_MENU;
 
-static void toMenu()     { state = S_MENU;     menuDraw(); }
-static void toSettings() { state = S_SETTINGS; settingsDraw(); }
-static void toRemap()    { state = S_REMAP;    btnMapDraw(); }
-static void toWifi()     { state = S_WIFI;     wifiManagerDraw(); }
+// ── Screen-transition helpers ─────────────────────────────────────────────
+// fadeOut: dim to black in 5 steps × 10 ms ≈ 50 ms
+// fadeIn : restore brightness in 5 steps × 10 ms ≈ 50 ms
+// Total transition: ~100 ms — fast enough to feel instant, slow enough to look smooth.
+
+static void fadeOut() {
+    int start = (settings.brightness > 0) ? settings.brightness : 80;
+    for (int i = 5; i >= 0; i--) {
+        lcd.setBrightness((uint8_t)map(start * i / 5, 0, 100, 0, 255));
+        delay(10);
+    }
+}
+
+static void fadeIn() {
+    int target = (settings.brightness > 0) ? settings.brightness : 80;
+    for (int i = 0; i <= 5; i++) {
+        lcd.setBrightness((uint8_t)map(target * i / 5, 0, 100, 0, 255));
+        delay(10);
+    }
+    // Ensure exact target brightness
+    lcd.setBrightness((uint8_t)map(target, 0, 100, 0, 255));
+}
+
+static void toMenu()     { fadeOut(); state = S_MENU;     menuDraw();        fadeIn(); }
+static void toSettings() { fadeOut(); state = S_SETTINGS; settingsDraw();    fadeIn(); }
+static void toRemap()    { fadeOut(); state = S_REMAP;    btnMapDraw();      fadeIn(); }
+static void toWifi()     { fadeOut(); state = S_WIFI;     wifiManagerDraw(); fadeIn(); }
+static void toFileMgr()  { fadeOut(); state = S_FILEMGR;  fileMgrDraw();     fadeIn(); }
 
 // WiFi manager keyboard helper — opens password keyboard for selected network
 static void openWifiKeyboard() {
@@ -100,15 +125,14 @@ void setup() {
     ledInit();
     initDisplay();
 
-    // ── Boot screen ───────────────────────────────────────────
-    bootScreenRun();
-
-    // ── SD карта ─────────────────────────────────────────────
-    bootProgress(15, "Mounting SD...");
+    // ── SD карта + boot logo ──────────────────────────────────
+    // SD is initialised first so bootLogoLoad() can read /boot.raw.
     bool sdOk = sdMgr.init();
+    bootLogoLoad();          // loads image into PSRAM (no-op if missing)
+    bootScreenRun();         // show image (or fallback animation)
 
     if (sdOk) {
-        bootProgress(40, "Loading config...");
+        bootProgress(30, "Loading config...");
         cfgLoad();
         // Диагностика: печатаем что загрузилось из конфига
         Serial.printf("[CFG] btnMap: A=%02X B=%02X SEL=%02X STA=%02X UP=%02X DN=%02X LT=%02X RT=%02X\n",
@@ -120,15 +144,15 @@ void setup() {
         setBrightness(settings.brightness);
         ledSet(LED_GREEN);
 
-        bootProgress(65, "Scanning ROMs...");
+        bootProgress(60, "Scanning ROMs...");
         for (int i = 0; i < 6; i++) { bootTick(); delay(30); }
 
         char buf[32];
         snprintf(buf, sizeof(buf), "Found %d ROMs", sdMgr.count());
-        bootProgress(80, buf);
+        bootProgress(75, buf);
     } else {
         ledSet(LED_RED);
-        bootProgress(15, "SD error!");
+        bootProgress(20, "SD error! No card?");
         for (int i = 0; i < 12; i++) { bootTick(); delay(50); }
     }
 
@@ -177,15 +201,26 @@ void loop() {
 
     // btnPhys  — сырые физические кнопки (для экрана ремапа, где нужен физ. ввод)
     // btnNew   — кнопки после применения таблицы переназначения (для всего остального)
+    // shellBtn — btnNew с переставленными A↔STA и B↔SEL, чтобы раскладка оболочки
+    //            совпадала с раскладкой эмулятора. Эмулятор получает оригинальный btnNew.
     uint8_t btnPhys = buttons.readNew();
     uint8_t btnNew  = buttons.applyBtnMap(btnPhys);
+    // Swap A↔STA и B↔SEL только для оболочки
+    uint8_t shellBtn = btnNew;
+    {
+        uint8_t a   = (shellBtn & BTN_A)   ? BTN_STA : 0;
+        uint8_t sta = (shellBtn & BTN_STA) ? BTN_A   : 0;
+        uint8_t b   = (shellBtn & BTN_B)   ? BTN_SEL : 0;
+        uint8_t sel = (shellBtn & BTN_SEL) ? BTN_B   : 0;
+        shellBtn = (shellBtn & ~(BTN_A | BTN_STA | BTN_B | BTN_SEL)) | a | sta | b | sel;
+    }
     // Диагностика нажатий в оболочке
     if (settings.diagButtons && btnPhys) {
         Serial.printf("[SHELL] phys=0x%02X mapped=0x%02X |", btnPhys, btnNew);
-        if (btnNew & BTN_A)     Serial.print(" STA");
-        if (btnNew & BTN_B)     Serial.print(" SEL");
-        if (btnNew & BTN_SEL)   Serial.print(" A");
-        if (btnNew & BTN_STA)   Serial.print(" B");
+        if (btnNew & BTN_A)     Serial.print(" A");
+        if (btnNew & BTN_B)     Serial.print(" B");
+        if (btnNew & BTN_SEL)   Serial.print(" SEL");
+        if (btnNew & BTN_STA)   Serial.print(" STA");
         if (btnNew & BTN_UP)    Serial.print(" UP");
         if (btnNew & BTN_DOWN)  Serial.print(" DOWN");
         if (btnNew & BTN_LEFT)  Serial.print(" LEFT");
@@ -214,8 +249,8 @@ void loop() {
 
             uint8_t cur = buttons.applyBtnMap(buttons.readCurrent());  // текущее состояние с учётом ремапа
 
-            if (btnNew & BTN_UP)   { holdDir = BTN_UP;   holdStart = millis(); autoActive = false; }
-            if (btnNew & BTN_DOWN) { holdDir = BTN_DOWN; holdStart = millis(); autoActive = false; }
+            if (shellBtn & BTN_UP)   { holdDir = BTN_UP;   holdStart = millis(); autoActive = false; }
+            if (shellBtn & BTN_DOWN) { holdDir = BTN_DOWN; holdStart = millis(); autoActive = false; }
 
             if (holdDir && !(cur & holdDir)) {
                 holdDir = 0; autoActive = false;   // кнопка отпущена
@@ -236,13 +271,18 @@ void loop() {
         }
         // ────────────────────────────────────────────────────────────────
 
-        if (btnNew & BTN_UP)   { soundClick(); buttons.vibrate1(40); menuScrollUp();   break; }
-        if (btnNew & BTN_DOWN) { soundClick(); buttons.vibrate1(40); menuScrollDown(); break; }
-        if (btnNew & BTN_SEL)  {
+        if (shellBtn & BTN_UP)   { soundClick(); buttons.vibrate1(40); menuScrollUp();   break; }
+        if (shellBtn & BTN_DOWN) { soundClick(); buttons.vibrate1(40); menuScrollDown(); break; }
+        if (shellBtn & BTN_SEL)  {
             soundBack(); buttons.vibrate1(60); ledSet(LED_YELLOW); delay(120); ledSet(LED_OFF);
             toSettings(); break;
         }
-        if (btnNew & BTN_RIGHT) {
+        if (shellBtn & BTN_LEFT) {
+            // LEFT → file manager (browse, rename, delete ROMs)
+            soundClick(); buttons.vibrate1(40);
+            toFileMgr(); break;
+        }
+        if (shellBtn & BTN_RIGHT) {
             // RIGHT → показать информацию о выбранной игре
             int sel = menuSelected();
             if (sel >= 0 && sel < sdMgr.count()) {
@@ -251,7 +291,7 @@ void loop() {
             }
             break;
         }
-        if (btnNew & BTN_STA) {
+        if (shellBtn & BTN_STA) {
             // START → запуск игры
             int sel = menuSelected();
             if (sel >= 0 && sel < sdMgr.count()) {
@@ -288,8 +328,8 @@ void loop() {
     }
 
     case S_SETTINGS: {
-        if (btnNew) {
-            uint8_t r = settingsNavBtn(btnNew);
+        if (shellBtn) {
+            uint8_t r = settingsNavBtn(shellBtn);
             if (r & BTN_B) { soundBack(); buttons.vibrate1(50); cfgSave(); toMenu(); break; }
             if (r == 0x40) { soundClick(); buttons.vibrate1(40); toRemap(); break; }
             if (r == 0x80) { soundClick(); cfgSave(); toWifi(); break; }
@@ -322,12 +362,71 @@ void loop() {
         break;
     }
 
+    case S_FILEMGR: {
+        if (shellBtn) {
+            uint8_t r = fileMgrNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); buttons.vibrate1(40); toMenu(); break; }
+            if (r == BTN_A && sdMgr.count() > 0) {
+                // START → rename selected ROM
+                soundClick();
+                wifiKeyboardReset();
+                wifiKeyboardSetLabel("Rename:");
+                wifiKeyboardSetMask(false);  // show plain text, not dots
+                wifiKeyboardSetInitial(sdMgr.get(fileMgrSelected()).name.c_str());
+                state = S_FILEMGR_KB;
+                wifiKeyboardDraw(sdMgr.get(fileMgrSelected()).name.c_str());
+                break;
+            }
+            if (r == 0xFF) { soundClick(); break; }  // list changed, redrawn
+            break;
+        }
+        if (!tapped) break;
+        uint8_t action = fileMgrHandleTouch(x, y);
+        if (action == BTN_B) { soundBack(); toMenu(); }
+        else if (action == BTN_A && sdMgr.count() > 0) {
+            // RENAME button tapped
+            soundClick();
+            wifiKeyboardReset();
+            wifiKeyboardSetLabel("Rename:");
+            wifiKeyboardSetMask(false);
+            wifiKeyboardSetInitial(sdMgr.get(fileMgrSelected()).name.c_str());
+            state = S_FILEMGR_KB;
+            wifiKeyboardDraw(sdMgr.get(fileMgrSelected()).name.c_str());
+        }
+        // 0xFF = delete completed and redrawn, nothing else to do
+        break;
+    }
+
+    case S_FILEMGR_KB: {
+        // Rename keyboard — full physical button navigation
+        auto doRename = [&]() {
+            const char *newName = wifiKeyboardGetPassword();
+            if (newName && strlen(newName) > 0) {
+                bool ok = sdMgr.renameROM(fileMgrSelected(), newName);
+                if (ok) { soundSelect(); buttons.vibrate1(80); popupShow("Rename", "Renamed successfully", 1500); }
+                else    { popupShow("Rename", "Rename failed!", 2000); }
+            }
+            toFileMgr();
+        };
+        if (shellBtn) {
+            uint8_t r = wifiKeyboardNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); toFileMgr(); break; }
+            if (r == BTN_A) { soundClick(); doRename(); break; }
+            soundClick(); break;
+        }
+        if (!tapped) break;
+        uint8_t action = wifiKeyboardHandleTouch(x, y);
+        if (action == BTN_B) { soundBack(); toFileMgr(); }
+        else if (action == BTN_A) { soundClick(); doRename(); }
+        break;
+    }
+
     case S_PLAYING:
         break;
 
     case S_WIFI: {
-        if (btnNew) {
-            uint8_t r = wifiManagerNavBtn(btnNew);
+        if (shellBtn) {
+            uint8_t r = wifiManagerNavBtn(shellBtn);
             if (r == BTN_B) { soundBack(); buttons.vibrate1(40); cfgSave(); toSettings(); break; }
             if (r == BTN_A) { soundClick(); openWifiKeyboard(); break; }
             soundClick(); break;
@@ -340,7 +439,13 @@ void loop() {
     }
 
     case S_WIFI_KB: {
-        if (btnNew & BTN_SEL) { soundBack(); toWifi(); break; }
+        // Full physical button navigation for password keyboard
+        if (shellBtn) {
+            uint8_t r = wifiKeyboardNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); toWifi(); break; }
+            if (r == BTN_A) { soundClick(); doWifiConnect(); break; }
+            soundClick(); break;
+        }
         if (!tapped) break;
         uint8_t action = wifiKeyboardHandleTouch(x, y);
         if (action == BTN_B) { soundBack(); toWifi(); }

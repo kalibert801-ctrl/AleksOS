@@ -14,6 +14,11 @@ public:
     void scan();
     int  count() const { return (int)_roms.size(); }
     const ROMInfo& get(int i) const { return _roms[i]; }
+
+    // File manager operations
+    bool removeROM(int idx);                       // delete file + remove from list
+    bool renameROM(int idx, const char *newName);  // rename on SD + update list
+
 private:
     std::vector<ROMInfo> _roms;
 };

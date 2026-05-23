@@ -1,25 +1,29 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-//  boot_screen.h  —  Windows-style анимированная заставка  AleksOS
+//  boot_screen.h  —  AleksOS animated boot screen
 // ─────────────────────────────────────────────────────────────────────────────
 #ifdef __cplusplus
 
-#include <Arduino.h>   // uint8_t, uint32_t
+#include <Arduino.h>
 
-// Запустить вступительную анимацию (fade-in логотипа, ~0.8 с).
-// Вызывать ПОСЛЕ initDisplay().
+// Load /boot.raw from SD card into PSRAM.
+// Call AFTER sdMgr.init() and BEFORE bootScreenRun().
+// If the file is missing or PSRAM unavailable, falls back to text animation.
+void bootLogoLoad();
+
+// Run the intro animation (image from PSRAM, or fallback text fade-in).
+// Call AFTER initDisplay() and bootLogoLoad().
 void bootScreenRun();
 
-// Обновить строку статуса под точками.
-// pct : 0–100  (используется внутренне для логики)
-// msg : короткая строка ≤ 30 символов
+// Update the status line while initialisation is in progress.
+// pct : 0–100  (reserved for future progress bar)
+// msg : short string ≤ 30 chars
 void bootProgress(uint8_t pct, const char* msg);
 
-// Шаг анимации точек — вызывать в цикле пока идёт инициализация.
-// Возвращает true каждые ~80 мс (т.е. можно вызывать в delay-петле).
+// Advance the dot spinner — call every ~100 ms during startup.
 void bootTick();
 
-// Плавно погасить экран и завершить заставку.
+// Fade out, clear screen, free boot image buffer.
 void bootScreenDone();
 
 #endif // __cplusplus

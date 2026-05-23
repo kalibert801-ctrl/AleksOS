@@ -44,6 +44,7 @@ static void scanDir(std::vector<ROMInfo> &roms, const char *dir) {
         }
         f = root.openNextFile();
     }
+    root.close();
     Serial.printf("SD: found %d ROMs in '%s'\n", (int)roms.size(), dir);
 }
 
@@ -74,4 +75,34 @@ void SDManager::scan() {
         });
 
     Serial.printf("SD: total %d ROMs\n", (int)_roms.size());
+}
+
+bool SDManager::removeROM(int idx) {
+    if (idx < 0 || idx >= (int)_roms.size()) return false;
+    bool ok = SD.remove(_roms[idx].path.c_str());
+    if (ok) {
+        Serial.printf("SD: removed '%s'\n", _roms[idx].path.c_str());
+        _roms.erase(_roms.begin() + idx);
+    } else {
+        Serial.printf("SD: remove FAILED '%s'\n", _roms[idx].path.c_str());
+    }
+    return ok;
+}
+
+bool SDManager::renameROM(int idx, const char *newName) {
+    if (idx < 0 || idx >= (int)_roms.size()) return false;
+    // Build new path: same directory, new name + .nes
+    String oldPath = _roms[idx].path;
+    int slash = oldPath.lastIndexOf('/');
+    String dir = (slash >= 0) ? oldPath.substring(0, slash + 1) : "/";
+    String newPath = dir + String(newName) + ".nes";
+    if (!SD.rename(oldPath.c_str(), newPath.c_str())) {
+        Serial.printf("SD: rename FAILED '%s' -> '%s'\n",
+                      oldPath.c_str(), newPath.c_str());
+        return false;
+    }
+    Serial.printf("SD: renamed '%s' -> '%s'\n", oldPath.c_str(), newPath.c_str());
+    _roms[idx].name = String(newName);
+    _roms[idx].path = newPath;
+    return true;
 }

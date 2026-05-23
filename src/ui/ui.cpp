@@ -356,21 +356,45 @@ void menuTimeTick() {
     lcd.drawString(timeGetString().c_str(), (MBAR_TIME_X + MBAR_SET_X)/2, DPAD_Y + BTNBAR_H/2);
 }
 
+// ── Partial-redraw helpers (smooth scroll) ─────────────────────────────────
+// Redraws only the two rows that changed + scroll indicators.
+// A full menuDraw() is only triggered when the viewport offset changes.
+
+static void menuPartialUpdate(int slotA, int romA, int slotB, int romB) {
+    const Theme565 &t = getTheme();
+    // Erase and redraw row A
+    lcd.fillRect(0, HDR_H + slotA * ROW_H, SCREEN_W, ROW_H, t.bg);
+    if (romA >= 0 && romA < sdMgr.count()) drawRomRow(romA, slotA);
+    // Erase and redraw row B
+    lcd.fillRect(0, HDR_H + slotB * ROW_H, SCREEN_W, ROW_H, t.bg);
+    if (romB >= 0 && romB < sdMgr.count()) drawRomRow(romB, slotB);
+    // Erase right-column indicator zones and redraw
+    lcd.fillRect(SCREEN_W - 20, HDR_H, 20, DPAD_Y - HDR_H, t.bg);
+    drawScrollIndicators(sdMgr.count());
+}
+
 void menuScrollUp() {
-    if (_menuSel > 0) {
-        _menuSel--;
-        if (_menuSel < _menuOffset) _menuOffset = _menuSel;
-        menuDraw();
+    if (_menuSel <= 0) return;
+    int oldSel = _menuSel--;
+    if (_menuSel < _menuOffset) {
+        _menuOffset = _menuSel;
+        menuDraw();   // viewport scrolled — full redraw
+    } else {
+        menuPartialUpdate(_menuSel  - _menuOffset, _menuSel,
+                          oldSel    - _menuOffset, oldSel);
     }
 }
 
 void menuScrollDown() {
     int total = sdMgr.count();
-    if (_menuSel < total-1) {
-        _menuSel++;
-        if (_menuSel >= _menuOffset + ROWS_VISIBLE)
-            _menuOffset = _menuSel - ROWS_VISIBLE + 1;
-        menuDraw();
+    if (_menuSel >= total - 1) return;
+    int oldSel = _menuSel++;
+    if (_menuSel >= _menuOffset + ROWS_VISIBLE) {
+        _menuOffset = _menuSel - ROWS_VISIBLE + 1;
+        menuDraw();   // viewport scrolled — full redraw
+    } else {
+        menuPartialUpdate(oldSel  - _menuOffset, oldSel,
+                          _menuSel - _menuOffset, _menuSel);
     }
 }
 
@@ -1792,19 +1816,18 @@ const char *wifiManagerSelectedSSID() {
     _s = wifiMgr.getScanSSID(_wifiSel);
     return _s.c_str();
 }
-bool wifiManagerSelectedEncrypted() {
-    return wifiMgr.getScanEncrypted(_wifiSel);
-}
 
 // ══════════════════════════════════════════════════════════════
 // WIFI PASSWORD KEYBOARD
 // ══════════════════════════════════════════════════════════════
 
 static char  _kbPassword[65] = {};
-static int   _kbLen    = 0;
-static bool  _kbCaps   = false;
-static bool  _kbSymMode = false;
+static int   _kbLen      = 0;
+static bool  _kbCaps     = false;
+static bool  _kbSymMode  = false;
 static char  _kbSSID[64] = {};
+static char  _kbLabel[48] = {};   // override top label (empty = use "Network:")
+static bool  _kbMask     = true;  // true = show dots (password), false = show chars
 
 static const char *_kbAlpha[3] = {
     "QWERTYUIOP",
@@ -1823,6 +1846,70 @@ static const int KB_INP_H  = 30;
 static const int KB_ROW_Y  = 74;   // keyboard starts here
 static const int KB_ROW_H  = 34;
 static const int KB_KEY_W  = 32;
+
+// ── Physical-button cursor for keyboard ───────────────────────────────────────
+// Row 0: 10 alpha/num keys  (cols 0..9)
+// Row 1:  9 alpha/num keys  (cols 0..8)
+// Row 2:  9 positions       col 0=Shift, 1-7=chars, 8=Backspace
+// Row 3:  3 positions       col 0=SYM/123, 1=SPACE, 2=OK
+static int _kbCurRow = 0;
+static int _kbCurCol = 0;
+
+static int kbRowMaxCol(int row) {
+    switch (row) {
+        case 0: return 9;
+        case 1: return 8;
+        case 2: return 8;
+        case 3: return 2;
+        default: return 0;
+    }
+}
+
+static void kbClampCol() {
+    int mx = kbRowMaxCol(_kbCurRow);
+    if (_kbCurCol > mx) _kbCurCol = mx;
+    if (_kbCurCol < 0)  _kbCurCol = 0;
+}
+
+// Activate the key currently under the cursor (called on BTN_A press)
+// Returns BTN_A if the "OK" key was activated, 0 otherwise.
+static uint8_t kbActivateCurrent() {
+    const char **rows = _kbSymMode ? _kbSym : _kbAlpha;
+    auto addChar = [&](char c) {
+        if (_kbLen < 63) { _kbPassword[_kbLen++] = c; _kbPassword[_kbLen] = '\0'; }
+    };
+    if (_kbCurRow == 0) {
+        char c = rows[0][_kbCurCol];
+        if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
+        addChar(c);
+    } else if (_kbCurRow == 1) {
+        char c = rows[1][_kbCurCol];
+        if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
+        addChar(c);
+    } else if (_kbCurRow == 2) {
+        if (_kbCurCol == 0) {
+            if (_kbSymMode) _kbSymMode = false;
+            else            _kbCaps = !_kbCaps;
+        } else if (_kbCurCol == 8) {
+            if (_kbLen > 0) { _kbPassword[--_kbLen] = '\0'; }
+        } else {
+            int ki = _kbCurCol - 1;  // maps col 1-7 → chars index 0-6
+            char c = rows[2][ki];
+            if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
+            addChar(c);
+        }
+    } else if (_kbCurRow == 3) {
+        if (_kbCurCol == 0) {
+            _kbSymMode = !_kbSymMode;
+            _kbCaps = false;
+        } else if (_kbCurCol == 1) {
+            addChar(' ');
+        } else if (_kbCurCol == 2) {
+            return BTN_A;  // OK button
+        }
+    }
+    return 0;
+}
 
 // Draw a single key
 static void drawKey(int x, int y, int w, int h, const char *label, uint16_t bg, uint16_t fg) {
@@ -1843,7 +1930,9 @@ void wifiKeyboardDraw(const char *ssid) {
     lcd.fillRect(0, 0, SCREEN_W, KB_HDR_H, t.header);
     fsm(); lcd.setTextDatum(ML_DATUM);
     lcd.setTextColor(t.textSec);
-    lcd.drawString("Network:", 6, KB_HDR_H/2 - 8);
+    // Use custom label if set, otherwise default "Network:"
+    const char *lbl1 = (_kbLabel[0] != '\0') ? _kbLabel : "Network:";
+    lcd.drawString(lbl1, 6, KB_HDR_H/2 - 8);
     fmd(); lcd.setTextColor((uint16_t)COL_GOLD);
     String sn = String(ssid); if(sn.length()>22) sn=sn.substring(0,20)+"..";
     lcd.drawString(sn.c_str(), 6, KB_HDR_H/2 + 8);
@@ -1851,64 +1940,79 @@ void wifiKeyboardDraw(const char *ssid) {
     // Input field
     lcd.fillRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, t.rowOdd);
     lcd.drawRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, t.accent);
-    // Show password as dots (or last char visible)
+    // Show text: masked (dots) for passwords, plain for rename
     String dots = "";
-    for (int i = 0; i < _kbLen; i++) dots += (i < _kbLen-1) ? '*' : _kbPassword[i];
+    if (_kbMask) {
+        for (int i = 0; i < _kbLen; i++) dots += (i < _kbLen-1) ? '*' : _kbPassword[i];
+    } else {
+        dots = String(_kbPassword);
+    }
     dots += "|";  // cursor
     fsm(); lcd.setTextDatum(ML_DATUM);
     lcd.setTextColor(t.textPri);
     lcd.drawString(dots.c_str(), 10, KB_INP_Y + KB_INP_H/2);
 
-    // Keyboard rows
+    // Keyboard rows — cursor position (_kbCurRow/_kbCurCol) is highlighted with accent bg
     const char **rows = _kbSymMode ? _kbSym : _kbAlpha;
 
-    // Row 1 (10 keys × 32px)
+    // Helper: returns accent bg if this is the cursor key, else normal bg
+    auto keybg = [&](int row, int col, uint16_t normal) -> uint16_t {
+        return (_kbCurRow == row && _kbCurCol == col) ? t.accent : normal;
+    };
+
+    // Row 0 — 10 alpha/num keys (10 × 32 px)
     for (int i = 0; i < 10; i++) {
         char ch[3] = {0};
-        if (_kbSymMode) {
-            ch[0] = rows[0][i];
-        } else {
-            ch[0] = _kbCaps ? toupper(rows[0][i]) : tolower(rows[0][i]);
-        }
-        drawKey(i*KB_KEY_W, KB_ROW_Y, KB_KEY_W, KB_ROW_H, ch, t.header, (uint16_t)COL_WHITE);
+        ch[0] = _kbSymMode ? rows[0][i]
+                           : (_kbCaps ? toupper(rows[0][i]) : tolower(rows[0][i]));
+        drawKey(i * KB_KEY_W, KB_ROW_Y, KB_KEY_W, KB_ROW_H,
+                ch, keybg(0, i, t.header), (uint16_t)COL_WHITE);
     }
 
-    // Row 2 (9 keys, centered: offset 16px)
+    // Row 1 — 9 keys, centred (offset 16 px)
     int r2off = 16;
     for (int i = 0; i < 9; i++) {
         char ch[3] = {0};
-        if (_kbSymMode) {
-            ch[0] = rows[1][i];
-        } else {
-            ch[0] = _kbCaps ? toupper(rows[1][i]) : tolower(rows[1][i]);
-        }
-        drawKey(r2off + i*KB_KEY_W, KB_ROW_Y + KB_ROW_H, KB_KEY_W, KB_ROW_H, ch, t.header, (uint16_t)COL_WHITE);
+        ch[0] = _kbSymMode ? rows[1][i]
+                           : (_kbCaps ? toupper(rows[1][i]) : tolower(rows[1][i]));
+        drawKey(r2off + i * KB_KEY_W, KB_ROW_Y + KB_ROW_H, KB_KEY_W, KB_ROW_H,
+                ch, keybg(1, i, t.header), (uint16_t)COL_WHITE);
     }
 
-    // Row 3: [⇧/123](44px) + 7 keys + [⌫](44px)
-    int shiftW = 44, backW = 44;
-    int r3keysW = SCREEN_W - shiftW - backW;
-    int r3keyW  = r3keysW / 7;
-    int r3start = shiftW;
-    drawKey(0, KB_ROW_Y + KB_ROW_H*2, shiftW, KB_ROW_H,
-            _kbSymMode ? "ABC" : (_kbCaps ? "abc" : "ABC"),
-            _kbCaps ? t.accent : t.rowOdd, (uint16_t)COL_WHITE);
-    for (int i = 0; i < 7; i++) {
-        char ch[3] = {0};
-        if (_kbSymMode) {
-            ch[0] = rows[2][i];
-        } else {
-            ch[0] = _kbCaps ? toupper(rows[2][i]) : tolower(rows[2][i]);
+    // Row 2 — [Shift/ABC](44px) + 7 keys + [⌫](44px)
+    {
+        int shiftW = 44, backW = 44;
+        int r3keysW = SCREEN_W - shiftW - backW;
+        int r3keyW  = r3keysW / 7;
+        int r3start = shiftW;
+        // Shift key: col 0
+        uint16_t shiftBg = keybg(2, 0, _kbCaps ? t.accent : t.rowOdd);
+        drawKey(0, KB_ROW_Y + KB_ROW_H*2, shiftW, KB_ROW_H,
+                _kbSymMode ? "ABC" : (_kbCaps ? "abc" : "ABC"),
+                shiftBg, (uint16_t)COL_WHITE);
+        // 7 character keys: cols 1-7
+        for (int i = 0; i < 7; i++) {
+            char ch[3] = {0};
+            ch[0] = _kbSymMode ? rows[2][i]
+                               : (_kbCaps ? toupper(rows[2][i]) : tolower(rows[2][i]));
+            drawKey(r3start + i * r3keyW, KB_ROW_Y + KB_ROW_H*2, r3keyW, KB_ROW_H,
+                    ch, keybg(2, i + 1, t.header), (uint16_t)COL_WHITE);
         }
-        drawKey(r3start + i*r3keyW, KB_ROW_Y + KB_ROW_H*2, r3keyW, KB_ROW_H, ch, t.header, (uint16_t)COL_WHITE);
+        // Backspace: col 8
+        drawKey(SCREEN_W - backW, KB_ROW_Y + KB_ROW_H*2, backW, KB_ROW_H,
+                "<", keybg(2, 8, t.rowOdd), (uint16_t)COL_GOLD);
     }
-    drawKey(SCREEN_W - backW, KB_ROW_Y + KB_ROW_H*2, backW, KB_ROW_H, "<", t.rowOdd, (uint16_t)COL_GOLD);
 
-    // Row 4: [SYM/123](64px) [SPACE] [OK](64px)
-    int r4y = KB_ROW_Y + KB_ROW_H*3;
-    drawKey(0,         r4y, 64, KB_ROW_H, _kbSymMode ? "ABC" : "123", t.rowOdd, (uint16_t)COL_WHITE);
-    drawKey(65,        r4y, 190, KB_ROW_H, "SPACE", t.header, (uint16_t)COL_WHITE);
-    drawKey(256,       r4y, 64, KB_ROW_H, "OK", t.accent, (uint16_t)COL_WHITE);
+    // Row 3 — [SYM/123](64px) [SPACE](190px) [OK](64px)
+    {
+        int r4y = KB_ROW_Y + KB_ROW_H * 3;
+        drawKey(0,   r4y, 64,  KB_ROW_H,
+                _kbSymMode ? "ABC" : "123", keybg(3, 0, t.rowOdd), (uint16_t)COL_WHITE);
+        drawKey(65,  r4y, 190, KB_ROW_H,
+                "SPACE", keybg(3, 1, t.header), (uint16_t)COL_WHITE);
+        drawKey(256, r4y, 64,  KB_ROW_H,
+                "OK", keybg(3, 2, t.accent), (uint16_t)COL_WHITE);
+    }
 }
 
 uint8_t wifiKeyboardHandleTouch(int x, int y) {
@@ -1976,8 +2080,42 @@ uint8_t wifiKeyboardHandleTouch(int x, int y) {
 }
 
 uint8_t wifiKeyboardNavBtn(uint8_t btn) {
-    if (btn & BTN_B) return BTN_B;  // Cancel
-    if (btn & BTN_A) return BTN_A;  // OK
+    // D-pad: move cursor
+    if (btn & BTN_UP) {
+        if (_kbCurRow > 0) { _kbCurRow--; kbClampCol(); }
+        wifiKeyboardDraw(_kbSSID); return 0;
+    }
+    if (btn & BTN_DOWN) {
+        if (_kbCurRow < 3) { _kbCurRow++; kbClampCol(); }
+        wifiKeyboardDraw(_kbSSID); return 0;
+    }
+    if (btn & BTN_LEFT) {
+        int mx = kbRowMaxCol(_kbCurRow);
+        _kbCurCol = (_kbCurCol > 0) ? _kbCurCol - 1 : mx;  // wrap left→end
+        wifiKeyboardDraw(_kbSSID); return 0;
+    }
+    if (btn & BTN_RIGHT) {
+        int mx = kbRowMaxCol(_kbCurRow);
+        _kbCurCol = (_kbCurCol < mx) ? _kbCurCol + 1 : 0;  // wrap end→left
+        wifiKeyboardDraw(_kbSSID); return 0;
+    }
+    // A / STA: activate current key
+    if (btn & (BTN_A | BTN_STA)) {
+        uint8_t r = kbActivateCurrent();
+        wifiKeyboardDraw(_kbSSID);
+        return r;  // BTN_A if OK was activated, else 0
+    }
+    // B: backspace if text exists, cancel if empty
+    if (btn & BTN_B) {
+        if (_kbLen > 0) {
+            _kbPassword[--_kbLen] = '\0';
+            wifiKeyboardDraw(_kbSSID);
+            return 0;
+        }
+        return BTN_B;  // nothing to delete → cancel
+    }
+    // SEL: cancel
+    if (btn & BTN_SEL) return BTN_B;
     return 0;
 }
 
@@ -1985,10 +2123,32 @@ const char *wifiKeyboardGetPassword() {
     return _kbPassword;
 }
 
-// Clear keyboard state (call before opening keyboard for a new network)
+// Clear keyboard state (call before opening keyboard)
 void wifiKeyboardReset() {
     _kbPassword[0] = '\0'; _kbLen = 0;
     _kbCaps = false; _kbSymMode = false;
+    _kbLabel[0] = '\0';   // reset to default "Network:"
+    _kbMask = true;       // reset to password mode
+    _kbCurRow = 0;        // cursor top-left
+    _kbCurCol = 0;
+}
+
+// Override the top label line (e.g. "Rename:" for file manager)
+void wifiKeyboardSetLabel(const char *label) {
+    strncpy(_kbLabel, label, sizeof(_kbLabel) - 1);
+    _kbLabel[sizeof(_kbLabel) - 1] = '\0';
+}
+
+// Pre-fill input buffer (e.g. current ROM name for rename)
+void wifiKeyboardSetInitial(const char *text) {
+    strncpy(_kbPassword, text, sizeof(_kbPassword) - 1);
+    _kbPassword[sizeof(_kbPassword) - 1] = '\0';
+    _kbLen = (int)strlen(_kbPassword);
+}
+
+// Control whether input is masked (true=dots, false=plain)
+void wifiKeyboardSetMask(bool mask) {
+    _kbMask = mask;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2256,4 +2416,233 @@ void picoOtaScreen(const char *picoUrl) {
     } else {
         popupShow("Pico Update", "Failed! Check Serial log.", 5000);
     }
+}
+
+// ══════════════════════════════════════════════════════════════
+// FILE MANAGER
+// ══════════════════════════════════════════════════════════════
+// Access via BTN_LEFT in main menu.
+// Shows ROM list with rename and delete actions.
+// ══════════════════════════════════════════════════════════════
+
+#define FM_ROW_H   32
+#define FM_ROWS    ((DPAD_Y - HDR_H) / FM_ROW_H)   // 4 visible rows
+
+static int _fmSel    = 0;
+static int _fmOffset = 0;
+
+// ── Bottom bar: [← Back] [✏ RENAME] [🗑 DELETE] ──────────────
+static void drawFileMgrBar() {
+    const Theme565 &t = getTheme();
+    int by = DPAD_Y;
+    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+    int ty = by + BTNBAR_H/2;
+
+    // Zone 1: BACK (0..106)
+    lcd.fillRoundRect(4, by+5, 102, 34, 8, t.rowOdd);
+    int ax = 16;
+    lcd.fillTriangle(ax, ty, ax+8, ty-6, ax+8, ty+6, (uint16_t)COL_GOLD);
+    fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(ML_DATUM);
+    lcd.drawString(S().back, ax+12, ty);
+
+    // Dividers
+    lcd.drawFastVLine(107, by+6, BTNBAR_H-12, 0x3186);
+    lcd.drawFastVLine(214, by+6, BTNBAR_H-12, 0x3186);
+
+    bool hasRoms = (sdMgr.count() > 0);
+
+    // Zone 2: RENAME (107..213)
+    fmd(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(hasRoms ? (uint16_t)COL_GOLD : t.textSec);
+    lcd.drawString("RENAME", 160, ty);
+
+    // Zone 3: DELETE (214..319)
+    lcd.setTextColor(hasRoms ? t.danger : t.textSec);
+    lcd.drawString("DELETE", 267, ty);
+}
+
+// ── One ROM row ─────────────────────────────────────────────────
+static void drawFileMgrRow(int romIdx, int slot) {
+    const Theme565 &t = getTheme();
+    int y   = HDR_H + slot * FM_ROW_H;
+    bool sel = (romIdx == _fmSel);
+
+    uint16_t bg = sel ? t.selected : (slot % 2 ? t.rowOdd : t.rowEven);
+    lcd.fillRect(0, y, SCREEN_W, FM_ROW_H, bg);
+    if (sel) lcd.fillRect(0, y, 3, FM_ROW_H, t.accent);
+
+    if (slot > 0) lcd.drawFastHLine(6, y, SCREEN_W-12, (uint16_t)COL_SEP);
+
+    const ROMInfo &rom = sdMgr.get(romIdx);
+    // Name (left, truncated)
+    fmd(); lcd.setTextDatum(ML_DATUM);
+    lcd.setTextColor(sel ? (uint16_t)COL_WHITE : t.textPri);
+    String name = rom.name;
+    if (name.length() > 22) name = name.substring(0, 20) + "..";
+    lcd.drawString(name.c_str(), 10, y + FM_ROW_H/2);
+
+    // Size (right)
+    fsm(); lcd.setTextDatum(MR_DATUM);
+    lcd.setTextColor(sel ? (uint16_t)COL_GOLD : t.textSec);
+    String sz = (rom.size < 1024) ? String(rom.size) + "B"
+                                  : String(rom.size / 1024) + "KB";
+    lcd.drawString(sz.c_str(), SCREEN_W - 8, y + FM_ROW_H/2);
+}
+
+// ── Scroll indicators ───────────────────────────────────────────
+static void drawFileMgrScrollIndicators() {
+    const Theme565 &t = getTheme();
+    int total = sdMgr.count();
+    if (_fmOffset > 0) {
+        int ax = SCREEN_W - 14, ay = HDR_H + 6;
+        lcd.fillTriangle(ax, ay+6, ax-5, ay+12, ax+5, ay+12, t.accent);
+    }
+    if (_fmOffset + FM_ROWS < total) {
+        int ax = SCREEN_W - 14, ay = DPAD_Y - 14;
+        lcd.fillTriangle(ax, ay+6, ax-5, ay, ax+5, ay, t.accent);
+    }
+}
+
+void fileMgrDraw() {
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+
+    // Header
+    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+    flg(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("FILE MANAGER", SCREEN_W/2, HDR_H/2);
+    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+
+    int total = sdMgr.count();
+    if (total == 0) {
+        fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+        int cy = HDR_H + (DPAD_Y - HDR_H)/2;
+        lcd.drawString("No ROMs found", SCREEN_W/2, cy - 10);
+        fsm(); lcd.drawString("Copy .nes files to SD card", SCREEN_W/2, cy + 14);
+    } else {
+        // Clamp scroll
+        if (_fmSel < _fmOffset) _fmOffset = _fmSel;
+        if (_fmSel >= _fmOffset + FM_ROWS) _fmOffset = _fmSel - FM_ROWS + 1;
+        if (_fmOffset < 0) _fmOffset = 0;
+
+        int end = min(_fmOffset + FM_ROWS, total);
+        for (int i = _fmOffset; i < end; i++)
+            drawFileMgrRow(i, i - _fmOffset);
+        drawFileMgrScrollIndicators();
+
+        // ROM count badge
+        char badge[16];
+        snprintf(badge, sizeof(badge), "%d files", total);
+        fsm(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MR_DATUM);
+        lcd.drawString(badge, SCREEN_W - 8, HDR_H/2);
+    }
+
+    drawFileMgrBar();
+}
+
+// ── Delete confirm popup ────────────────────────────────────────
+// Returns true if user confirmed, false if cancelled.
+static bool fileMgrConfirmDelete(const String &name) {
+    const Theme565 &t = getTheme();
+    int pw = 270, ph = 110;
+    int px = (SCREEN_W - pw)/2, py = (SCREEN_H - ph)/2;
+    lcd.fillRoundRect(px+3, py+3, pw, ph, 10, 0x0841);
+    lcd.fillRoundRect(px, py, pw, ph, 10, t.header);
+    lcd.drawRoundRect(px, py, pw, ph, 10, t.danger);
+    lcd.drawFastHLine(px+8, py+32, pw-16, 0x2945);
+
+    fmd(); lcd.setTextColor(t.danger); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Delete?", SCREEN_W/2, py+16);
+    fsm(); lcd.setTextColor(t.textPri);
+    String n = name; if (n.length() > 28) n = n.substring(0, 26) + "..";
+    lcd.drawString(n.c_str(), SCREEN_W/2, py+52);
+
+    // Buttons: [Cancel] [Delete]
+    int bby = py + ph - 38;
+    lcd.fillRoundRect(px+8,   bby, 110, 28, 6, t.rowOdd);
+    lcd.fillRoundRect(px+152, bby, 110, 28, 6, t.danger);
+    fsm(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(t.textSec);
+    lcd.drawString("Cancel", px + 63, bby + 14);
+    lcd.setTextColor(t.bg);
+    lcd.drawString("DELETE", px + 207, bby + 14);
+
+    delay(300);
+    uint32_t until = millis() + 8000;
+    while (millis() < until) {
+        if (touch.isTouched()) {
+            int tx, ty; touch.getXY(tx, ty);
+            // Delete button zone (right half of popup)
+            if (ty >= bby && ty < bby + 28) {
+                return (tx >= px + 152);
+            }
+        }
+        delay(20);
+    }
+    return false;  // timeout → cancel
+}
+
+int fileMgrSelected() { return _fmSel; }
+
+uint8_t fileMgrHandleTouch(int x, int y) {
+    if (y >= DPAD_Y) {
+        // Bottom bar
+        if (x < 107) return BTN_B;   // Back
+
+        if (sdMgr.count() == 0) return 0;
+
+        if (x >= 107 && x < 214) {
+            // RENAME — signal to main to open keyboard
+            return BTN_A;
+        }
+        if (x >= 214) {
+            // DELETE — confirm then remove
+            const String &name = sdMgr.get(_fmSel).name;
+            if (fileMgrConfirmDelete(name)) {
+                sdMgr.removeROM(_fmSel);
+                // Clamp selection after deletion
+                if (_fmSel >= sdMgr.count() && _fmSel > 0) _fmSel--;
+                if (_fmOffset > _fmSel) _fmOffset = _fmSel;
+                fileMgrDraw();
+                return 0xFF;  // 0xFF = list changed, stay in file manager
+            }
+            // Cancelled — just redraw
+            fileMgrDraw();
+        }
+        return 0;
+    }
+
+    if (y < HDR_H || sdMgr.count() == 0) return 0;
+
+    // Row tap
+    int row = (y - HDR_H) / FM_ROW_H;
+    int idx  = _fmOffset + row;
+    if (idx >= 0 && idx < sdMgr.count()) {
+        _fmSel = idx;
+        fileMgrDraw();
+    }
+    return 0;
+}
+
+uint8_t fileMgrNavBtn(uint8_t btn) {
+    int total = sdMgr.count();
+    if (btn & BTN_UP)   { if (_fmSel > 0)        { _fmSel--; fileMgrDraw(); } }
+    if (btn & BTN_DOWN) { if (_fmSel < total - 1) { _fmSel++; fileMgrDraw(); } }
+    if (btn & BTN_SEL)  return BTN_B;   // SELECT = back to menu
+    if (btn & BTN_STA && total > 0)  return BTN_A;   // START = rename
+    if (btn & BTN_RIGHT && total > 0) {
+        // RIGHT = delete (with confirm)
+        const String &name = sdMgr.get(_fmSel).name;
+        if (fileMgrConfirmDelete(name)) {
+            sdMgr.removeROM(_fmSel);
+            if (_fmSel >= sdMgr.count() && _fmSel > 0) _fmSel--;
+            if (_fmOffset > _fmSel) _fmOffset = _fmSel;
+            fileMgrDraw();
+            return 0xFF;  // stay in file manager
+        }
+        fileMgrDraw();
+    }
+    return 0;
 }

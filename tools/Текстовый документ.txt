@@ -1,0 +1,1 @@
+C:\Users\kalib\AppData\Local\Python\pythoncore-3.14-64\python.exe make_boot_logo.py "C:\Users\kalib\OneDrive\Desktop\1773568222077.png"

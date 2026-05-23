@@ -61,8 +61,11 @@ void cfgLoad() {
 }
 
 void cfgSave() {
-    SD.remove(CFG_FILE);
-    File f = SD.open(CFG_FILE, FILE_WRITE);
+    // Write to temp file first — if power dies mid-write, old config survives.
+    // SD.rename() is atomic on FAT: only replaces CFG_FILE after a full write.
+    const char *tmpPath = "/config.tmp";
+    SD.remove(tmpPath);
+    File f = SD.open(tmpPath, FILE_WRITE);
     if (!f) return;
     StaticJsonDocument<1536> doc;
 
@@ -98,4 +101,7 @@ void cfgSave() {
 
     serializeJson(doc, f);
     f.flush(); f.close();
+    // Atomically replace old config with new one
+    SD.remove(CFG_FILE);
+    SD.rename(tmpPath, CFG_FILE);
 }

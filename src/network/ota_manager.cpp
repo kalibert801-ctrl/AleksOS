@@ -55,8 +55,8 @@ bool otaCheckUpdate(OTAInfo &out) {
     // Фильтрация снижает потребность в RAM с ~32KB до ~1KB.
     StaticJsonDocument<128> filter;
     filter["tag_name"] = true;
-    filter["assets"][0]["name"] = true;
-    filter["assets"][0]["browser_download_url"] = true;
+    filter["assets"][true]["name"] = true;
+    filter["assets"][true]["browser_download_url"] = true;
 
     // Буфер для отфильтрованных данных: tag + 2 ассета × ~120 байт
     DynamicJsonDocument doc(2048);
