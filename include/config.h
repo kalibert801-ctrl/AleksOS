@@ -2,7 +2,7 @@
 // ── Версионирование ───────────────────────────────────────
 // Правило: minor изменения = вторая цифра +1 (v8.4→v8.5)
 //          major изменения = первая цифра +1, вторая = 0 (v8.x→v9.0)
-#define FIRMWARE_VERSION "AleksOS BETA v14.33"
+#define FIRMWARE_VERSION "AleksOS BETA v14.34"
 
 // ── Дисплей (VSPI) ────────────────────────────────────────
 #define TFT_CS   15
@@ -59,7 +59,9 @@
                                //           ver = MAJOR*100+MINOR  напр. v14.4 → 1404
 #define PICO_CMD_LED     0x10  // data=RGB565 ниблы (будущее)
 #define PICO_CMD_HAPTIC  0x20  // data=длительность×10мс (будущее)
-#define PICO_BTN_PKT     0x42  // Pico→ESP32: байт состояния кнопок
+#define PICO_BTN_PKT     0x42  // Pico→ESP32: байт состояния кнопок (8 игровых кнопок)
+#define PICO_SYS_PKT     0x43  // Pico→ESP32: системные кнопки  [0xAA][0x43][sys][~sys]
+                               //   sys бит 0 = HOME (GP14) — выход из эмулятора
 #define PICO_CMD_OTA     0xF0  // data=0  → Pico входит в UART OTA режим
 
 // ── Индексы физических кнопок в btnMap[] ─────────────────

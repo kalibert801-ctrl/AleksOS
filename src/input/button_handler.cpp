@@ -56,6 +56,16 @@ void ButtonHandler::_handlePacket() {
                 _lastPkt = millis();
             }
             break;
+        case PICO_SYS_PKT:               // 0x43 — системные кнопки (HOME и т.д.)
+            if (chk == (uint8_t)(~data)) {
+                _sysState = data;
+                _lastPkt  = millis();
+                if (settings.diagButtons && data) {
+                    Serial.printf("[PICO] SYS=0x%02X%s\n", data,
+                                  (data & BTN_SYS_HOME) ? " HOME" : "");
+                }
+            }
+            break;
         case 0x50:                       // PONG
             _lastPkt = millis();
             break;

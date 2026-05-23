@@ -468,12 +468,22 @@ extern "C" void osd_getinput(void) {
     // Применяем таблицу ремапа: физический бит i → settings.btnMap[i]
     uint8_t pad = buttons.applyBtnMap(buttons.readCurrent());
 
-    // ── Комбо выхода: SELECT + START удерживаются ~3 секунды (180 кадров) ──────
-    // Физические SELECT (бит 1 = BTN_B) + START (бит 0 = BTN_A).
-    // Первые 90 кадров игнорируем — Pico ещё инициализируется.
+    // ── Кнопка HOME (GP14 на Pico, пакет 0x43 бит 0) ─────────────────────────
+    // Мгновенный выход из эмулятора в меню — без перезагрузки.
+    // Первые 90 кадров игнорируем (Pico инициализируется, GP14 может быть плавающим).
     static int frameCount = 0;
-    static int exitFrames = 0;
     frameCount++;
+    if (frameCount > 90 && (buttons.readSysCurrent() & BTN_SYS_HOME)) {
+        printf("[EMU] HOME pressed → quit\n");
+        event_t h = event_get(event_quit);
+        if (h) h(0);
+        return;
+    }
+
+    // ── Комбо выхода: SELECT + START удерживаются ~3 секунды (180 кадров) ──────
+    // Резервный вариант если нет кнопки HOME.
+    // Физические SELECT (бит 1 = BTN_B) + START (бит 0 = BTN_A).
+    static int exitFrames = 0;
     if (frameCount > 90 && (pad & (BTN_A | BTN_B)) == (BTN_A | BTN_B)) {
         if (++exitFrames >= 60) {
             exitFrames = 0;

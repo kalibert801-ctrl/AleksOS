@@ -2,10 +2,11 @@
 //
 // ── Версія прошивки Pico ──────────────────────────────────────────────────────
 #define PICO_VER_MAJOR  5
-#define PICO_VER_MINOR  7
+#define PICO_VER_MINOR  9
 // ─────────────────────────────────────────────────────────────────────────────
 // ПРОТОКОЛ (звичайний режим):
-//   Pico→ESP32: [0xAA][0x42][btns][~btns]       — 4 байти, кожні 16мс
+//   Pico→ESP32: [0xAA][0x42][btns][~btns]       — 4 байти, кожні 16мс (ігрові кнопки)
+//   Pico→ESP32: [0xAA][0x43][sys][~sys]         — 4 байти, кожні 16мс (системні: HOME GP14 бит0)
 //   ESP32→Pico: [0xAA][cmd][data][cmd^data]      — 4 байти
 //     0x01 = PING
 //     0x02 = VERSION   → відповідь [0xAA][0x56][hi][lo]
@@ -50,12 +51,13 @@
 #define PIN_SELECT 8
 #define PIN_START  9
 #define PIN_MOT1   10
+#define PIN_HOME   14   // GP14 — кнопка HOME/EXIT (припаяна, вихід з емулятора)
 #define LED_PIN    25
 
 // ── Параметри авто-вібро від кнопок ──────────────────────────────────────────
 #define BTN_HAPTIC_DUR   3   // 30мс (×10мс)
 
-// ── Біти кнопок ──────────────────────────────────────────────────────────────
+// ── Біти ігрових кнопок (пакет 0x42) ─────────────────────────────────────────
 #define BIT_A      0x01
 #define BIT_B      0x02
 #define BIT_SEL    0x04
@@ -64,6 +66,9 @@
 #define BIT_DOWN   0x20
 #define BIT_LEFT   0x40
 #define BIT_RIGHT  0x80
+
+// ── Біти системних кнопок (пакет 0x43) ───────────────────────────────────────
+#define BIT_SYS_HOME  0x01   // бит 0 = GP14 HOME
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // OTA: SRAM буфер для прийому прошивки (Фаза 1)
@@ -328,13 +333,26 @@ uint8_t readButtons() {
     return stable;
 }
 
+// Дебаунс системних кнопок (HOME GP14 та ін.)
+static uint8_t  lastRawSys    = 0;
+static uint8_t  stableSys     = 0;
+static uint32_t lastChangeSys = 0;
+
+uint8_t readSysButtons() {
+    uint8_t raw = 0;
+    if (!digitalRead(PIN_HOME)) raw |= BIT_SYS_HOME;   // LOW = натиснута (PULLUP)
+    if (raw != lastRawSys) { lastRawSys = raw; lastChangeSys = millis(); }
+    if (millis() - lastChangeSys >= 8) stableSys = raw;
+    return stableSys;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // setup / loop
 // ═══════════════════════════════════════════════════════════════════════════════
 void setup() {
     Serial1.begin(115200);
     const int btns[] = {PIN_UP, PIN_DOWN, PIN_LEFT, PIN_RIGHT,
-                        PIN_A, PIN_B, PIN_SELECT, PIN_START};
+                        PIN_A, PIN_B, PIN_SELECT, PIN_START, PIN_HOME};
     for (int p : btns) pinMode(p, INPUT_PULLUP);
     pinMode(PIN_MOT1, OUTPUT); analogWrite(PIN_MOT1, 0);
     pinMode(LED_PIN,  OUTPUT);
@@ -359,9 +377,16 @@ void loop() {
         }
         prevBtn = b;
 
+        // Пакет 0x42 — ігрові кнопки
         uint8_t pkt[4] = {0xAA, 0x42, b, (uint8_t)(~b)};
         Serial1.write(pkt, 4);
+
+        // Пакет 0x43 — системні кнопки (HOME GP14)
+        uint8_t s = readSysButtons();
+        uint8_t spkt[4] = {0xAA, 0x43, s, (uint8_t)(~s)};
+        Serial1.write(spkt, 4);
+
         lastSend = millis();
-        digitalWrite(LED_PIN, b != 0);
+        digitalWrite(LED_PIN, b != 0 || s != 0);
     }
 }

@@ -23,6 +23,9 @@
 //     0x21 = HAPTIC2  data=duration×10мс
 // ═══════════════════════════════════════════════════════════════════
 
+// Маски системных кнопок (пакет PICO_SYS_PKT = 0x43)
+#define BTN_SYS_HOME   0x01   // бит 0 = HOME / EXIT (GP14 на Pico)
+
 // Команды вибро
 #define PICO_CMD_HAPTIC1   0x20   // мотор 1
 #define PICO_CMD_HAPTIC2   0x21   // мотор 2
@@ -34,7 +37,8 @@ public:
     void    init();
     uint8_t read();
     uint8_t readNew();
-    uint8_t readCurrent() const { return _state; }  // текущее состояние (для авто-прокрутки)
+    uint8_t readCurrent()    const { return _state;    }  // игровые кнопки (для авто-прокрутки)
+    uint8_t readSysCurrent() const { return _sysState; }  // системные кнопки (HOME и т.д.)
 
     // Применяет таблицу переназначения кнопок (settings.btnMap) к произвольному
     // байту физического состояния. Бит i физ. кнопки → settings.btnMap[i].
@@ -53,8 +57,9 @@ public:
     void picoHapticEnable(bool en);
 
 private:
-    uint8_t  _state  = 0;
-    uint8_t  _prev   = 0;
+    uint8_t  _state    = 0;
+    uint8_t  _prev     = 0;
+    uint8_t  _sysState = 0;   // системные кнопки (HOME и т.д.) из пакета 0x43
     uint8_t  _rxBuf[3] = {};
     uint8_t  _rxIdx  = 0;
     bool     _inPkt  = false;
