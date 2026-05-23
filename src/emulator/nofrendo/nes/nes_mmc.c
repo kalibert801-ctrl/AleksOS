@@ -171,6 +171,7 @@ bool mmc_peek(int map_num)
       map_ptr++;
    }
 
+   printf("[MMC] mapper %d NOT in table\n", map_num);
    return false;
 }
 

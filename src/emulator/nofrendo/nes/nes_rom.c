@@ -391,6 +391,9 @@ static int rom_getheader(unsigned char **rom, rominfo_t *rominfo)
    if (99 == rominfo->mapper_number)
       rominfo->flags |= ROM_FLAG_VERSUS;
 
+   printf("[ROM] mapper=%d  rom_type=0x%02x  hinybble=0x%02x  dirty=%d\n",
+          rominfo->mapper_number, head.rom_type, head.mapper_hinybble, (int)header_dirty);
+
    return 0;
 }
 
