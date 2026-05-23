@@ -2,7 +2,7 @@
 //
 // ── Версія прошивки Pico ──────────────────────────────────────────────────────
 #define PICO_VER_MAJOR  5
-#define PICO_VER_MINOR  9
+#define PICO_VER_MINOR  10
 // ─────────────────────────────────────────────────────────────────────────────
 // ПРОТОКОЛ (звичайний режим):
 //   Pico→ESP32: [0xAA][0x42][btns][~btns]       — 4 байти, кожні 16мс (ігрові кнопки)
@@ -334,6 +334,9 @@ uint8_t readButtons() {
 }
 
 // Дебаунс системних кнопок (HOME GP14 та ін.)
+// Дебаунс 50 мс (проти дрейфу floating pin та брязкоту контактів).
+// Пакет 0x43 надсилається ТІЛЬКИ при зміні стану — не кожні 16 мс.
+// Це повертає UART трафік до рівня v5.8 (4 байти/16 мс у нормі).
 static uint8_t  lastRawSys    = 0;
 static uint8_t  stableSys     = 0;
 static uint32_t lastChangeSys = 0;
@@ -342,7 +345,7 @@ uint8_t readSysButtons() {
     uint8_t raw = 0;
     if (!digitalRead(PIN_HOME)) raw |= BIT_SYS_HOME;   // LOW = натиснута (PULLUP)
     if (raw != lastRawSys) { lastRawSys = raw; lastChangeSys = millis(); }
-    if (millis() - lastChangeSys >= 8) stableSys = raw;
+    if (millis() - lastChangeSys >= 50) stableSys = raw; // 50 мс дебаунс
     return stableSys;
 }
 
@@ -366,6 +369,7 @@ void loop() {
 
     static uint32_t lastSend = 0;
     static uint8_t  prevBtn  = 0;
+    static uint8_t  prevSys  = 0xFF; // 0xFF — форсуємо відправку першого пакету
 
     if (millis() - lastSend >= 16) {
         uint8_t b = readButtons();
@@ -377,14 +381,19 @@ void loop() {
         }
         prevBtn = b;
 
-        // Пакет 0x42 — ігрові кнопки
+        // Пакет 0x42 — ігрові кнопки (кожні 16 мс)
         uint8_t pkt[4] = {0xAA, 0x42, b, (uint8_t)(~b)};
         Serial1.write(pkt, 4);
 
-        // Пакет 0x43 — системні кнопки (HOME GP14)
+        // Пакет 0x43 — системні кнопки (HOME GP14): тільки при зміні стану.
+        // Не надсилаємо кожні 16 мс — це вдвічі скорочує UART трафік.
+        // ESP32 зберігає останній отриманий стан у _sysState до наступної зміни.
         uint8_t s = readSysButtons();
-        uint8_t spkt[4] = {0xAA, 0x43, s, (uint8_t)(~s)};
-        Serial1.write(spkt, 4);
+        if (s != prevSys) {
+            uint8_t spkt[4] = {0xAA, 0x43, s, (uint8_t)(~s)};
+            Serial1.write(spkt, 4);
+            prevSys = s;
+        }
 
         lastSend = millis();
         digitalWrite(LED_PIN, b != 0 || s != 0);

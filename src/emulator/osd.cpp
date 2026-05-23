@@ -469,15 +469,22 @@ extern "C" void osd_getinput(void) {
     uint8_t pad = buttons.applyBtnMap(buttons.readCurrent());
 
     // ── Кнопка HOME (GP14 на Pico, пакет 0x43 бит 0) ─────────────────────────
-    // Мгновенный выход из эмулятора в меню — без перезагрузки.
-    // Первые 90 кадров игнорируем (Pico инициализируется, GP14 может быть плавающим).
+    // Выход из эмулятора в меню — без перезагрузки.
+    // Требуется УДЕРЖАНИЕ 20 кадров (~333 мс) — защита от floating pin и дребезга.
+    // Первые 90 кадров игнорируем (Pico инициализируется).
     static int frameCount = 0;
+    static int homeFrames = 0;
     frameCount++;
     if (frameCount > 90 && (buttons.readSysCurrent() & BTN_SYS_HOME)) {
-        printf("[EMU] HOME pressed → quit\n");
-        event_t h = event_get(event_quit);
-        if (h) h(0);
-        return;
+        if (++homeFrames >= 20) {
+            homeFrames = 0;
+            printf("[EMU] HOME held → quit\n");
+            event_t h = event_get(event_quit);
+            if (h) h(0);
+            return;
+        }
+    } else {
+        homeFrames = 0;  // сбрасываем если кнопка отпущена
     }
 
     // ── Комбо выхода: SELECT + START удерживаются ~3 секунды (180 кадров) ──────
