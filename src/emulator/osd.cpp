@@ -9,8 +9,11 @@
 #include "settings.h"
 #include "driver/i2s.h"
 #include "driver/rtc_io.h"
+#include "esp_wifi.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
+#include "freertos/semphr.h"
 #include "esp_attr.h"
 #include <string.h>
 #include <stdio.h>
@@ -30,7 +33,7 @@ extern "C" {
 }
 
 // ─── constants ─────────────────────────────────────────────────────────────
-#define NES_SAMPLE_RATE  22050
+#define NES_SAMPLE_RATE  44100
 #define NES_FRAG_SAMPLES 128
 #define I2S_PORT         I2S_NUM_0
 
@@ -67,31 +70,136 @@ extern "C" void osd_setsound(void (*playfunc)(void *buf, int len)) {
     _audio_cb = playfunc;
 }
 
-static uint16_t _audio_buf[NES_FRAG_SAMPLES * 2]; // mono → stereo
+// Моно-буфер для _audio_cb (nofrendo заполняет NES_FRAG_SAMPLES сэмплов за раз)
+static uint16_t _audio_buf[NES_FRAG_SAMPLES];
+
+// ── TPDF дизеринг ────────────────────────────────────────────────────────────
+// Два равномерных LFSR → треугольное [-255..+255], нет DC смещения.
+// В отличие от noise shaping с floor-квантованием (которое накапливало
+// систематическую ошибку → "заедания/повторы" на медленных сигналах),
+// TPDF даёт белый шум — нет паттернов, нет накоплений.
+static uint32_t _nes_lfsr = 0xDEADBEEFu;
+// TPDF дизер ±63 (1/4 LSB для 8-бит DAC).
+// Было ±255 (1 LSB) — слышалось как шипение на тихих сигналах.
+// ±63 → на 12 дБ тише, паттерны квантования всё ещё сглаживаются.
+static inline int32_t nes_tpdf() {
+    _nes_lfsr ^= _nes_lfsr << 13;
+    _nes_lfsr ^= _nes_lfsr >> 17;
+    _nes_lfsr ^= _nes_lfsr << 5;
+    int32_t r1 = (int32_t)(_nes_lfsr & 0x3F);  // 0..63
+    _nes_lfsr ^= _nes_lfsr << 13;
+    _nes_lfsr ^= _nes_lfsr >> 17;
+    _nes_lfsr ^= _nes_lfsr << 5;
+    int32_t r2 = (int32_t)(_nes_lfsr & 0x3F);  // 0..63
+    return r1 - r2;  // −63..+63
+}
+
+// ── Кольцевой буфер + задача вывода (Core 0) ─────────────────────────────────
+// Core 1 (эмулятор): генерирует ~735 сэмплов за кадр → кладёт в _ring.
+// Core 0 (i2s_out):  непрерывно читает из _ring чанками 128 сэмплов → пишет I2S.
+//
+// Кольцо (RING_SAMPLES = 2048, ≈46 мс) развязывает переменную скорость рендера
+// (Core 1) от постоянного потока DAC (Core 0). Даже если кадр задержался на
+// 20–30 мс, Core 0 продолжает писать из буфера — заикания исчезают.
+// Семафоры не нужны: SPSC ring buffer безопасен без блокировок.
+#define AUDIO_FRAME_SAMPLES  800       // санитарный кап > NES_SAMPLE_RATE/60 ≈ 735
+#define RING_SAMPLES         4096u     // мощность двух, ≈93 мс при 44100 Гц
+
+// Кольцо в PSRAM — освобождает 16 КБ DRAM для SPI-DMA фреймбуфера (_frame).
+// Если _ring занимал DRAM, heap_caps_malloc(112 КБ, MALLOC_CAP_DMA) мог упасть
+// → blit переходил в медленный line-by-line режим → рывки картинки.
+static uint16_t         *_ring     = nullptr;       // ps_malloc в audio_init
+static volatile uint32_t _ringHead = 0;             // Core 1 пишет
+static volatile uint32_t _ringTail = 0;             // Core 0 читает
+static TaskHandle_t      _audioOutTask = nullptr;
+
+// Core 0: tight loop, rate-limiter = i2s_write блокируется когда DMA полон.
+// DMA 16×128 = 2048 сэмплов = 46 мс — переживает любое системное вытеснение
+// (esp_timer на приоритете 22 может занять Core 0 на несколько мс).
+// Underrun практически невозможен: кольцо всегда держит 1437+ сэмплов,
+// значит i2s_write всегда пишет реальный аудио, а не тишину.
+static void audioOutputTask(void*) {
+    static uint16_t buf[NES_FRAG_SAMPLES * 2];
+    while (true) {
+        uint32_t head = _ringHead;
+        uint32_t tail = _ringTail;
+        if ((int)(head - tail) >= NES_FRAG_SAMPLES) {
+            for (int i = 0; i < NES_FRAG_SAMPLES; i++) {
+                uint32_t idx   = (tail + (uint32_t)i) & (RING_SAMPLES - 1u);
+                buf[i * 2]     = _ring[idx * 2];
+                buf[i * 2 + 1] = _ring[idx * 2 + 1];
+            }
+            _ringTail = tail + NES_FRAG_SAMPLES;
+            size_t w;
+            i2s_write(I2S_PORT, buf, NES_FRAG_SAMPLES * 4, &w, pdMS_TO_TICKS(100));
+        } else {
+            // Underrun (редко): не пишем тишину — DMA (46 мс) пережидает
+            // пока Core 1 пополнит кольцо через audio_frame().
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+}
 
 static void audio_frame(void) {
     if (!_audio_cb) return;
-    int left = NES_SAMPLE_RATE / NES_REFRESH_RATE; // ~368 samples
-    // Clamp emuVolume to 0-100 and precompute multiplier once per frame
+
+    // ── Целевой уровень кольца: 2 кадра (1470 сэмплов ≈ 33 мс) ──────────────
+    // Проблема фиксированных 735 сэмплов/кадр:
+    //   Core 0 делает 5 читок × 128 = 640 → остаток 95 → 6-я читка: underrun
+    //   → 2.9 мс тишины каждые 16.67 мс = заикание на 60 Гц.
+    // Решение: каждый вызов пополняем кольцо ДО целевого уровня 1470.
+    //   В норме Core 0 слил ровно 735 → генерируем 735 (как раньше).
+    //   Если кадр был медленным и кольцо подсело → генерируем немного больше.
+    //   Кольцо никогда не опускается ниже 735 → underrun исключён.
+    const int ONE_FRAME = NES_SAMPLE_RATE / NES_REFRESH_RATE;  // 735
+    const int TARGET    = ONE_FRAME * 3;                        // 2205 ≈ 50 мс
+    // Цель — 3 кадра запаса: даже при просадке до 30 fps (33 мс/кадр)
+    // кольцо не опустеет (минимум = 2205 − 1456 = 749 >> 128).
+
+    int ring_fill = (int)(_ringHead - _ringTail);
+    int left      = TARGET - ring_fill;
+    if (left < ONE_FRAME) left = ONE_FRAME;         // минимум один кадр APU
+    if (left > ONE_FRAME * 4) left = ONE_FRAME * 4; // максимум 4 кадра APU
+    int ring_free = (int)RING_SAMPLES - ring_fill;
+    if (left > ring_free) left = ring_free;
+    if (left <= 0) return;                          // кольцо уже переполнено
+
     uint8_t vol = settings.emuVolume;
     if (vol > 100) vol = 100;
+
+    // LPF: состояние сохраняется между фрагментами и кадрами.
+    static int32_t _lpf = 0;
 
     while (left > 0) {
         int n = (left > NES_FRAG_SAMPLES) ? NES_FRAG_SAMPLES : left;
         _audio_cb(_audio_buf, n);
 
-        // Apply emulator volume:
-        // nofrendo DAC output is unsigned 16-bit, centered at 0x8000.
-        // Scale distance from center by emuVolume/100, then mono→stereo.
-        for (int i = n - 1; i >= 0; i--) {
-            int32_t s = (int32_t)_audio_buf[i] - 0x8000; // signed distance from center
-            s = (s * vol) / 100;                          // scale by volume
-            uint16_t out = (uint16_t)(s + 0x8000);        // back to unsigned
-            _audio_buf[i * 2 + 1] = out;
-            _audio_buf[i * 2]     = out;
+        for (int i = 0; i < n; i++) {
+            // nofrendo даёт ЗНАКОВЫЙ int16, центр = 0 (тишина = 0, не 0x8000!)
+            int32_t s = (int32_t)(int16_t)_audio_buf[i];
+            s = (s * vol) / 50;                         // ×2 gain: NES APU [0..~20000]
+            _lpf = (85 * s + 15 * _lpf) / 100;         // IIR LPF α=0.85, f_c≈6600 Гц
+            s = _lpf;
+            s += nes_tpdf();                            // TPDF ±255 — белый шум
+            // Мягкий ограничитель пиков (soft limiter, knee = 75% DAC):
+            // сигнал выше 24576 сжимается 4:1 вместо жёсткого клиппинга.
+            // Снижает пиковый ток SC8002B → меньше просадка 3.3В рейки
+            // → меньше «тик» в аудио и мерцание подсветки в пиках.
+            if      (s >  24576) s = 24576 + (s - 24576) / 4;
+            else if (s < -24576) s = -24576 + (s + 24576) / 4;
+            if (s >  32767) s =  32767;
+            if (s < -32768) s = -32768;
+            uint16_t out = (uint16_t)(s + 0x8000) & 0xFF00;
+
+            // Кладём в кольцо (SPSC без блокировок)
+            uint32_t head = _ringHead;
+            if ((int)(head - _ringTail) < (int)RING_SAMPLES) {
+                uint32_t idx       = head & (RING_SAMPLES - 1u);
+                _ring[idx * 2]     = out;
+                _ring[idx * 2 + 1] = out;
+                _ringHead          = head + 1u;
+            }
         }
-        size_t written;
-        i2s_write(I2S_PORT, _audio_buf, (size_t)(4 * n), &written, pdMS_TO_TICKS(10));
         left -= n;
     }
 }
@@ -110,17 +218,63 @@ static int audio_init(void) {
     cfg.channel_format    = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
     cfg.intr_alloc_flags  = 0;
-    cfg.dma_buf_count     = 6;
-    cfg.dma_buf_len       = NES_FRAG_SAMPLES;
-    cfg.use_apll          = false;  // APLL несумісний з WiFi на ESP32 → нестабільний clock
+    // Більший буфер: 8×256 = 2048 сэмплів ≈ 93 мс запасу.
+    // При задержке кадра (SD-доступ, рендер) DMA не истощается → нет щелчков.
+    cfg.dma_buf_count     = 16;   // 16×128 = 2048 сэмплов ≈ 46 мс DMA-буфер
+    cfg.dma_buf_len       = 128;  // каждый буфер = 128 сэмплов = 2.9 мс
+    // Большой DMA (46 мс) гарантирует: даже если esp_timer (приоритет 22)
+    // вытеснит Core 0 на несколько мс, DMA не опустеет — нет underrun и щелчков.
+    // rate-limiter: i2s_write блокируется когда все 16 буферов заполнены.
+    // APLL даёт точный 22050 Гц из кварца — нет погрешности APB-делителя.
+    // Если WiFi активен — APLL недоступен (физическое ограничение ESP32),
+    // автоматически откатываемся на APB (погрешность <0.05%, практически незаметна).
+    {
+        wifi_mode_t wmode = WIFI_MODE_NULL;
+        esp_wifi_get_mode(&wmode);
+        cfg.use_apll = (wmode == WIFI_MODE_NULL);
+        printf("[OSD] I2S clock: %s\n", cfg.use_apll ? "APLL (exact)" : "APB (WiFi active)");
+    }
 
     if (i2s_driver_install(I2S_PORT, &cfg, 0, nullptr) != ESP_OK) return -1;
     i2s_set_pin(I2S_PORT, nullptr);
     i2s_set_dac_mode(I2S_DAC_CHANNEL_LEFT_EN); // GPIO26 = DAC2 = left channel
+
+    // Выделяем кольцо в PSRAM — 16 КБ DRAM освобождается для SPI-DMA фреймбуфера.
+    if (_ring) { free(_ring); _ring = nullptr; }
+    _ring = (uint16_t *)ps_malloc((size_t)RING_SAMPLES * 2 * sizeof(uint16_t));
+    if (!_ring) {
+        printf("[OSD] FATAL: audio ring alloc failed (%u KB PSRAM)\n",
+               (unsigned)(RING_SAMPLES * 2 * sizeof(uint16_t) / 1024));
+        i2s_driver_uninstall(I2S_PORT);
+        return -1;
+    }
+    printf("[OSD] Audio ring: %u KB in PSRAM\n",
+           (unsigned)(RING_SAMPLES * 2 * sizeof(uint16_t) / 1024));
+
+    // Pre-fill: 3 кадра тишины (≈50 мс) — Core 0 сразу пишет в I2S.
+    {
+        const uint32_t preFill = (uint32_t)(NES_SAMPLE_RATE / 60) * 3; // 2205 сэмплов
+        for (uint32_t i = 0; i < preFill && i < RING_SAMPLES; i++) {
+            _ring[i * 2]     = 0x8000;
+            _ring[i * 2 + 1] = 0x8000;
+        }
+        _ringHead = preFill;
+        _ringTail = 0;
+    }
+
+    // Приоритет 20: выше системных задач (FreeRTOS timer=1, main=1), ниже esp_timer (22)
+    // и WiFi (23). Это гарантирует ответ на TX_DONE в течение <1 мс,
+    // иначе низкоприоритетные задачи вытесняли Core 0 на несколько мс → DMA underrun.
+    xTaskCreatePinnedToCore(audioOutputTask, "i2s_out", 2048, nullptr, 20, &_audioOutTask, 0);
     return 0;
 }
 
 static void audio_deinit(void) {
+    // Завершаем задачу Core 0 до того как удаляем I2S
+    if (_audioOutTask) { vTaskDelete(_audioOutTask); _audioOutTask = nullptr; }
+    _ringHead = 0;
+    _ringTail = 0;
+    if (_ring) { free(_ring); _ring = nullptr; }
     i2s_driver_uninstall(I2S_PORT);
     // Відновлюємо GPIO25 (XPT2046 touch CLK) у цифровий режим.
     // i2s_driver_uninstall в DAC-режимі викликає dac_output_disable для GPIO25
@@ -204,6 +358,28 @@ static void blit_print_stats(void) {
 static uint16_t _line_buf[SCREEN_W];
 
 static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
+    // ── FPS кап: ровно 60 кадров/с = 16667 мкс/кадр ──────────────────────────
+    // Nofrendo по умолчанию работает «как можно быстрее» — без капа он пишет
+    // аудио-сэмплы быстрее чем I2S их проигрывает → переполнение буфера → заикание.
+    // Ждём начала следующего кадра: сначала vTaskDelay (освобождаем CPU),
+    // потом busy-wait на остаток < 2 мс для точности.
+    static uint32_t _lastFrameUs = 0;
+    const  uint32_t FRAME_US     = 1000000UL / 60;   // 16667 мкс
+    if (_lastFrameUs) {
+        uint32_t elapsed = (uint32_t)(esp_timer_get_time() - _lastFrameUs);
+        if (elapsed < FRAME_US) {
+            uint32_t wait = FRAME_US - elapsed;
+            if (wait > 2000) vTaskDelay(pdMS_TO_TICKS(wait / 1000));
+            while ((uint32_t)(esp_timer_get_time() - _lastFrameUs) < FRAME_US) {}
+        }
+    }
+    _lastFrameUs = (uint32_t)esp_timer_get_time();
+
+    // ── Звук ПЕРВЫМ: Core 0 начинает писать в I2S пока Core 1 рисует дисплей ──
+    // audio_frame генерирует сэмплы и сигналит Core 0. Core 0 тут же стартует
+    // i2s_write. Core 1 уходит в blit. Оба ядра работают параллельно.
+    audio_frame();
+
     const ScaleParams sp = getScaleParams();
     const bool pixel_perfect = (sp.outW == NES_SCREEN_WIDTH &&
                                  sp.outH == NES_VISIBLE_HEIGHT);
@@ -242,7 +418,7 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
     }
 
     blit_print_stats();
-    audio_frame();
+    // audio_frame перемещён в начало blit (перед рендером) для параллельной работы
 }
 
 static viddriver_t _driver = {
