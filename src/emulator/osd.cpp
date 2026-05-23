@@ -246,17 +246,20 @@ static int audio_init(void) {
     i2s_set_pin(I2S_PORT, nullptr);
     i2s_set_dac_mode(I2S_DAC_CHANNEL_LEFT_EN); // GPIO26 = DAC2 = left channel
 
-    // Выделяем кольцо в PSRAM — 16 КБ DRAM освобождается для SPI-DMA фреймбуфера.
-    if (_ring) { free(_ring); _ring = nullptr; }
-    _ring = (uint16_t *)ps_malloc((size_t)RING_SAMPLES * 2 * sizeof(uint16_t));
+    // Кольцо в PSRAM — выделяется один раз и переиспользуется между сессиями.
+    // Не освобождается между играми: PSRAM tail sentinel может быть повреждён
+    // NES-эмулятором (buffer overrun), и free() вызвал бы heap-poisoning panic.
     if (!_ring) {
-        printf("[OSD] FATAL: audio ring alloc failed (%u KB PSRAM)\n",
+        _ring = (uint16_t *)ps_malloc((size_t)RING_SAMPLES * 2 * sizeof(uint16_t));
+        if (!_ring) {
+            printf("[OSD] FATAL: audio ring alloc failed (%u KB PSRAM)\n",
+                   (unsigned)(RING_SAMPLES * 2 * sizeof(uint16_t) / 1024));
+            i2s_driver_uninstall(I2S_PORT);
+            return -1;
+        }
+        printf("[OSD] Audio ring: %u KB in PSRAM\n",
                (unsigned)(RING_SAMPLES * 2 * sizeof(uint16_t) / 1024));
-        i2s_driver_uninstall(I2S_PORT);
-        return -1;
     }
-    printf("[OSD] Audio ring: %u KB in PSRAM\n",
-           (unsigned)(RING_SAMPLES * 2 * sizeof(uint16_t) / 1024));
 
     // Pre-fill: 3 кадра тишины (≈50 мс) — Core 0 сразу пишет в I2S.
     {
@@ -281,7 +284,10 @@ static void audio_deinit(void) {
     if (_audioOutTask) { vTaskDelete(_audioOutTask); _audioOutTask = nullptr; }
     _ringHead = 0;
     _ringTail = 0;
-    if (_ring) { free(_ring); _ring = nullptr; }
+    /* _ring intentionally NOT freed: the PSRAM block's tail sentinel may have been
+    ** corrupted by a buffer overrun during NES emulation.  Calling free() on a block
+    ** with a bad tail triggers the heap-poisoning panic → reboot.
+    ** _ring is reused across sessions (reset + re-filled with silence in audio_init). */
     i2s_driver_uninstall(I2S_PORT);
     // Відновлюємо GPIO25 (XPT2046 touch CLK) у цифровий режим.
     // i2s_driver_uninstall в DAC-режимі викликає dac_output_disable для GPIO25
@@ -312,7 +318,13 @@ static int  drv_init(int w, int h) {
     // _frame is allocated in osd_init(); if it failed we run in fallback mode
     return 0;
 }
-static void drv_shutdown(void)         {}
+static void drv_shutdown(void) {
+    /* vid_shutdown() calls bmp_destroy(&primary_buffer) which frees the
+    ** bitmap_t struct that _bmp also points to.  Clear _bmp here so that
+    ** osd_shutdown() does not attempt a second bmp_destroy on freed memory
+    ** (which reads garbage, may call free() on _fb PSRAM → CORRUPT HEAP). */
+    _bmp = nullptr;
+}
 static int  drv_set_mode(int w, int h) { return 0; }
 static void drv_clear(uint8 color)     {}
 
@@ -659,7 +671,11 @@ extern "C" void osd_shutdown(void) {
         _nesTimer = nullptr;
     }
     if (_bmp)   { bmp_destroy(&_bmp);    _bmp   = nullptr; }
+    /* _frame (DRAM DMA buffer) is freed and reallocated each session — safe. */
     if (_frame) { heap_caps_free(_frame); _frame = nullptr; }
-    if (_fb)    { free(_fb);              _fb    = nullptr; }
+    /* _fb (PSRAM NES framebuffer) is intentionally NOT freed:
+    ** its PSRAM heap block tail may be corrupted by the emulator.
+    ** free(_fb) would trigger heap-poisoning panic → reboot.
+    ** It is allocated once and reused across sessions (osd_init checks !_fb). */
     audio_deinit();
 }

@@ -21,13 +21,6 @@
 
 Settings settings;
 
-static char _emuPath[128];
-
-static int runEmulator_blocking(const char *path) {
-    strncpy(_emuPath, path, sizeof(_emuPath)-1);
-    return emu_run(path);
-}
-
 // ─────────────────────────────────────────────────────────────
 // STATE MACHINE
 // ─────────────────────────────────────────────────────────────

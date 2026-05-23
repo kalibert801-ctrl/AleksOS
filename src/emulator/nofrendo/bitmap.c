@@ -100,7 +100,19 @@ void bmp_destroy(bitmap_t **bitmap)
    if (*bitmap)
    {
       if ((*bitmap)->data && false == (*bitmap)->hardware)
-         free((*bitmap)->data);
+      {
+         /* Safety guard for ESP32: only free data if it is within internal DRAM
+         ** (0x3FFB0000–0x3FFFFFFF).  During NES emulation the data pointer can be
+         ** corrupted to point into PSRAM (0x3F800000+) or to a freed block filled
+         ** with the heap poison byte (0x8F).  Calling free() on such a pointer
+         ** triggers the heap-poisoning sentinel check → panic → reboot.
+         ** Skipping the free here causes a small one-off DRAM leak on corrupt exit,
+         ** but keeps the console alive. */
+         uint32_t p = (uint32_t)(*bitmap)->data;
+         if (p >= 0x3FFB0000u && p <= 0x3FFFFFFFu)
+            free((*bitmap)->data);
+         /* else: pointer is outside DRAM — skip free to avoid crash */
+      }
       free(*bitmap);
       *bitmap = NULL;
    }

@@ -154,7 +154,7 @@ static void rom_loadtrainer(unsigned char **rom, rominfo_t *rominfo)
    {
 //      fread(rominfo->sram + TRAINER_OFFSET, TRAINER_LENGTH, 1, fp);
       memcpy(rominfo->sram + TRAINER_OFFSET, *rom, TRAINER_LENGTH);
-      rom+=TRAINER_LENGTH;
+      *rom += TRAINER_LENGTH;  /* advance the inner pointer, not the pointer-to-pointer */
       log_printf("Read in trainer at $7000\n");
    }
 }
