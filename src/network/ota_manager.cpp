@@ -12,17 +12,20 @@
 #define GH_API    "https://api.github.com/repos/" GH_OWNER "/" GH_REPO "/releases/latest"
 
 // ── Version comparison helper ──────────────────────────────────────────────
-// Strips leading "AleksOS BETA " prefix and compares numeric parts.
+// Парсим "14.52" как major*1000+minor = 14052.
+// Ранее использовался toFloat(): "14.10".toFloat()==14.1=="14.1".toFloat()
+// → версия 14.10 никогда не обновлялась относительно 14.9.
+static int parseVerInt(const String &s) {
+    int dot = s.indexOf('.');
+    if (dot < 0) return s.toInt() * 1000;
+    return s.substring(0, dot).toInt() * 1000 + s.substring(dot + 1).toInt();
+}
+
 static bool isNewerVersion(const String &latest) {
-    // latest from GitHub tag, e.g. "v14.1"
-    // FIRMWARE_VERSION is "AleksOS BETA v14.0"
-    int curV = String(FIRMWARE_VERSION).lastIndexOf('v');
+    int curV   = String(FIRMWARE_VERSION).lastIndexOf('v');
     String curNum = (curV >= 0) ? String(FIRMWARE_VERSION).substring(curV + 1) : "0";
     String latNum = latest.startsWith("v") ? latest.substring(1) : latest;
-
-    float cur = curNum.toFloat();
-    float lat = latNum.toFloat();
-    return lat > cur;
+    return parseVerInt(latNum) > parseVerInt(curNum);
 }
 
 bool otaCheckUpdate(OTAInfo &out) {

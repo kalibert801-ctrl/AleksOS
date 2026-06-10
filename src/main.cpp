@@ -127,6 +127,12 @@ void setup() {
     if (sdOk) {
         bootProgress(30, "Loading config...");
         cfgLoad();
+        // Активируем сохранённую тему (или "Dark" если не найдена)
+        if (!ThemeRegistry::setActiveByName(settings.themeName)) {
+            ThemeRegistry::setActive(0);   // fallback на первую
+            strncpy(settings.themeName, ThemeRegistry::activeName(),
+                    sizeof(settings.themeName)-1);
+        }
         // Диагностика: печатаем что загрузилось из конфига
         Serial.printf("[CFG] btnMap: A=%02X B=%02X SEL=%02X STA=%02X UP=%02X DN=%02X LT=%02X RT=%02X\n",
             settings.btnMap[0], settings.btnMap[1], settings.btnMap[2], settings.btnMap[3],
@@ -188,7 +194,6 @@ void setup() {
 void loop() {
     ledUpdate();
     audioUpdate();
-    timeUpdate();
     updateAutoBrightness();
     buttons.update();
 
@@ -306,7 +311,7 @@ void loop() {
         } else if (action & BTN_A) {
             if (romAction == 2) {
                 soundClick(); buttons.vibrate1(40); showRomInfo(menuSelected()); menuDraw();
-            } else if (romAction == 1) {
+            } else if (romAction >= 1) {
                 int sel = menuSelected();
                 if (sel >= 0 && sel < sdMgr.count()) {
                     soundSelect(); buttons.vibrate1(80);
@@ -315,6 +320,17 @@ void loop() {
                     ledSet(LED_GREEN); delay(200); ledSet(LED_OFF);
                     toMenu();
                 }
+            }
+        } else if (action & BTN_LEFT) {
+            // Тема запросила файловый менеджер (напр. Win98 "File" меню)
+            soundClick(); buttons.vibrate1(40);
+            toFileMgr();
+        } else if (action & BTN_RIGHT) {
+            // Тема запросила ROM Info (напр. Android поиск, iOS disclosure)
+            int sel = menuSelected();
+            if (sel >= 0 && sel < sdMgr.count()) {
+                soundClick(); buttons.vibrate1(30);
+                showRomInfo(sel); menuDraw();
             }
         } else { soundClick(); buttons.vibrate1(30); }
         break;
@@ -350,7 +366,7 @@ void loop() {
         }
         if (!tapped) break;
         uint8_t action = btnMapHandleTouch(x, y);
-        if (action & BTN_B) { soundBack(); btnMapApply(); cfgSave(); toSettings(); }
+        if (action & BTN_B) { soundBack(); cfgSave(); toSettings(); }
         else if (action) soundClick();
         break;
     }

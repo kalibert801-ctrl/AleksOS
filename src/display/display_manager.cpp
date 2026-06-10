@@ -10,6 +10,10 @@ void initDisplay() {
     lcd.fillScreen(TFT_BLACK);
     lcd.setTextSize(1);
     lcd.setTextDatum(MC_DATUM);
+    // Отключаем UTF-8 декодирование: cyrStr() уже транскодирует
+    // Кириллицу в позиции шрифта 0x80-0xBF, поэтому декодировать не нужно.
+    // По умолчанию LovyanGFX ставит utf8=true (lgfx_fonts.hpp:566).
+    lcd.setAttribute(lgfx::utf8_switch, 0);
     setBrightness(80);
 }
 

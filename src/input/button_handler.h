@@ -46,7 +46,6 @@ public:
     uint8_t applyBtnMap(uint8_t raw) const;
     bool    isConnected() const;
     void    sendCmd(uint8_t cmd, uint8_t data);
-    void    sendCmd2(uint8_t cmd, uint8_t d1, uint8_t d2);
     void    update();
 
     // Вибро-отклик: duration_ms — длительность в мс (макс 2550)

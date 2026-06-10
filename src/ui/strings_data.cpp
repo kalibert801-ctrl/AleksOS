@@ -1,36 +1,56 @@
 #include "lang.h"
 #include "settings.h"
 
-// ── Темы (RGB565) ─────────────────────────────────────────────
-// Индекс 0: RetroNight (основная тема — тёмная, синяя)
-//   bg=#0A0F1E  header=#111827  rowEven=#0D1526  rowOdd=#0A1020
-//   sel=#1D4ED8  txtPri=#E2E8F0  txtSec=#64748B  accent=#38BDF8
-//   danger=#F87171  ok=#4ADE80
-const Theme565 THEMES[THEME_COUNT] = {
-    // Dark (RetroNight)
-    { 0x0863, 0x10C4, 0x08A4, 0x0884, 0x1A7B,
-      0xE75E, 0x63B1, 0x3DFF, 0xFB8E, 0x4EF0 },
-    // Light
-    { 0xFFFF, 0xC638, 0xFFFF, 0xDEDB, 0x435C,
-      0x0000, 0x4208, 0x001F, 0xF800, 0x03E0 },
-    // Green
-    { 0x0020, 0x0061, 0x0020, 0x0041, 0x02A0,
-      0x07E0, 0x02E0, 0x07FF, 0xF800, 0x07E0 },
-    // Amber
-    { 0x2000, 0x4820, 0x2000, 0x3000, 0xFD20,
-      0xFDE0, 0x9240, 0xFD20, 0xF800, 0xFDE0 },
-};
+// ── cyrStr() ──────────────────────────────────────────────────────────────────
+// Транскодирует UTF-8 Кириллицу в позиции шрифта CyrDejaVu9.
+//
+// 4 чередующихся буфера (round-robin): каждый вызов получает следующий слот.
+// Это устраняет баг с одним статическим буфером: при нескольких вызовах в одном
+// выражении (аргументы функции) C++ не гарантирует порядок вычисления, и второй
+// вызов перезаписывал бы буфер первого. Теперь до 4 вызовов в одном выражении —
+// каждый пишет в отдельный буфер и возвращает устойчивый указатель.
+const char* cyrStr(const char* s) {
+    static char bufs[4][128];
+    static int  slot = 0;
+    slot = (slot + 1) & 3;
+    char* buf = bufs[slot];
+    if (!s) { buf[0] = '\0'; return buf; }   // защита от nullptr
+    char* dst = buf;
+    const uint8_t* p = (const uint8_t*)s;
+    while (*p && (dst - buf) < 126) {
+        uint8_t c = *p++;
+        if (c < 0x80) {
+            *dst++ = (char)c;
+        } else if (c == 0xD0 && *p) {
+            uint8_t n = *p++;
+            if (n >= 0x90 && n <= 0xBF) *dst++ = (char)(n - 0x10);   // А-п → 0x80-0xAF
+        } else if (c == 0xD1 && *p) {
+            uint8_t n = *p++;
+            if (n >= 0x80 && n <= 0x8F) *dst++ = (char)(n + 0x30);   // р-я → 0xB0-0xBF
+        } else if (c >= 0x80) {
+            // Неизвестная многобайтовая последовательность (é, ü, …, и т.д.) —
+            // пропускаем все continuation bytes (0x80–0xBF) чтобы не получить мусор.
+            while (*p && (*p & 0xC0) == 0x80) p++;
+        }
+    }
+    *dst = '\0';
+    return buf;
+}
+
+// Цветовые палитры тем перенесены в src/ui/themes/theme_*.cpp
+// и регистрируются через ThemeRegistry.
 
 const Str STR_RU = {
-    "RetroESP",  "Zagruzka...",
-    "ROM ne naydeny",  "Polozhite .nes v /FomiCon na SD",
-    "SD karta ne naydena",  "Vstavte SD kartu i perezagruzite",
-    "IGRAT",  "NASTROYKI",  "NAZAD",
-    "Igraet",  "Tap = vyhod",  "Nastroyki",
-    { "Yarkost","Gromkost","Tema","Yazyk","Masshtab",
-      "FPS","Avtosokhr","AvtoYark","Zvuk","Tip zvuka","Versiya","RAM" },
-    "",  "",  // btnUp/btnDown — больше не используем текст
-    "Info o ROM",  "Mapper:",  "Razmer:",  "Put:",
+    "RetroESP",  "Загрузка...",
+    "ROM не найдены",  "Положите .nes в /FomiCon на SD",
+    "SD карта не найдена",  "Вставьте SD и перезагрузите",
+    "ИГРАТЬ",  "НАСТРОЙКИ",  "НАЗАД",
+    "Сейчас играет",  "Нажмите = выход",  "Настройки",
+    { "Яркость","Громкость","Тема","Язык","Масштаб",
+      "FPS","Авто-сохр","Авто-ярк","Звук","Тип звука","Версия","RAM" },
+    "",  "",  "",  "",   // btnUp, btnDown, btnLeft, btnRight (не используются)
+    "Инфо о ROM",  "Маппер:",  "Размер:",  "Путь:",
+    "NES ИГРЫ",
 };
 
 const Str STR_EN = {
@@ -41,6 +61,20 @@ const Str STR_EN = {
     "Now Playing",  "Tap header to exit",  "Settings",
     { "Brightness","Volume","Theme","Language","Scale",
       "FPS","Auto Save","Auto Bright","Sound","Sound Type","Version","RAM" },
-    "",  "",
+    "",  "",  "",  "",   // btnUp, btnDown, btnLeft, btnRight (unused)
     "ROM Info",  "Mapper:",  "Size:",  "Path:",
+    "NES GAMES",
+};
+
+const Str STR_CZ = {
+    "RetroESP",  "Nacitani...",
+    "Zadne ROM soubory",  "Vlozit .nes do /FomiCon na SD",
+    "SD karta nenalezena",  "Vlozit SD a restartovat",
+    "HRAT",  "NASTAVENI",  "ZPET",
+    "Nyni hraje",  "Klepit = navrat",  "Nastaveni",
+    { "Jas","Hlasitost","Tema","Jazyk","Meritko",
+      "FPS","Auto Uloz","Auto Jas","Zvuk","Typ zvuku","Verze","RAM" },
+    "",  "",  "",  "",   // btnUp, btnDown, btnLeft, btnRight (unused)
+    "Info o ROM",  "Mapper:",  "Velikost:",  "Cesta:",
+    "NES HRY",
 };

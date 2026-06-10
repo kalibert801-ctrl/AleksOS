@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "config.h"
 #include "input/touch_handler.h"
+#include "ui/theme_plugin.h"   // ThemeRegistry, getTheme(), ThemeAction
 
 #define DP_LEFT  0
 #define DP_UP    1
@@ -25,13 +26,9 @@ void showRomInfo(int idx);
 // -- Settings ----------------------------------------------------------
 uint8_t settingsHandleTouch(int x, int y);
 void settingsDraw();
-void settingsScrollUp();
-void settingsScrollDown();
-
 // -- Button remap ------------------------------------------------------
 void    btnMapDraw();
 uint8_t btnMapHandleTouch(int x, int y);
-void    btnMapApply();
 
 // Prefetch Pico version at startup (call after buttons.init())
 void settingsPrefetchPicoVer();

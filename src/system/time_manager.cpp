@@ -36,6 +36,3 @@ String timeGetString() {
     return String(buf);
 }
 
-void timeUpdate() {
-    // Зарезервировано: здесь можно подключить DS1307/DS3231 в будущем
-}

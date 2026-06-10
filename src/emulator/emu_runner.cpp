@@ -34,7 +34,3 @@ extern "C" int emu_run(const char *path) {
     return ret;
 }
 
-extern "C" void emu_quit(void) {
-    event_t h = event_get(event_quit);
-    if (h) h(0);
-}

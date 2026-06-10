@@ -70,6 +70,16 @@ extern "C" void emu_setController(uint8_t state) { _pad = state; }
 static volatile bool _emuExitReq = false;
 extern "C" bool osd_exit_requested(void) { return _emuExitReq; }
 
+// ─── счётчики osd_getinput ────────────────────────────────────────────────────
+// Файловая область видимости — сбрасываются в osd_init() при каждом запуске.
+// Раньше были static-локальными → не сбрасывались между сессиями:
+//   frameCount уже > 90 → защита первых кадров не работала,
+//   homeFrames/exitFrames могли начинать не с нуля.
+static int     _inp_frameCount = 0;
+static int     _inp_homeFrames = 0;
+static int     _inp_exitFrames = 0;
+static uint8_t _inp_prevPad    = 0;
+
 // ─── audio ─────────────────────────────────────────────────────────────────
 static void (*_audio_cb)(void *buf, int len) = nullptr;
 
@@ -128,7 +138,11 @@ static TaskHandle_t      _audioOutTask = nullptr;
 static void audioOutputTask(void*) {
     static uint16_t buf[NES_FRAG_SAMPLES * 2];
     while (true) {
+        // acquire: читаем _ringHead ПОСЛЕ того как Core 1 записал данные в кольцо.
+        // Без барьера Xtensa LX6 может читать _ringHead до того как данные
+        // по соответствующим индексам стали видны этому ядру.
         uint32_t head = _ringHead;
+        __sync_synchronize();
         uint32_t tail = _ringTail;
         if ((int)(head - tail) >= NES_FRAG_SAMPLES) {
             for (int i = 0; i < NES_FRAG_SAMPLES; i++) {
@@ -136,6 +150,8 @@ static void audioOutputTask(void*) {
                 buf[i * 2]     = _ring[idx * 2];
                 buf[i * 2 + 1] = _ring[idx * 2 + 1];
             }
+            // release: обновляем _ringTail только после того как данные скопированы.
+            __sync_synchronize();
             _ringTail = tail + NES_FRAG_SAMPLES;
             size_t w;
             i2s_write(I2S_PORT, buf, NES_FRAG_SAMPLES * 4, &w, pdMS_TO_TICKS(100));
@@ -184,8 +200,8 @@ static void audio_frame(void) {
         for (int i = 0; i < n; i++) {
             // nofrendo даёт ЗНАКОВЫЙ int16, центр = 0 (тишина = 0, не 0x8000!)
             int32_t s = (int32_t)(int16_t)_audio_buf[i];
-            s = (s * vol) / 50;                         // ×2 gain: NES APU [0..~20000]
-            _lpf = (85 * s + 15 * _lpf) / 100;         // IIR LPF α=0.85, f_c≈6600 Гц
+            s = (s * vol) / 75;                         // ×1.33 gain при vol=100 (было /50=×2.0 → клиппинг/хрип)
+            _lpf = (80 * s + 20 * _lpf) / 100;         // IIR LPF α=0.80, чуть мягче срез ВЧ
             s = _lpf;
             s += nes_tpdf();                            // TPDF ±255 — белый шум
             // Мягкий ограничитель пиков (soft limiter, knee = 75% DAC):
@@ -204,6 +220,9 @@ static void audio_frame(void) {
                 uint32_t idx       = head & (RING_SAMPLES - 1u);
                 _ring[idx * 2]     = out;
                 _ring[idx * 2 + 1] = out;
+                // release: данные должны быть записаны в PSRAM ДО того как
+                // Core 0 увидит новое значение _ringHead.
+                __sync_synchronize();
                 _ringHead          = head + 1u;
             }
         }
@@ -312,7 +331,8 @@ static bitmap_t *_bmp = nullptr;
 // RGB565 полный кадровый буфер — выделяется из внутренней DRAM heap (не PSRAM).
 // ESP32 SPI DMA может читать только из внутренней DRAM, поэтому именно heap.
 // 256×224×2 = 112 КБ; heap_caps_malloc с MALLOC_CAP_INTERNAL гарантирует DRAM.
-static uint16_t *_frame = nullptr;
+static uint16_t *_frame     = nullptr;
+static size_t    _framePixels = 0;   // количество пикселей в _frame (для проверки размера)
 
 static int  drv_init(int w, int h) {
     // _frame is allocated in osd_init(); if it failed we run in fallback mode
@@ -377,22 +397,17 @@ static void blit_print_stats(void) {
 static uint16_t _line_buf[SCREEN_W];
 
 static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
-    // ── FPS кап: ровно 60 кадров/с = 16667 мкс/кадр ──────────────────────────
-    // Nofrendo по умолчанию работает «как можно быстрее» — без капа он пишет
-    // аудио-сэмплы быстрее чем I2S их проигрывает → переполнение буфера → заикание.
-    // Ждём начала следующего кадра: сначала vTaskDelay (освобождаем CPU),
-    // потом busy-wait на остаток < 2 мс для точности.
-    static uint32_t _lastFrameUs = 0;
-    const  uint32_t FRAME_US     = 1000000UL / 60;   // 16667 мкс
-    if (_lastFrameUs) {
-        uint32_t elapsed = (uint32_t)(esp_timer_get_time() - _lastFrameUs);
-        if (elapsed < FRAME_US) {
-            uint32_t wait = FRAME_US - elapsed;
-            if (wait > 2000) vTaskDelay(pdMS_TO_TICKS(wait / 1000));
-            while ((uint32_t)(esp_timer_get_time() - _lastFrameUs) < FRAME_US) {}
-        }
-    }
-    _lastFrameUs = (uint32_t)esp_timer_get_time();
+    // ── Тактирование: nofrendo_ticks (60 Гц FreeRTOS таймер) ─────────────────
+    // FPS кап УБРАН (v14.52) — он был причиной дёрганья картинки.
+    //
+    // Причина: vTaskDelay/busy-wait внутри blit блокировал Core 1 на 8–16 мс.
+    // За это время FreeRTOS 60 Гц таймер успевал сработать ещё раз →
+    // в nes_emulate: frames_to_render ≥ 2 → autoframeskip пропускал кадр →
+    // каждые 2–3 кадра рывок изображения.
+    //
+    // Правильное тактирование обеспечивает nofrendo_ticks: nes_emulate() ждёт
+    // тик таймера перед рендером следующего кадра. Аудио-кольцо 4096 сэмплов
+    // (≈93 мс) защищает от переполнения без капа.
 
     // ── Звук ПЕРВЫМ: Core 0 начинает писать в I2S пока Core 1 рисует дисплей ──
     // audio_frame генерирует сэмплы и сигналит Core 0. Core 0 тут же стартует
@@ -400,16 +415,27 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
     audio_frame();
 
     const ScaleParams sp = getScaleParams();
-    const bool pixel_perfect = (sp.outW == NES_SCREEN_WIDTH &&
-                                 sp.outH == NES_VISIBLE_HEIGHT);
 
-    if (pixel_perfect && _frame) {
-        // ── Быстрый путь: 1:1, DMA burst ─────────────────────────────────
+    // ── Fixed-point шаги масштабирования ─────────────────────────────────────
+    // Заменяем деление в каждом пикселе (35 тактов на ESP32) на сложение+сдвиг (3 такта).
+    // Для SCALE_43 (320×224): было 71680 делений ≈10мс → теперь <1мс.
+    const uint32_t xStep = ((uint32_t)NES_SCREEN_WIDTH  << 12) / (uint32_t)sp.outW;
+    const uint32_t yStep = ((uint32_t)NES_VISIBLE_HEIGHT << 12) / (uint32_t)sp.outH;
+
+    if (_frame && (size_t)sp.outW * sp.outH <= _framePixels) {
+        // ── Быстрый путь: строим весь кадр в DMA-буфере → один burst ────────
+        // Работает для SCALE_11 (256×224), SCALE_43 (320×224), SCALE_FIT (320×240)
+        // если _frame достаточно большой (выделяется с запасом в osd_init).
         uint16_t *dst = _frame;
-        for (int y = 0; y < NES_VISIBLE_HEIGHT; y++) {
-            const uint8_t *src = bmp->line[y + VID_FIRST_LINE];
-            for (int x = 0; x < NES_SCREEN_WIDTH; x++)
-                *dst++ = _pal[src[x]];
+        uint32_t yFp  = 0;
+        for (int oy = 0; oy < sp.outH; oy++) {
+            const uint8_t *src = bmp->line[(yFp >> 12) + VID_FIRST_LINE];
+            uint32_t xFp = 0;
+            for (int ox = 0; ox < sp.outW; ox++) {
+                *dst++ = _pal[src[xFp >> 12]];
+                xFp += xStep;
+            }
+            yFp += yStep;
         }
         lcd.startWrite();
         lcd.setAddrWindow(sp.outX, sp.outY, sp.outW, sp.outH);
@@ -417,21 +443,19 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
         lcd.endWrite();
 
     } else {
-        // ── Масштабирование: ближайший сосед, строка за строкой ───────────
-        // Работает как для SCALE_43 (320×224), так и для SCALE_FIT (320×240).
-        // При pixel_perfect без DMA-буфера тоже использует этот путь.
+        // ── Резервный путь: строка за строкой (если DMA-буфер мал/не выделен) ─
         lcd.startWrite();
         lcd.setAddrWindow(sp.outX, sp.outY, sp.outW, sp.outH);
+        uint32_t yFp = 0;
         for (int oy = 0; oy < sp.outH; oy++) {
-            // Исходная строка NES (ближайший сосед по Y)
-            int sy = (oy * NES_VISIBLE_HEIGHT) / sp.outH;
-            const uint8_t *src = bmp->line[sy + VID_FIRST_LINE];
-            // Масштаб по X
+            const uint8_t *src = bmp->line[(yFp >> 12) + VID_FIRST_LINE];
+            uint32_t xFp = 0;
             for (int ox = 0; ox < sp.outW; ox++) {
-                int sx = (ox * NES_SCREEN_WIDTH) / sp.outW;
-                _line_buf[ox] = _pal[src[sx]];
+                _line_buf[ox] = _pal[src[xFp >> 12]];
+                xFp += xStep;
             }
             lcd.writePixels(_line_buf, sp.outW, true);
+            yFp += yStep;
         }
         lcd.endWrite();
     }
@@ -470,8 +494,13 @@ extern "C" int osd_installtimer(int frequency, void *func, int funcsize,
         xTimerDelete(_nesTimer, portMAX_DELAY);
         _nesTimer = nullptr;
     }
+    // Округлённое деление: (1000 + 30) / 60 = 17 тиков вместо 16.
+    // Без округления: 1000/60 = 16 → 62.5 Гц; с округлением: 17 → 58.8 Гц.
+    // Оба варианта имеют погрешность ~4%, т.к. 60 Гц не делится нацело на 1000 Гц.
+    // Округление вверх предпочтительнее: NES работает чуть медленнее реального
+    // времени (58.8 вместо 62.5) → аудиокольцо не переполняется, нет пропусков.
     _nesTimer = xTimerCreate("nes",
-        configTICK_RATE_HZ / frequency, pdTRUE, nullptr,
+        (configTICK_RATE_HZ + frequency/2) / frequency, pdTRUE, nullptr,
         (TimerCallbackFunction_t)func);
     xTimerStart(_nesTimer, 0);
     return 0;
@@ -499,34 +528,31 @@ extern "C" void osd_getinput(void) {
     // Выход из эмулятора в меню — без перезагрузки.
     // Требуется УДЕРЖАНИЕ 20 кадров (~333 мс) — защита от floating pin и дребезга.
     // Первые 90 кадров игнорируем (Pico инициализируется).
-    static int frameCount = 0;
-    static int homeFrames = 0;
-    frameCount++;
-    if (frameCount > 90 && (buttons.readSysCurrent() & BTN_SYS_HOME)) {
-        if (++homeFrames >= 20) {
-            homeFrames = 0;
+    _inp_frameCount++;
+    if (_inp_frameCount > 90 && (buttons.readSysCurrent() & BTN_SYS_HOME)) {
+        if (++_inp_homeFrames >= 20) {
+            _inp_homeFrames = 0;
             printf("[EMU] HOME held → exit\n");
             _emuExitReq = true;  // main_loop() увидит флаг после возврата nes_emulate()
             nes_poweroff();      // выходим из while(false==nes.poweroff) безопасно
             return;
         }
     } else {
-        homeFrames = 0;
+        _inp_homeFrames = 0;
     }
 
     // ── Комбо выхода: SELECT + START ~3 секунды ─────────────────────────────────
     // Резервный вариант (без кнопки HOME). Та же безопасная механика.
-    static int exitFrames = 0;
-    if (frameCount > 90 && (pad & (BTN_A | BTN_B)) == (BTN_A | BTN_B)) {
-        if (++exitFrames >= 60) {
-            exitFrames = 0;
+    if (_inp_frameCount > 90 && (pad & (BTN_A | BTN_B)) == (BTN_A | BTN_B)) {
+        if (++_inp_exitFrames >= 60) {
+            _inp_exitFrames = 0;
             printf("[EMU] SELECT+START held → exit\n");
             _emuExitReq = true;
             nes_poweroff();
             return;
         }
     } else {
-        exitFrames = 0;
+        _inp_exitFrames = 0;
     }
 
     // ── Передаём изменения состояния кнопок в nofrendo ───────────────────────
@@ -548,9 +574,8 @@ extern "C" void osd_getinput(void) {
         event_joypad1_right,   // бит 7  RIGHT
     };
 
-    static uint8_t prev = 0;
-    uint8_t changed = pad ^ prev;
-    prev = pad;
+    uint8_t changed = pad ^ _inp_prevPad;
+    _inp_prevPad = pad;
 
     // Диагностика нажатий в эмуляторе
     if (settings.diagButtons && changed) {
@@ -588,7 +613,13 @@ extern "C" void osd_fullname(char *fullname, const char *shortname) {
 
 extern "C" char *osd_newextension(char *str, char *ext) {
     char *dot = strrchr(str, '.');
-    if (dot) strcpy(dot, ext);
+    if (!dot) return str;
+    // nofrendo выделяет пути как char[PATH_MAX]. Ограничиваем запись реальным
+    // остатком буфера от позиции точки, чтобы strcpy не вышел за границу если
+    // новое расширение длиннее старого (напр. ".n" → ".sav").
+    size_t remain = (size_t)(PATH_MAX - 1) - (size_t)(dot - str);
+    strncpy(dot, ext, remain);
+    dot[remain] = '\0';
     return str;
 }
 
@@ -628,7 +659,11 @@ extern "C" int osd_main(int argc, char *argv[]) { return 0; }
 static int logprint(const char *s) { return printf("%s", s); }
 
 extern "C" int osd_init(void) {
-    _emuExitReq = false;  // сбрасываем флаг при каждом запуске эмулятора
+    _emuExitReq    = false;  // сбрасываем флаг при каждом запуске эмулятора
+    _inp_frameCount = 0;     // сброс счётчиков ввода — иначе защита первых 90 кадров
+    _inp_homeFrames = 0;     // не работает при повторном запуске эмулятора
+    _inp_exitFrames = 0;
+    _inp_prevPad    = 0;
     log_chain_logfunc(logprint);
 
     // ── NES 8-bit framebuffer → PSRAM (frees ~60 KB of internal DRAM) ──────
@@ -645,14 +680,23 @@ extern "C" int osd_init(void) {
     }
 
     // ── RGB565 DMA frame buffer → internal DRAM (SPI DMA requires DRAM) ────
+    // Пробуем полный буфер 320×240 (SCALE_FIT/SCALE_43/SCALE_11 — одним DMA burst).
+    // Если памяти не хватает, берём меньший (256×224) — fast path для SCALE_11,
+    // остальные режимы деградируют до резервного пути (строка за строкой).
     if (!_frame) {
-        size_t needed  = (size_t)NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT * sizeof(uint16_t);
-        size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-        printf("[OSD] DMA heap largest block: %u KB, need: %u KB\n",
-               (unsigned)(largest / 1024), (unsigned)(needed / 1024));
-        _frame = (uint16_t *)heap_caps_malloc(needed, MALLOC_CAP_DMA);
+        size_t need_full = (size_t)SCREEN_W * SCREEN_H * sizeof(uint16_t);          // 320×240 = 150 KB
+        size_t need_min  = (size_t)NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT * sizeof(uint16_t); // 256×224 = 112 KB
+        size_t largest   = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+        printf("[OSD] DMA heap largest: %u KB, want: %u KB\n",
+               (unsigned)(largest / 1024), (unsigned)(need_full / 1024));
+        _frame = (uint16_t *)heap_caps_malloc(need_full, MALLOC_CAP_DMA);
         if (!_frame) {
-            printf("[OSD] WARNING: DMA frame buffer alloc failed — falling back to line-by-line blit\n");
+            _frame = (uint16_t *)heap_caps_malloc(need_min, MALLOC_CAP_DMA);
+            if (_frame) { _framePixels = need_min / sizeof(uint16_t); printf("[OSD] DMA frame: 112 KB (SCALE_11 fast path)\n"); }
+            else        { _framePixels = 0; printf("[OSD] WARNING: DMA frame alloc failed — line-by-line fallback\n"); }
+        } else {
+            _framePixels = need_full / sizeof(uint16_t);
+            printf("[OSD] DMA frame: 150 KB (all scale modes DMA burst)\n");
         }
     }
     // ── Заливаем весь экран чёрным ────────────────────────────────────────────
@@ -672,7 +716,7 @@ extern "C" void osd_shutdown(void) {
     }
     if (_bmp)   { bmp_destroy(&_bmp);    _bmp   = nullptr; }
     /* _frame (DRAM DMA buffer) is freed and reallocated each session — safe. */
-    if (_frame) { heap_caps_free(_frame); _frame = nullptr; }
+    if (_frame) { heap_caps_free(_frame); _frame = nullptr; _framePixels = 0; }
     /* _fb (PSRAM NES framebuffer) is intentionally NOT freed:
     ** its PSRAM heap block tail may be corrupted by the emulator.
     ** free(_fb) would trigger heap-poisoning panic → reboot.

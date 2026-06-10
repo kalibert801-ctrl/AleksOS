@@ -1,5 +1,6 @@
-// ui.cpp — RetroESP UI — редизайн меню в стиле AleksOS v2
+// ui.cpp — RetroESP UI — AleksOS v2 (модульная система тем)
 #include "ui/ui.h"
+// ui/theme_plugin.h подтянут через ui.h
 #include "network/wifi_manager.h"
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
@@ -22,13 +23,18 @@ static void iconClock2(int cx,int cy,uint16_t c);
 #include <Arduino.h>
 
 // ── Шрифты ───────────────────────────────────────────────────
-#define FSM  (&lgfx::fonts::DejaVu9)
-#define FMD  (&lgfx::fonts::DejaVu12)
+#include "ui/font_cyr9.h"   // CyrDejaVu9 — ASCII + Кириллика 5×7
+
 #define FLG  (&lgfx::fonts::DejaVu18)
 #define FXL  (&lgfx::fonts::DejaVu40)
 
-static void fsm() { lcd.setFont(FSM); }
-static void fmd() { lcd.setFont(FMD); }
+// fsm/fmd: кириллический шрифт для RU, стандартный для EN/CZ
+static void fsm() {
+    lcd.setFont(settings.language == LANG_RU ? &CyrDejaVu9 : &lgfx::fonts::DejaVu9);
+}
+static void fmd() {
+    lcd.setFont(settings.language == LANG_RU ? &CyrDejaVu9 : &lgfx::fonts::DejaVu12);
+}
 static void flg() { lcd.setFont(FLG); }
 static void fxl() { lcd.setFont(FXL); }
 
@@ -65,9 +71,10 @@ int getDpadBtn(int x, int y) {
 // ══════════════════════════════════════════════════════════════
 
 static void iconDisplay(int cx, int cy, uint16_t c) {
+    uint16_t bg = getTheme().header;  // фон плитки/шапки — для "экрана" внутри иконки
     lcd.drawRect(cx-9, cy-6, 18, 12, c);
     lcd.fillRect(cx-7, cy-4, 14, 8, c);
-    lcd.fillRect(cx-5, cy-2, 10, 4, 0x0863);
+    lcd.fillRect(cx-5, cy-2, 10, 4, bg);
     lcd.fillRect(cx-1, cy+6, 3, 3, c);
     lcd.fillRect(cx-5, cy+9, 11, 2, c);
 }
@@ -86,8 +93,9 @@ static void iconLook(int cx, int cy, uint16_t c) {
     lcd.fillCircle(cx, cy, 3, c);
 }
 static void iconSystem(int cx, int cy, uint16_t c) {
+    uint16_t bg = getTheme().header;  // "дырка" шестерёнки = цвет фона
     lcd.fillCircle(cx, cy, 5, c);
-    lcd.fillCircle(cx, cy, 2, 0x0863);
+    lcd.fillCircle(cx, cy, 2, bg);
     lcd.fillRect(cx-2, cy-9, 4, 5, c);
     lcd.fillRect(cx-2, cy+4, 4, 5, c);
     lcd.fillRect(cx-9, cy-2, 5, 4, c);
@@ -142,14 +150,46 @@ static void drawNavBar(int zones[4], uint16_t fg) {
 
 static void drawHeaderBack(const char *title, bool showSave = false) {
     const Theme565 &t = getTheme();
+    bool flat = (t.style & THEME_STYLE_FLAT);
+
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
-    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
-    lcd.drawRect(4, 7, HDR_BACK_W-8, HDR_H-14, 0x2945);
-    fsm(); lcd.setTextDatum(MC_DATUM);
-    lcd.setTextColor(t.accent);
-    lcd.drawString(S().back, HDR_BACK_W/2, HDR_H/2);
+
+    // Нижняя граница шапки
+    if (t.style & THEME_STYLE_BEVEL) {
+        lcd.drawFastHLine(0, HDR_H-2, SCREEN_W, t.hilite);
+        lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.shadow);
+    } else {
+        lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
+    }
+
+    // Кнопка "назад"
+    if (flat && (t.style & THEME_STYLE_BEVEL)) {
+        // Win98: объёмная кнопка на сером фоне поверх синей шапки — рисуем серый прямоугольник
+        int bx=4, by_=7, bw=HDR_BACK_W-8, bh=HDR_H-14;
+        lcd.fillRect(bx, by_, bw, bh, t.bg);
+        lcd.drawFastHLine(bx,    by_,      bw, t.hilite);
+        lcd.drawFastVLine(bx,    by_,      bh, t.hilite);
+        lcd.drawFastHLine(bx,    by_+bh-1, bw, t.shadow);
+        lcd.drawFastVLine(bx+bw-1, by_,    bh, t.shadow);
+        fsm(); lcd.setTextDatum(MC_DATUM);
+        lcd.setTextColor(t.textPri);  // чёрный текст на сером
+        lcd.drawString(cyrStr(S().back), HDR_BACK_W/2, HDR_H/2);
+    } else {
+        // Тонкая рамка (прямая для flat, со стандартным цветом для rounded)
+        uint16_t borderCol = flat ? t.accent : (uint16_t)0x2945;
+        lcd.drawRect(4, 7, HDR_BACK_W-8, HDR_H-14, borderCol);
+        fsm(); lcd.setTextDatum(MC_DATUM);
+        lcd.setTextColor(t.accent);
+        lcd.drawString(cyrStr(S().back), HDR_BACK_W/2, HDR_H/2);
+    }
+
+    // Заголовок экрана
+    uint16_t titleTxt;
+    if      (t.style & THEME_STYLE_BEVEL) titleTxt = t.selText ? t.selText : 0xFFFF;
+    else if (flat)                         titleTxt = t.textPri;
+    else                                   titleTxt = t.textPri;
     fmd(); lcd.setTextDatum(MC_DATUM);
-    lcd.setTextColor(t.textPri);
+    lcd.setTextColor(titleTxt);
     lcd.drawString(title, (HDR_BACK_W + SCREEN_W)/2, HDR_H/2);
 }
 
@@ -170,17 +210,28 @@ static void drawScrollbar(int total, int visible, int offset) {
 static void drawListRow(int y, const char *left, const char *right,
                         bool sel, bool alt, uint16_t rowH = ROW_H) {
     const Theme565 &t = getTheme();
+    bool flat = (t.style & THEME_STYLE_FLAT);
     uint16_t bg = sel ? t.selected : (alt ? t.rowOdd : t.rowEven);
     lcd.fillRect(0, y, SCREEN_W-4, rowH, bg);
-    if (sel) lcd.fillRect(0, y, 3, rowH, t.accent);
+    if (sel) {
+        if (!flat) {
+            lcd.fillRect(0, y, 3, rowH, t.accent);  // левый акцент-бар (rounded)
+        }
+        if (t.style & THEME_STYLE_BEVEL) {
+            lcd.drawFastHLine(0, y,        SCREEN_W-4, t.hilite);
+            lcd.drawFastHLine(0, y+rowH-1, SCREEN_W-4, t.shadow);
+        }
+    }
+    // Цвет текста на выбранной строке
+    uint16_t stc = t.selText ? t.selText : (uint16_t)COL_WHITE;
     fsm();
     if (left) {
-        lcd.setTextColor(sel ? t.bg : t.textPri);
+        lcd.setTextColor(sel ? stc : t.textPri);
         lcd.setTextDatum(ML_DATUM);
         lcd.drawString(left, 10, y + rowH/2);
     }
     if (right) {
-        lcd.setTextColor(sel ? t.bg : t.accent);
+        lcd.setTextColor(sel ? stc : t.accent);
         lcd.setTextDatum(MR_DATUM);
         lcd.drawString(right, SCREEN_W-9, y + rowH/2);
     }
@@ -202,7 +253,7 @@ void drawBoot() {
     fsm(); lcd.setTextColor(t.textSec);
     lcd.drawString(FIRMWARE_VERSION, SCREEN_W/2, 176);
     lcd.setTextColor(t.accent);
-    lcd.drawString(S().loading, SCREEN_W/2, 198);
+    lcd.drawString(cyrStr(S().loading), SCREEN_W/2, 198);
 }
 
 void drawSDError() {
@@ -212,9 +263,9 @@ void drawSDError() {
     fxl(); lcd.setTextColor(t.bg); lcd.setTextDatum(MC_DATUM);
     lcd.drawString("!", SCREEN_W/2, 80);
     fmd(); lcd.setTextColor(t.textPri);
-    lcd.drawString(S().noSD, SCREEN_W/2, 148);
+    lcd.drawString(cyrStr(S().noSD), SCREEN_W/2, 148);
     fsm(); lcd.setTextColor(t.textSec);
-    lcd.drawString(S().noSDHint, SCREEN_W/2, 168);
+    lcd.drawString(cyrStr(S().noSDHint), SCREEN_W/2, 168);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -224,66 +275,9 @@ void drawSDError() {
 static int _menuSel    = 0;
 static int _menuOffset = 0;
 
-// ── Нижняя панель меню: [▶ PLAY] [HH:MM] [⚙ SETUP] ───────────
-static void drawMenuBar() {
-    const Theme565 &t = getTheme();
-    int by = DPAD_Y;
-    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
-    lcd.drawFastHLine(0, by, SCREEN_W, COL_TOPBAR);
+// drawMenuBar() and drawRomRow() moved to src/ui/themes/theme_*.cpp
+// Each theme plugin implements its own drawHeader/drawMenuBar/drawRomRow.
 
-    // ── PLAY button (зона 1) ──────────────────────────────────
-    lcd.fillRoundRect(4, by+5, MBAR_PLAY_W-8, 34, 8, t.selected);
-    // Треугольник ▶
-    int tx = 18, ty = by + BTNBAR_H/2;
-    lcd.fillTriangle(tx, ty-7, tx, ty+7, tx+10, ty, (uint16_t)COL_GOLD);
-    fmd(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(ML_DATUM);
-    lcd.drawString(S().play, tx+14, ty);
-
-    // ── Вертикальный разделитель ──────────────────────────────
-    lcd.drawFastVLine(MBAR_TIME_X, by+6, BTNBAR_H-12, 0x3186);
-    lcd.drawFastVLine(MBAR_SET_X,  by+6, BTNBAR_H-12, 0x3186);
-
-    // ── Время (зона 2) ────────────────────────────────────────
-    flg(); lcd.setTextColor((uint16_t)COL_CYAN); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString(timeGetString().c_str(), (MBAR_TIME_X + MBAR_SET_X)/2, by + BTNBAR_H/2);
-
-    // ── SETUP (зона 3) ────────────────────────────────────────
-    int scx = MBAR_SET_X + 16;
-    iconSystem(scx, by + BTNBAR_H/2, t.textSec);
-    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(ML_DATUM);
-    lcd.drawString(S().setup, scx + 14, by + BTNBAR_H/2);
-}
-
-// ── Одна строка ROM ────────────────────────────────────────────
-static void drawRomRow(int romIdx, int slot) {
-    const Theme565 &t = getTheme();
-    int y   = HDR_H + slot * ROW_H;
-    bool sel = (romIdx == _menuSel);
-
-    if (sel) {
-        // Синий фон выбранной строки
-        lcd.fillRoundRect(3, y+2, SCREEN_W-6, ROW_H-4, 6, t.selected);
-        // Золотой ▶
-        int tx = 14, ty = y + ROW_H/2;
-        lcd.fillTriangle(tx, ty-6, tx, ty+6, tx+9, ty, (uint16_t)COL_GOLD);
-        // Текст белый
-        fmd(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(ML_DATUM);
-        String name = sdMgr.get(romIdx).name;
-        if (name.length() > 26) name = name.substring(0, 24) + "..";
-        lcd.drawString(name.c_str(), 28, y + ROW_H/2);
-    } else {
-        // Тонкий разделитель сверху каждой строки
-        if (slot > 0)
-            lcd.drawFastHLine(10, y, SCREEN_W-20, (uint16_t)COL_SEP);
-        // Текст
-        fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
-        String name = sdMgr.get(romIdx).name;
-        if (name.length() > 28) name = name.substring(0, 26) + "..";
-        lcd.drawString(name.c_str(), 12, y + ROW_H/2);
-    }
-}
-
-// ── Индикаторы прокрутки (▲ вверху, ▼ внизу) ──────────────────
 static void drawScrollIndicators(int total) {
     const Theme565 &t = getTheme();
     if (_menuOffset > 0) {
@@ -298,62 +292,41 @@ static void drawScrollIndicators(int total) {
     }
 }
 
-// ── Главная функция отрисовки меню ─────────────────────────────
+// ── Главная функция отрисовки меню — делегирует плагину темы ──────
 void menuDraw() {
-    const Theme565 &t = getTheme();
+    const ThemePlugin* tp = ThemeRegistry::active();
+    const Theme565& t     = getTheme();
 
-    // Фон
     lcd.fillScreen(t.bg);
 
-    // ── Шапка ────────────────────────────────────────────────
-    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
-    // Заголовок
-    flg(); lcd.setTextDatum(MC_DATUM);
-    lcd.setTextColor((uint16_t)COL_GOLD);
-    lcd.drawString("NES GAMES", SCREEN_W/2, HDR_H/2);
-    // Акцентная линия внизу шапки
-    lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.accent);
-    // Бейдж с количеством ROM-ов (справа в шапке)
-    if (sdMgr.count() > 0) {
-        char badge[12];
-        snprintf(badge, sizeof(badge), "%d ROMs", sdMgr.count());
-        fsm(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MR_DATUM);
-        lcd.drawString(badge, SCREEN_W - 8, HDR_H/2);
-    }
+    // Шапка — каждая тема рисует свою (title bar / app bar / nav bar)
+    tp->drawHeader(sdMgr.count());
 
-    // ── Список ROM ────────────────────────────────────────────
+    // Список ROM
     int total = sdMgr.count();
     if (total == 0) {
         fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-        int cy = HDR_H + (DPAD_Y - HDR_H)/2;
-        lcd.drawString(S().noRoms, SCREEN_W/2, cy - 12);
-        fsm(); lcd.drawString(S().noRomsHint, SCREEN_W/2, cy + 12);
+        int emptyY = HDR_H + (DPAD_Y - HDR_H) / 2;
+        lcd.drawString(cyrStr(S().noRoms),     SCREEN_W / 2, emptyY - 12);
+        fsm(); lcd.drawString(cyrStr(S().noRomsHint), SCREEN_W / 2, emptyY + 12);
     } else {
         int end = min(_menuOffset + ROWS_VISIBLE, total);
-        for (int i = _menuOffset; i < end; i++) {
-            drawRomRow(i, i - _menuOffset);
-        }
+        for (int i = _menuOffset; i < end; i++)
+            tp->drawRomRow(i, i - _menuOffset, i == _menuSel);
         drawScrollIndicators(total);
     }
 
-    // ── Нижняя панель ─────────────────────────────────────────
-    drawMenuBar();
+    // Нижняя панель — taskbar / bottom nav / tab bar / default bar
+    tp->drawMenuBar();
 }
 
-// ── Обновление только времени в нижней панели (без перерисовки всего) ──
+// ── Обновление только времени (раз в минуту) — делегирует плагину ─
 static uint8_t _menuLastMin = 0xFF;
 void menuTimeTick() {
-
     uint8_t m = timeGetM();
     if (m == _menuLastMin) return;
     _menuLastMin = m;
-    const Theme565 &t = getTheme();
-    // Перерисовываем только зону времени
-    int bx = MBAR_TIME_X + 1, by = DPAD_Y + 1;
-    int bw = MBAR_SET_X - MBAR_TIME_X - 2, bh = BTNBAR_H - 2;
-    lcd.fillRect(bx, by, bw, bh, t.header);
-    flg(); lcd.setTextColor((uint16_t)COL_CYAN); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString(timeGetString().c_str(), (MBAR_TIME_X + MBAR_SET_X)/2, DPAD_Y + BTNBAR_H/2);
+    ThemeRegistry::active()->timeTick();
 }
 
 // ── Partial-redraw helpers (smooth scroll) ─────────────────────────────────
@@ -361,13 +334,16 @@ void menuTimeTick() {
 // A full menuDraw() is only triggered when the viewport offset changes.
 
 static void menuPartialUpdate(int slotA, int romA, int slotB, int romB) {
-    const Theme565 &t = getTheme();
+    const Theme565&   t  = getTheme();
+    const ThemePlugin* tp = ThemeRegistry::active();
     // Erase and redraw row A
     lcd.fillRect(0, HDR_H + slotA * ROW_H, SCREEN_W, ROW_H, t.bg);
-    if (romA >= 0 && romA < sdMgr.count()) drawRomRow(romA, slotA);
+    if (romA >= 0 && romA < sdMgr.count())
+        tp->drawRomRow(romA, slotA, romA == _menuSel);
     // Erase and redraw row B
     lcd.fillRect(0, HDR_H + slotB * ROW_H, SCREEN_W, ROW_H, t.bg);
-    if (romB >= 0 && romB < sdMgr.count()) drawRomRow(romB, slotB);
+    if (romB >= 0 && romB < sdMgr.count())
+        tp->drawRomRow(romB, slotB, romB == _menuSel);
     // Erase right-column indicator zones and redraw
     lcd.fillRect(SCREEN_W - 20, HDR_H, 20, DPAD_Y - HDR_H, t.bg);
     drawScrollIndicators(sdMgr.count());
@@ -400,23 +376,21 @@ void menuScrollDown() {
 
 uint8_t menuHandleTouch(int x, int y, int &romAction) {
     romAction = 0;
+    const ThemePlugin* tp = ThemeRegistry::active();
 
-    // ── Нижняя панель ─────────────────────────────────────────
+    // ── Нижняя панель — тема сама обрабатывает нажатие ────────
     if (y >= DPAD_Y) {
-        if (x < MBAR_TIME_X) {
-            // Зона PLAY
-            romAction = 1;
-            return BTN_A;
-        } else if (x >= MBAR_SET_X) {
-            // Зона SETUP
-            return BTN_SEL;
-        }
-        // Зона времени — нет действия
-        return 0;
+        ThemeAction a = tp->onBarTap(x, y);
+        if (a.act == ACT_PLAY) { romAction = 1; return BTN_A; }
+        return a.btnMask;   // BTN_SEL / BTN_LEFT / 0 и т.д.
     }
 
-    // ── Заголовок ─────────────────────────────────────────────
-    if (y < HDR_H) return 0;
+    // ── Шапка — тема обрабатывает нажатие ─────────────────────
+    if (y < HDR_H) {
+        ThemeAction a = tp->onHeaderTap(x, y);
+        if (a.act == ACT_PLAY) { romAction = 1; return BTN_A; }
+        return a.btnMask;
+    }
 
     // ── Индикаторы прокрутки (правая полоса списка) ───────────
     if (x > SCREEN_W - 22) {
@@ -430,8 +404,12 @@ uint8_t menuHandleTouch(int x, int y, int &romAction) {
         int tapped = _menuOffset + row;
         if (tapped < 0 || tapped >= sdMgr.count()) return 0;
         TapType tt = touch.checkDoubleTap(x, y, tapped);
-        if (tt == TAP_DOUBLE) { romAction = 2; return BTN_A; }
+        int tapCount = (tt == TAP_DOUBLE) ? 2 : 1;
         if (tapped != _menuSel) { _menuSel = tapped; menuDraw(); }
+        ThemeAction a = tp->onRowTap(row, tapCount);
+        if (a.act == ACT_ROMINFO) { romAction = 2; return BTN_A; }
+        if (a.act == ACT_PLAY)    { romAction = tapCount; return BTN_A; }
+        return a.btnMask;
     }
     return 0;
 }
@@ -453,7 +431,7 @@ void showRomInfo(int idx) {
     lcd.drawRoundRect(px, py, pw, ph, 10, t.accent);
     lcd.drawFastHLine(px+8, py+34, pw-16, 0x2945);
     fmd(); lcd.setTextColor(t.accent); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString(S().romInfo, SCREEN_W/2, py+17);
+    lcd.drawString(cyrStr(S().romInfo), SCREEN_W/2, py+17);
 
     fsm(); lcd.setTextDatum(ML_DATUM);
     int lx = px+12, rx = px+pw-12, ly = py+46;
@@ -464,11 +442,11 @@ void showRomInfo(int idx) {
         lcd.setTextDatum(ML_DATUM);
         ly += 22;
     };
-    row(S().romMapper, "N/A");
+    row(cyrStr(S().romMapper), "N/A");
     String sz = rom.size < 1024 ? String(rom.size)+"B" : String(rom.size/1024)+"KB";
-    row(S().romSize, sz);
+    row(cyrStr(S().romSize), sz);
     String p = rom.path; if(p.length()>26) p=p.substring(0,24)+"..";
-    row(S().romPath, p);
+    row(cyrStr(S().romPath), p);
     String n = rom.name; if(n.length()>22) n=n.substring(0,20)+"..";
     row("Name:", n);
 
@@ -572,15 +550,14 @@ static int globalSettingIdx(int cat, int itemInCat) {
 }
 
 static String settingValue(int gi) {
-    const char *themes[] = {"Dark","Light","Green","Amber"};
-    const char *langs[]  = {"RU","EN"};
+    const char *langs[]  = {"RU","EN","CZ"};
     const char *scales[] = {"Fit","4:3","1:1"};
     const char *snds[]   = {"Beep","Click","Chime"};
     switch(gi) {
         case 0:  return String(settings.brightness)+"%";
         case 1:  return String(settings.volume)+"%";
-        case 2:  return themes[(int)settings.theme%4];
-        case 3:  return langs[(int)settings.language%2];
+        case 2:  return ThemeRegistry::activeName();
+        case 3:  return langs[(int)settings.language%LANG_COUNT];
         case 4:  return scales[(int)settings.scale%3];
         case 5:  return settings.showFPS ? "On" : "Off";
         case 6:  return settings.autoSave ? "On" : "Off";
@@ -616,7 +593,12 @@ static void settingInc(int gi) {
     switch(gi) {
         case 0: settings.brightness=min(100,(int)settings.brightness+10); setBrightness(settings.brightness); break;
         case 1: settings.volume=min(100,(int)settings.volume+10); break;
-        case 2: settings.theme=(Theme)(((int)settings.theme+1)%THEME_COUNT); break;
+        case 2: {
+            int n = ThemeRegistry::count();
+            ThemeRegistry::setActive((ThemeRegistry::activeIndex() + 1) % n);
+            strncpy(settings.themeName, ThemeRegistry::activeName(), sizeof(settings.themeName)-1);
+            break;
+        }
         case 3: settings.language=(Language)(((int)settings.language+1)%LANG_COUNT); break;
         case 4: settings.scale=(Scale)(((int)settings.scale+1)%SCALE_COUNT); break;
         case 5: settings.showFPS=!settings.showFPS; break;
@@ -642,7 +624,12 @@ static void settingDec(int gi) {
     switch(gi) {
         case 0: settings.brightness=max(10,(int)settings.brightness-10); setBrightness(settings.brightness); break;
         case 1: settings.volume=(settings.volume<10)?0:settings.volume-10; break;
-        case 2: settings.theme=(Theme)(((int)settings.theme-1+THEME_COUNT)%THEME_COUNT); break;
+        case 2: {
+            int n = ThemeRegistry::count();
+            ThemeRegistry::setActive((ThemeRegistry::activeIndex() - 1 + n) % n);
+            strncpy(settings.themeName, ThemeRegistry::activeName(), sizeof(settings.themeName)-1);
+            break;
+        }
         case 3: settings.language=(Language)(((int)settings.language-1+LANG_COUNT)%LANG_COUNT); break;
         case 4: settings.scale=(Scale)(((int)settings.scale-1+SCALE_COUNT)%SCALE_COUNT); break;
         case 5: settings.showFPS=!settings.showFPS; break;
@@ -686,26 +673,44 @@ static void drawCatIcon(int cat, int cx, int cy, uint16_t c) {
 static void drawSettingsBar(bool showBack, int navMode) {
     // navMode: 0=none, 1=up/down/LR, 2=up/down only
     const Theme565 &t = getTheme();
+    bool flat = (t.style & THEME_STYLE_FLAT);
     int by = DPAD_Y;
-    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
-    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+
+    uint16_t barBg  = (t.style & THEME_STYLE_BEVEL) ? t.bg : t.header;
+    uint16_t topLn  = (t.style & THEME_STYLE_BEVEL) ? t.shadow : (uint16_t)COL_TOPBAR;
+    uint16_t divCol = (t.style & THEME_STYLE_BEVEL) ? t.shadow : (uint16_t)0x3186;
+    uint16_t timCol = flat ? t.accent : (uint16_t)COL_CYAN;
+
+    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, barBg);
+    lcd.drawFastHLine(0, by, SCREEN_W, topLn);
     int ty = by + BTNBAR_H/2;
 
     if (showBack) {
-        // Blue BACK button (zone 0, x 0..79)
-        lcd.fillRoundRect(4, by+5, 72, 34, 8, t.selected);
-        // Left arrow ←
+        // Кнопка BACK — стиль как PLAY в главном меню
+        if (flat) {
+            lcd.fillRect(4, by+5, 72, 34, t.selected);
+            if (t.style & THEME_STYLE_BEVEL) {
+                lcd.drawFastHLine(4,  by+5,  72, t.hilite);
+                lcd.drawFastVLine(4,  by+5,  34, t.hilite);
+                lcd.drawFastHLine(4,  by+38, 72, t.shadow);
+                lcd.drawFastVLine(75, by+5,  34, t.shadow);
+            }
+        } else {
+            lcd.fillRoundRect(4, by+5, 72, 34, 8, t.selected);
+        }
         int ax = 16;
-        lcd.fillTriangle(ax, ty, ax+8, ty-6, ax+8, ty+6, (uint16_t)COL_GOLD);
-        fmd(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(ML_DATUM);
-        lcd.drawString(S().back, ax+12, ty);
+        uint16_t arrCol = flat ? (t.selText ? t.selText : 0xFFFF) : (uint16_t)COL_GOLD;
+        uint16_t txtCol = flat ? (t.selText ? t.selText : 0xFFFF) : (uint16_t)COL_WHITE;
+        lcd.fillTriangle(ax, ty, ax+8, ty-6, ax+8, ty+6, arrCol);
+        fmd(); lcd.setTextColor(txtCol); lcd.setTextDatum(ML_DATUM);
+        lcd.drawString(cyrStr(S().back), ax+12, ty);
     }
     // Vertical dividers
-    lcd.drawFastVLine(80,  by+6, BTNBAR_H-12, 0x3186);
-    lcd.drawFastVLine(240, by+6, BTNBAR_H-12, 0x3186);
+    lcd.drawFastVLine(80,  by+6, BTNBAR_H-12, divCol);
+    lcd.drawFastVLine(240, by+6, BTNBAR_H-12, divCol);
 
     // Time (center)
-    flg(); lcd.setTextColor((uint16_t)COL_CYAN); lcd.setTextDatum(MC_DATUM);
+    flg(); lcd.setTextColor(timCol); lcd.setTextDatum(MC_DATUM);
     lcd.drawString(timeGetString().c_str(), 160, ty);
 
     // Nav arrows (right zone x 240..319)
@@ -725,20 +730,32 @@ static void drawSettingsBar(bool showBack, int navMode) {
 
 static void drawCategoryGrid() {
     const Theme565 &t = getTheme();
+    bool flat = (t.style & THEME_STYLE_FLAT);
     lcd.fillScreen(t.bg);
 
-    // ── Заголовок (золотой, крупный) ─────────────────────────
+    // ── Заголовок ─────────────────────────────────────────────
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
     flg(); lcd.setTextDatum(MC_DATUM);
-    lcd.setTextColor((uint16_t)COL_GOLD);
+    // Цвет заголовка — как в menuDraw()
+    uint16_t hdrTxt;
+    if      (t.style & THEME_STYLE_BEVEL) hdrTxt = t.selText ? t.selText : 0xFFFF;
+    else if (flat)                         hdrTxt = t.accent;
+    else                                   hdrTxt = (uint16_t)COL_GOLD;
+    lcd.setTextColor(hdrTxt);
     lcd.drawString("SETTINGS", SCREEN_W/2, HDR_H/2);
-    // Золотая линия-разделитель
-    lcd.drawFastHLine(8, HDR_H, SCREEN_W-16, (uint16_t)COL_GOLD);
+    // Нижняя линия шапки
+    if (t.style & THEME_STYLE_BEVEL) {
+        lcd.drawFastHLine(0, HDR_H-2, SCREEN_W, t.hilite);
+        lcd.drawFastHLine(0, HDR_H-1, SCREEN_W, t.shadow);
+    } else {
+        lcd.drawFastHLine(8, HDR_H, SCREEN_W-16, hdrTxt);
+    }
 
     // ── Сетка тайлов ─────────────────────────────────────────
     const int COLS = 3, ROWS = (CAT_COUNT + COLS - 1) / COLS, PAD = 6;
     int cw = (SCREEN_W - PAD*(COLS+1)) / COLS;
     int ch = (DPAD_Y - HDR_H - 3 - PAD*(ROWS+1)) / ROWS;
+    int r_tile = flat ? 4 : 9;  // радиус скругления плитки (flat = чуть скруглённые)
 
     for (int i = 0; i < CAT_COUNT; i++) {
         int col = i % COLS, row = i / COLS;
@@ -747,29 +764,47 @@ static void drawCategoryGrid() {
         bool sel = (i == _gridSelected);
 
         if (sel) {
-            // ── ВЫБРАННЫЙ: инвертированные цвета ──────────────────
-            // Яркий заливной фон
-            lcd.fillRoundRect(x, y, cw, ch, 9, t.accent);
-            // Золотой бордер
-            lcd.drawRoundRect(x,   y,   cw,   ch,   9, (uint16_t)COL_GOLD);
-            lcd.drawRoundRect(x+1, y+1, cw-2, ch-2, 8, (uint16_t)COL_GOLD);
-            // Иконка тёмная (на светлом фоне)
+            // ── ВЫБРАННЫЙ ─────────────────────────────────────
+            lcd.fillRoundRect(x, y, cw, ch, r_tile, t.accent);
+            if (t.style & THEME_STYLE_BEVEL) {
+                // 3D sunken border
+                lcd.drawFastHLine(x, y,      cw, t.shadow);
+                lcd.drawFastVLine(x, y,      ch, t.shadow);
+                lcd.drawFastHLine(x, y+ch-1, cw, t.hilite);
+                lcd.drawFastVLine(x+cw-1, y, ch, t.hilite);
+            } else {
+                // Рамка accent/gold
+                uint16_t borderSel = flat ? t.selText : (uint16_t)COL_GOLD;
+                if (!borderSel) borderSel = t.accent;
+                lcd.drawRoundRect(x,   y,   cw,   ch,   r_tile, borderSel);
+                lcd.drawRoundRect(x+1, y+1, cw-2, ch-2, r_tile, borderSel);
+            }
+            // Иконка и текст на заливном фоне
             int icx = x + cw/2, icy = y + ch*2/5;
-            drawCatIcon(i, icx, icy, t.header);
-            // Текст тёмный + bold (два прохода)
+            uint16_t selIcCol = t.selText ? t.selText : t.header;
+            drawCatIcon(i, icx, icy, selIcCol);
             fmd(); lcd.setTextDatum(MC_DATUM);
-            lcd.setTextColor(t.header);
+            lcd.setTextColor(selIcCol ? selIcCol : 0xFFFF);
             lcd.drawString(_catName[i], x+cw/2,   y+ch-14);
-            lcd.drawString(_catName[i], x+cw/2+1, y+ch-14);  // bold
+            lcd.drawString(_catName[i], x+cw/2+1, y+ch-14);
         } else {
-            // ── ОБЫЧНЫЙ ───────────────────────────────────────────
-            lcd.fillRoundRect(x, y, cw, ch, 9, t.header);
-            uint16_t glowDim = (uint16_t)((t.accent >> 1) & 0x7BEF);
-            lcd.drawRoundRect(x-1, y-1, cw+2, ch+2, 10, glowDim);
-            lcd.drawRoundRect(x,   y,   cw,   ch,    9,  t.accent);
+            // ── ОБЫЧНЫЙ ───────────────────────────────────────
+            lcd.fillRoundRect(x, y, cw, ch, r_tile, t.header);
+            if (t.style & THEME_STYLE_BEVEL) {
+                // 3D raised border
+                lcd.drawFastHLine(x, y,      cw, t.hilite);
+                lcd.drawFastVLine(x, y,      ch, t.hilite);
+                lcd.drawFastHLine(x, y+ch-1, cw, t.shadow);
+                lcd.drawFastVLine(x+cw-1, y, ch, t.shadow);
+            } else {
+                uint16_t glowDim = (uint16_t)((t.accent >> 1) & 0x7BEF);
+                lcd.drawRoundRect(x-1, y-1, cw+2, ch+2, r_tile+1, glowDim);
+                lcd.drawRoundRect(x,   y,   cw,   ch,   r_tile,   t.accent);
+            }
             int icx = x + cw/2, icy = y + ch*2/5;
-            drawCatIcon(i, icx, icy, (uint16_t)COL_GOLD);
-            fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
+            uint16_t icCol = flat ? t.accent : (uint16_t)COL_GOLD;
+            drawCatIcon(i, icx, icy, icCol);
+            fmd(); lcd.setTextColor(icCol); lcd.setTextDatum(MC_DATUM);
             lcd.drawString(_catName[i], x+cw/2, y+ch-14);
         }
     }
@@ -1238,7 +1273,7 @@ static void drawCategoryDetail() {
 
         fmd(); lcd.setTextDatum(ML_DATUM);
         lcd.setTextColor((uint16_t)COL_WHITE);
-        const char *lbl = getLabelForGi(gi);
+        const char *lbl = cyrStr(getLabelForGi(gi));
         lcd.drawString(lbl, 40, y + rowH/2);
         if (sel) lcd.drawString(lbl, 41, y + rowH/2);
 
@@ -1390,8 +1425,6 @@ uint8_t settingsHandleTouch(int x, int y) {
     else                  return handleCategoryDetail(x, y);
 }
 
-void settingsScrollUp()   {}
-void settingsScrollDown() {}
 
 // ══════════════════════════════════════════════════════════════
 // REMAP BUTTONS
@@ -1482,7 +1515,6 @@ uint8_t btnMapHandleTouch(int x, int y) {
     return 0;
 }
 
-void btnMapApply() {}
 
 // ══════════════════════════════════════════════════════════════
 // КНОПОЧНАЯ НАВИГАЦИЯ
@@ -1748,7 +1780,7 @@ void wifiManagerDraw() {
     int ax = 16, ty = by + BTNBAR_H/2;
     lcd.fillTriangle(ax, ty, ax+8, ty-6, ax+8, ty+6, (uint16_t)COL_GOLD);
     fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(ML_DATUM);
-    lcd.drawString(S().back, ax+12, ty);
+    lcd.drawString(cyrStr(S().back), ax+12, ty);
     // SCAN (107..213)
     lcd.drawFastVLine(107, by+6, BTNBAR_H-12, 0x3186);
     fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
@@ -2358,31 +2390,8 @@ void picoOtaScreen(const char *picoUrl) {
     fsm(); lcd.setTextColor(t.textSec);
     lcd.drawString("Buttons off ~30 sec during flash", SCREEN_W/2, 168);
 
-    // ── Кнопки Cancel / Flash ─────────────────────────────────────────────────
-    int by = DPAD_Y;
-    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
-    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
-    int ty = by + BTNBAR_H/2;
-    lcd.fillRoundRect(4, by+5, 148, 34, 8, t.rowOdd);
-    fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("Cancel", 80, ty);
-    lcd.fillRoundRect(156, by+5, 160, 34, 8, t.accent);
-    lcd.setTextColor(t.bg);
-    lcd.drawString("Flash Pico", 237, ty);
-
-    // Чекаємо вибір користувача
-    uint32_t deadline = millis() + 20000;
-    bool confirmed = false;
-    while (millis() < deadline) {
-        if (!touch.isTouched()) { delay(20); continue; }
-        int tx, ty2; touch.getXY(tx, ty2);
-        if (ty2 >= by) {
-            if (tx >= 156) { confirmed = true; }
-            break;
-        }
-        delay(20);
-    }
-    if (!confirmed) return;
+    // Кнопки Cancel / Flash — та же механика что и _otaAskUser, без дублирования
+    if (!_otaAskUser("Cancel", "Flash Pico", 20000)) return;
 
     // ── Прогрес бар ──────────────────────────────────────────────────────────
     lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
@@ -2444,7 +2453,7 @@ static void drawFileMgrBar() {
     int ax = 16;
     lcd.fillTriangle(ax, ty, ax+8, ty-6, ax+8, ty+6, (uint16_t)COL_GOLD);
     fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(ML_DATUM);
-    lcd.drawString(S().back, ax+12, ty);
+    lcd.drawString(cyrStr(S().back), ax+12, ty);
 
     // Dividers
     lcd.drawFastVLine(107, by+6, BTNBAR_H-12, 0x3186);

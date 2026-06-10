@@ -16,7 +16,25 @@ void cfgLoad() {
     settings.emuVolume      = doc["emuvol"]       | 80;
     settings.vibroEnabled   = doc["vibro"]        | 1;
     settings.vibroStrength  = doc["vibrostr"]     | 70;
-    settings.theme          = (Theme)   (doc["theme"]   | 0);
+
+    // ── Тема ─────────────────────────────────────────────────────────────
+    // Новый формат: "themeName" = строка ("Dark", "Win98", …)
+    // Старый формат: "theme" = int (0-7) — обратная совместимость
+    if (doc.containsKey("themeName")) {
+        const char* tn = doc["themeName"] | "Dark";
+        strncpy(settings.themeName, tn, sizeof(settings.themeName) - 1);
+        settings.themeName[sizeof(settings.themeName) - 1] = '\0';
+    } else {
+        // Старый конфиг — маппинг числа в имя
+        static const char* legacyNames[] = {
+            "Dark","Light","Green","Amber","Win98","Android","iOS","GameBoy"
+        };
+        int oldIdx = doc["theme"] | 0;
+        if (oldIdx < 0 || oldIdx > 7) oldIdx = 0;
+        strncpy(settings.themeName, legacyNames[oldIdx], sizeof(settings.themeName) - 1);
+        settings.themeName[sizeof(settings.themeName) - 1] = '\0';
+    }
+
     settings.language       = (Language)(doc["lang"]    | 0);
     settings.scale          = (Scale)   (doc["scale"]   | 1);
     settings.showFPS        = doc["fps"]          | false;
@@ -74,7 +92,7 @@ void cfgSave() {
     doc["emuvol"]     = settings.emuVolume;
     doc["vibro"]      = settings.vibroEnabled;
     doc["vibrostr"]   = settings.vibroStrength;
-    doc["theme"]      = (int)settings.theme;
+    doc["themeName"]  = settings.themeName;
     doc["lang"]       = (int)settings.language;
     doc["scale"]      = (int)settings.scale;
     doc["fps"]        = settings.showFPS;

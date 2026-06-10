@@ -162,6 +162,10 @@ static void playWavFile(const char *path) {
         if (got <= 0) break;
 
         int samples = got / frameBytes;
+        // _i2sBuf = WAV_DMA_LEN*2 = 512 uint16_t → индексы 0..511.
+        // Запись _i2sBuf[i*2+1] при samples=512 → индекс 1023 → выход за границу.
+        // Кап = WAV_DMA_LEN: цикл просто выполнится ещё раз при следующей читке SD.
+        if (samples > WAV_DMA_LEN) samples = WAV_DMA_LEN;
         for (int i = 0; i < samples; i++) {
             // Читаем в 16-битном пространстве — сохраняем точность до самого конца
             int32_t s32;

@@ -151,6 +151,13 @@ void bootLogoLoad() {
         return;
     }
 
+    // Проверяем наличие файла ДО выделения 150 КБ PSRAM.
+    // Раньше: ps_malloc → открыть файл → если нет, free() → PSRAM фрагментирован.
+    if (!SD.exists("/boot.raw")) {
+        Serial.println("[BOOT] /boot.raw not found — using fallback");
+        return;
+    }
+
     const size_t SIZE = (size_t)SCREEN_W * SCREEN_H * 2;  // 153 600 bytes
 
     _bootImg = (uint8_t *)ps_malloc(SIZE);
@@ -161,7 +168,7 @@ void bootLogoLoad() {
 
     File f = SD.open("/boot.raw");
     if (!f) {
-        Serial.println("[BOOT] /boot.raw not found — using fallback");
+        Serial.println("[BOOT] /boot.raw open failed — using fallback");
         free(_bootImg); _bootImg = nullptr;
         return;
     }

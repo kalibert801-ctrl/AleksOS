@@ -108,12 +108,6 @@ void ButtonHandler::sendCmd(uint8_t cmd, uint8_t data) {
     PICO_SERIAL.write(pkt, 4);
 }
 
-void ButtonHandler::sendCmd2(uint8_t cmd, uint8_t d1, uint8_t d2) {
-    // Unused — kept for compatibility, routes to sendCmd with d1 only
-    sendCmd(cmd, d1);
-    (void)d2;
-}
-
 // ── Вибро ────────────────────────────────────────────────────────
 void ButtonHandler::vibrate1(uint16_t duration_ms) {
     if (!isConnected() || !settings.vibroEnabled) return;
