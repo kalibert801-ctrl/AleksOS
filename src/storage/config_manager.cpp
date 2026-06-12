@@ -7,7 +7,7 @@
 void cfgLoad() {
     File f = SD.open(CFG_FILE);
     if (!f) return;
-    StaticJsonDocument<1536> doc;
+    StaticJsonDocument<2048> doc;
     if (deserializeJson(doc, f)) { f.close(); return; }
     f.close();
 
@@ -59,6 +59,28 @@ void cfgLoad() {
     strncpy(settings.wifiPass, pass, sizeof(settings.wifiPass) - 1);
     settings.wifiPass[sizeof(settings.wifiPass) - 1] = '\0';
 
+    // ── Эмулятор ────────────────────────────────────────────────────────────
+    settings.turboEnabled = doc["turbo_en"]   | 0;
+    settings.turboMask    = doc["turbo_mask"] | 0x04;
+    settings.nesPalette   = doc["nes_pal"]    | 0;
+
+    // ── Game Genie ──────────────────────────────────────────────────────────
+    settings.ggEnabled = doc["gg_en"] | 0;
+    memset(settings.ggCodes, 0, sizeof(settings.ggCodes));
+    if (doc.containsKey("gg")) {
+        JsonArray ggArr = doc["gg"].as<JsonArray>();
+        int slot = 0;
+        for (JsonVariant v : ggArr) {
+            if (slot >= 8) break;
+            const char *s = v.as<const char*>();
+            if (s) {
+                strncpy(settings.ggCodes[slot], s, 7);
+                settings.ggCodes[slot][7] = '\0';
+            }
+            slot++;
+        }
+    }
+
     // Load btnMap only from configs saved by v13.4+ firmware (remap_ver >= 2).
     // remap_ver absent   → very old config (before remap existed)  → skip
     // remap_ver == 1     → v13.3 intermediate build, may have swapped map → skip
@@ -85,7 +107,7 @@ void cfgSave() {
     SD.remove(tmpPath);
     File f = SD.open(tmpPath, FILE_WRITE);
     if (!f) return;
-    StaticJsonDocument<1536> doc;
+    StaticJsonDocument<2048> doc;
 
     doc["brightness"] = settings.brightness;
     doc["volume"]     = settings.volume;
@@ -112,6 +134,16 @@ void cfgSave() {
     doc["wifi_en"]   = settings.wifiEnabled;
     doc["wifi_ssid"] = settings.wifiSSID;
     doc["wifi_pass"] = settings.wifiPass;
+
+    // ── Эмулятор ───────────────────────────────────────────────────────────
+    doc["turbo_en"]   = settings.turboEnabled;
+    doc["turbo_mask"] = settings.turboMask;
+    doc["nes_pal"]    = settings.nesPalette;
+
+    // ── Game Genie ─────────────────────────────────────────────────────────
+    doc["gg_en"] = settings.ggEnabled;
+    JsonArray ggArr = doc.createNestedArray("gg");
+    for (int i = 0; i < 8; i++) ggArr.add(settings.ggCodes[i]);
 
     doc["remap_ver"] = 2;   // v13.4+: clean identity-based remap, safe to load
     JsonArray arr = doc.createNestedArray("btnmap");

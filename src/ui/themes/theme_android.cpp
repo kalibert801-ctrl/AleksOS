@@ -86,28 +86,30 @@ static void and_drawMenuBar() {
 // ════════════════════════════════════════════════════════════════════
 static void and_drawRomRow(int romIdx, int slot, bool sel) {
     const Theme565& t = getTheme();
-    int y  = HDR_H + slot * ROW_H;
-    int cy = y + ROW_H / 2;
+    int y  = M_HDR_H + slot * M_ROW_H;
+    int cy = y + M_ROW_H / 2;
 
     uint16_t bg = sel ? t.selected : ((slot % 2) ? t.rowOdd : t.rowEven);
-    lcd.fillRect(4, y + 2, SCREEN_W - 8, ROW_H - 4, bg);
+    lcd.fillRect(2, y + 1, M_LIST_W - 5, M_ROW_H - 2, bg);
 
     if (sel) {
-        // Вертикальный акцент-бар слева (teal)
-        lcd.fillRect(4, y + 2, 3, ROW_H - 4, t.accent);
-        // Тень внизу карточки
-        lcd.drawFastHLine(6, y + ROW_H - 3, SCREEN_W - 12, t.shadow);
-        // Иконка геймпада справа
+        lcd.fillRect(2, y + 1, 3, M_ROW_H - 2, t.accent);
+        lcd.drawFastHLine(4, y + M_ROW_H - 2, M_LIST_W - 8, t.shadow);
         uint16_t stc = t.selText ? t.selText : TH_WHITE;
-        th_iconControls(SCREEN_W - 24, cy, stc);
-        th_fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(stc);
-        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 23).c_str(), 16, cy);
+        th_fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(stc);
+        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 14).c_str(), 10, cy);
     } else {
-        // Разделитель между карточками
-        if (slot > 0) lcd.drawFastHLine(4, y + 2, SCREEN_W - 8, t.header);
-        th_fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
-        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 25).c_str(), 14, cy);
+        if (slot > 0) lcd.drawFastHLine(4, y + 1, M_LIST_W - 8, t.header);
+        th_fsm(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
+        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 16).c_str(), 8, cy);
     }
+
+    // Звезда (favourite) справа
+    bool isFav = GameStats::favCheck(sdMgr.get(romIdx).path.c_str());
+    uint16_t sc = isFav ? TH_GOLD : (uint16_t)0x2965u;
+    int sx = M_LIST_W - 11;
+    lcd.fillTriangle(sx, cy-4, sx-3, cy+2, sx+3, cy+2, sc);
+    lcd.fillTriangle(sx, cy+3, sx-3, cy-2, sx+3, cy-2, sc);
 }
 
 // ════════════════════════════════════════════════════════════════════

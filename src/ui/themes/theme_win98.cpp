@@ -137,26 +137,32 @@ static void w98_drawMenuBar() {
 // ════════════════════════════════════════════════════════════════════
 static void w98_drawRomRow(int romIdx, int slot, bool sel) {
     const Theme565& t = getTheme();
-    int y  = HDR_H + slot * ROW_H;
-    int cy = y + ROW_H / 2;
-    String name = th_trimName(sdMgr.get(romIdx).name, 27);
+    int y  = M_HDR_H + slot * M_ROW_H;
+    int cy = y + M_ROW_H / 2;
 
     uint16_t bg = sel ? t.selected : ((slot % 2) ? t.rowOdd : t.rowEven);
-    lcd.fillRect(0, y, SCREEN_W, ROW_H, bg);
+    lcd.fillRect(0, y, M_LIST_W - 1, M_ROW_H, bg);
+
+    bool isFav = GameStats::favCheck(sdMgr.get(romIdx).path.c_str());
+    String name = th_trimName(sdMgr.get(romIdx).name, isFav ? 14 : 16);
 
     if (sel) {
-        // Bevel-рамка поверх синего фона
-        lcd.drawFastHLine(0, y,           SCREEN_W, t.hilite);
-        lcd.drawFastHLine(0, y + ROW_H-1, SCREEN_W, t.shadow);
+        lcd.drawFastHLine(0, y,               M_LIST_W - 1, t.hilite);
+        lcd.drawFastHLine(0, y + M_ROW_H - 1, M_LIST_W - 1, t.shadow);
         uint16_t stc = t.selText ? t.selText : TH_WHITE;
-        th_fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(stc);
-        lcd.drawString(name.c_str(), 8, cy);
+        th_fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(stc);
+        lcd.drawString(name.c_str(), 6, cy);
     } else {
-        // Тонкая нижняя граница строки
-        lcd.drawFastHLine(0, y + ROW_H - 1, SCREEN_W, t.shadow);
-        th_fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
-        lcd.drawString(name.c_str(), 8, cy);
+        lcd.drawFastHLine(0, y + M_ROW_H - 1, M_LIST_W - 1, t.shadow);
+        th_fsm(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
+        lcd.drawString(name.c_str(), 6, cy);
     }
+
+    // Звезда (favourite) справа
+    uint16_t sc = isFav ? TH_GOLD : (uint16_t)0x2965u;
+    int sx = M_LIST_W - 11;
+    lcd.fillTriangle(sx, cy-4, sx-3, cy+2, sx+3, cy+2, sc);
+    lcd.fillTriangle(sx, cy+3, sx-3, cy-2, sx+3, cy-2, sc);
 }
 
 // ════════════════════════════════════════════════════════════════════

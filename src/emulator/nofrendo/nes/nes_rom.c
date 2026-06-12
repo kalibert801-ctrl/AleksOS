@@ -450,6 +450,12 @@ rominfo_t *rom_load(const char *filename)
 
    memset(rominfo, 0, sizeof(rominfo_t));
 
+   /* Store full VFS path in rominfo->filename so nesstate.c can build
+   ** save-state filenames (e.g. /sd/FomiCon/game.ss0) via fopen().
+   ** osd_fullname() prepends the /sd VFS mount point when needed. */
+   if (filename)
+      osd_fullname(rominfo->filename, filename);
+
    /* Get the header and stick it into rominfo struct */
 	if (rom_getheader(&rom, rominfo))
       goto _fail;

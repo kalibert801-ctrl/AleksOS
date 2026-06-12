@@ -6,9 +6,10 @@
 #include "ui/theme_plugin.h"
 #include "display/display_manager.h"   // lcd (LGFX)
 #include "storage/sd_manager.h"        // sdMgr
+#include "storage/game_stats.h"        // GameStats::favCheck
 #include "system/time_manager.h"       // timeGetString(), timeGetH/M
 #include "lang.h"                      // S()
-#include "config.h"                    // SCREEN_W/H, HDR_H, ROW_H, BTN_*
+#include "config.h"                    // SCREEN_W/H, HDR_H, ROW_H, M_*, BTN_*
 #include "ui/font_cyr9.h"              // CyrDejaVu9 — Кириллический шрифт
 
 // ── Шрифты ────────────────────────────────────────────────────────

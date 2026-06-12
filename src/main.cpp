@@ -18,6 +18,8 @@
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
+#include "storage/game_stats.h"
+#include "emulator/game_genie.h"
 
 Settings settings;
 
@@ -26,7 +28,7 @@ Settings settings;
 // ─────────────────────────────────────────────────────────────
 
 enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
-             S_FILEMGR, S_FILEMGR_KB };
+             S_FILEMGR, S_FILEMGR_KB, S_GG, S_GG_KB, S_SEARCH_KB, S_GALLERY };
 static State state = S_MENU;
 
 // ── Screen-transition helpers ─────────────────────────────────────────────
@@ -57,6 +59,7 @@ static void toSettings() { fadeOut(); state = S_SETTINGS; settingsDraw();    fad
 static void toRemap()    { fadeOut(); state = S_REMAP;    btnMapDraw();      fadeIn(); }
 static void toWifi()     { fadeOut(); state = S_WIFI;     wifiManagerDraw(); fadeIn(); }
 static void toFileMgr()  { fadeOut(); state = S_FILEMGR;  fileMgrDraw();     fadeIn(); }
+static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();   fadeIn(); }
 
 // WiFi manager keyboard helper — opens password keyboard for selected network
 static void openWifiKeyboard() {
@@ -127,6 +130,7 @@ void setup() {
     if (sdOk) {
         bootProgress(30, "Loading config...");
         cfgLoad();
+        GameStats::load();
         // Активируем сохранённую тему (или "Dark" если не найдена)
         if (!ThemeRegistry::setActiveByName(settings.themeName)) {
             ThemeRegistry::setActive(0);   // fallback на первую
@@ -233,6 +237,22 @@ void loop() {
     }
     if (settings.diagTouch && tapped) Serial.printf("[TOUCH] x=%d y=%d\n", x, y);
 
+    // ── Drag scroll для главного меню ─────────────────────────────────────
+    // rawTouched() = true пока палец удерживается (не edge-triggered)
+    if (state == S_MENU) {
+        static bool _prevHeld = false;
+        bool _nowHeld = touch.rawTouched() && !tapped;
+        if (_nowHeld) {
+            int rx = 0, ry = 0;
+            touch.getXY(rx, ry);
+            menuRawTouch(rx, ry);
+        } else if (_prevHeld && !_nowHeld) {
+            menuTouchUp();
+        }
+        _prevHeld = _nowHeld || tapped;
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     switch (state) {
 
     case S_MENU: {
@@ -308,6 +328,20 @@ void loop() {
         if (action & BTN_SEL) {
             soundBack(); ledSet(LED_YELLOW); delay(120); ledSet(LED_OFF);
             toSettings();
+        } else if (action == 0xC0) {
+            // 🔍 Поиск — открываем клавиатуру
+            soundClick();
+            wifiKeyboardReset();
+            wifiKeyboardSetLabel("Search ROMs:");
+            wifiKeyboardSetMask(false);
+            state = S_SEARCH_KB;
+            wifiKeyboardDraw("");
+            menuDrawSearchKbBack();   // кнопка "← BACK" под клавиатурой
+        } else if (action == 0xD0) {
+            // 📷 Галерея скриншотов
+            soundClick();
+            state = S_GALLERY;
+            galleryOpen();
         } else if (action & BTN_A) {
             if (romAction == 2) {
                 soundClick(); buttons.vibrate1(40); showRomInfo(menuSelected()); menuDraw();
@@ -322,17 +356,15 @@ void loop() {
                 }
             }
         } else if (action & BTN_LEFT) {
-            // Тема запросила файловый менеджер (напр. Win98 "File" меню)
             soundClick(); buttons.vibrate1(40);
             toFileMgr();
         } else if (action & BTN_RIGHT) {
-            // Тема запросила ROM Info (напр. Android поиск, iOS disclosure)
             int sel = menuSelected();
             if (sel >= 0 && sel < sdMgr.count()) {
                 soundClick(); buttons.vibrate1(30);
                 showRomInfo(sel); menuDraw();
             }
-        } else { soundClick(); buttons.vibrate1(30); }
+        } else if (action) { soundClick(); buttons.vibrate1(30); }
         break;
     }
 
@@ -343,6 +375,7 @@ void loop() {
             if (r == 0x40) { soundClick(); buttons.vibrate1(40); toRemap(); break; }
             if (r == 0x80) { soundClick(); cfgSave(); toWifi(); break; }
             if (r == 0xA0) { soundClick(); otaScreen(); settingsDraw(); break; }
+            if (r == 0xB0) { soundClick(); cfgSave(); toGG(); break; }
             soundClick(); break;
         }
         if (!tapped) break;
@@ -351,6 +384,7 @@ void loop() {
         else if (action == 0x40)  { soundClick(); toRemap(); }
         else if (action == 0x80)  { soundClick(); cfgSave(); toWifi(); }
         else if (action == 0xA0)  { soundClick(); otaScreen(); settingsDraw(); }
+        else if (action == 0xB0)  { soundClick(); cfgSave(); toGG(); }
         else if (action)            soundClick();
         break;
     }
@@ -427,6 +461,124 @@ void loop() {
         uint8_t action = wifiKeyboardHandleTouch(x, y);
         if (action == BTN_B) { soundBack(); toFileMgr(); }
         else if (action == BTN_A) { soundClick(); doRename(); }
+        break;
+    }
+
+    case S_GG: {
+        // ── Экран Game Genie кодов ────────────────────────────────────────
+        // ggScreenNavBtn() возвращает:
+        //   BTN_B        — вернуться в настройки
+        //   0xC1..0xC8   — открыть клавиатуру для слота N
+        auto openGGKeyboard = [&](int slot) {
+            // Заполняем клавиатуру текущим кодом слота (или пустой)
+            wifiKeyboardReset();
+            wifiKeyboardSetLabel("Game Genie code (6 or 8 chars):");
+            wifiKeyboardSetMask(false);
+            const char *existing = settings.ggCodes[slot - 1];
+            if (existing[0]) wifiKeyboardSetInitial(existing);
+            ggScreenSetSlot(slot);
+            state = S_GG_KB;
+            wifiKeyboardDraw("APZLGITYEOXUKSVN");
+        };
+
+        if (shellBtn) {
+            uint8_t r = ggScreenNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); buttons.vibrate1(40); cfgSave(); toSettings(); break; }
+            if (r >= 0xC1 && r <= 0xC8) { soundClick(); openGGKeyboard(r - 0xC0); break; }
+            if (r) soundClick();
+            break;
+        }
+        if (!tapped) break;
+        {
+            uint8_t a = ggScreenHandleTouch(x, y);
+            if (a == BTN_B) { soundBack(); cfgSave(); toSettings(); }
+            else if (a >= 0xC1 && a <= 0xC8) { soundClick(); openGGKeyboard(a - 0xC0); }
+            else if (a) soundClick();
+        }
+        break;
+    }
+
+    case S_GG_KB: {
+        // ── Ввод Game Genie кода через клавиатуру ─────────────────────────
+        // Слот для сохранения установлен через ggScreenSetSlot() при переходе в S_GG_KB.
+
+        auto doSaveGGCode = [&]() {
+            const char *raw = wifiKeyboardGetPassword();
+            if (!raw || raw[0] == '\0') { toGG(); return; }
+
+            // Приводим к верхнему регистру
+            char upper[9]; int i;
+            for (i = 0; i < 8 && raw[i]; i++) upper[i] = (char)toupper((unsigned char)raw[i]);
+            upper[i] = '\0';
+
+            // Проверяем что код корректный (6 или 8 символов из GG-алфавита)
+            uint16_t addr; uint8_t val, cmp; bool hasCmp;
+            if (!gg_decode(upper, &addr, &val, &cmp, &hasCmp)) {
+                popupShow("Game Genie", "Invalid code! Use only letters APZLGITYEOXUKSVN, 6 or 8 chars.", 3000);
+                toGG(); return;
+            }
+
+            ggCodeSaveToSlot(upper);  // сохраняем в текущий _ggSel слот
+            cfgSave();
+            popupShow("Game Genie", (String("Saved: ") + upper).c_str(), 1500);
+            toGG();
+        };
+
+        if (shellBtn) {
+            uint8_t r = wifiKeyboardNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); toGG(); break; }
+            if (r == BTN_A) { soundClick(); doSaveGGCode(); break; }
+            soundClick(); break;
+        }
+        if (!tapped) break;
+        uint8_t action = wifiKeyboardHandleTouch(x, y);
+        if (action == BTN_B) { soundBack(); toGG(); }
+        else if (action == BTN_A) { soundClick(); doSaveGGCode(); }
+        break;
+    }
+
+    case S_SEARCH_KB: {
+        // ── Ввод поискового запроса ───────────────────────────────────────
+        if (shellBtn) {
+            uint8_t r = wifiKeyboardNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); menuClearSearch(); toMenu(); break; }
+            if (r == BTN_A) {
+                soundClick();
+                menuSetSearch(wifiKeyboardGetPassword());
+                toMenu();
+            }
+            soundClick(); break;
+        }
+        if (!tapped) break;
+        // ── Тач "← BACK" (зона под клавиатурой: y>=210, x<120) ──────────
+        if (y >= 210 && x < 120) {
+            soundBack(); menuClearSearch(); toMenu(); break;
+        }
+        {
+            uint8_t ac = wifiKeyboardHandleTouch(x, y);
+            if (ac == BTN_B) { soundBack(); menuClearSearch(); toMenu(); }
+            else if (ac == BTN_A) {
+                soundClick();
+                menuSetSearch(wifiKeyboardGetPassword());
+                toMenu();
+            }
+        }
+        break;
+    }
+
+    case S_GALLERY: {
+        // ── Галерея скриншотов ───────────────────────────────────────────────
+        if (shellBtn) {
+            uint8_t r = galleryNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); toMenu(); }
+            else soundClick();
+            break;
+        }
+        if (!tapped) break;
+        {
+            uint8_t r = galleryHandleTouch(x, y);
+            if (r == BTN_B) { soundBack(); toMenu(); }
+        }
         break;
     }
 
@@ -526,10 +678,23 @@ static void runEmulator(int idx) {
     delay(400);
 
     if (settings.diagEmu) Serial.printf("[SYS] Starting nofrendo NES emulator\n");
+    uint32_t _playStart = millis();
+    // Записываем в недавние перед запуском (даже если сразу вылетит)
+    GameStats::recentAdd(path);
+    GameStats::save();
+
     int result = emu_run(path);
+
+    // Записываем время игры (в секундах)
+    uint32_t _playSecs = (millis() - _playStart) / 1000;
+    if (_playSecs > 5) {  // игнорируем слишком короткие запуски
+        GameStats::playTimeAdd(path, _playSecs);
+        GameStats::save();
+    }
+
     if (settings.diagEmu)
-        Serial.printf("[SYS] Emulator exited: result=%d  heap=%uKB\n",
-                      result, (unsigned)(ESP.getFreeHeap()/1024));
+        Serial.printf("[SYS] Emulator exited: result=%d  heap=%uKB  playtime=%us\n",
+                      result, (unsigned)(ESP.getFreeHeap()/1024), (unsigned)_playSecs);
 
     initDisplay();
     touch.init();

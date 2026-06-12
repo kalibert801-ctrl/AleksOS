@@ -83,39 +83,42 @@ static void gb_drawMenuBar() {
 // ════════════════════════════════════════════════════════════════════
 static void gb_drawRomRow(int romIdx, int slot, bool sel) {
     const Theme565& t = getTheme();
-    int y  = HDR_H + slot * ROW_H;
-    int cy = y + ROW_H / 2;
+    int y  = M_HDR_H + slot * M_ROW_H;
+    int cy = y + M_ROW_H / 2;
 
     // Фон строки чередующийся
     uint16_t bg = (slot % 2) ? t.rowOdd : t.rowEven;
-    lcd.fillRect(0, y, SCREEN_W, ROW_H, bg);
+    lcd.fillRect(0, y, M_LIST_W - 1, M_ROW_H, bg);
 
-    // Боковые двойные бордеры (4px + 5px)
-    lcd.drawFastVLine(4, y, ROW_H, t.textPri);
-    lcd.drawFastVLine(5, y, ROW_H, t.accent);
-    lcd.drawFastVLine(SCREEN_W - 5, y, ROW_H, t.textPri);
-    lcd.drawFastVLine(SCREEN_W - 6, y, ROW_H, t.accent);
+    // Боковые бордеры
+    lcd.drawFastVLine(3, y, M_ROW_H, t.textPri);
+    lcd.drawFastVLine(4, y, M_ROW_H, t.accent);
 
-    // Нижний двойной разделитель (кроме последней строки)
-    if (slot < ROWS_VISIBLE - 1) {
-        lcd.drawFastHLine(0, y + ROW_H - 2, SCREEN_W, t.textPri);
-        lcd.drawFastHLine(0, y + ROW_H - 1, SCREEN_W, t.accent);
+    // Нижний разделитель
+    if (slot < M_ROWS - 1) {
+        lcd.drawFastHLine(0, y + M_ROW_H - 2, M_LIST_W - 20, t.textPri);
+        lcd.drawFastHLine(0, y + M_ROW_H - 1, M_LIST_W - 20, t.accent);
     }
+
+    bool isFav = GameStats::favCheck(sdMgr.get(romIdx).path.c_str());
 
     if (sel) {
-        // Выбранная строка: тёмный фон внутри рамок
-        lcd.fillRect(6, y + 1, SCREEN_W - 12, ROW_H - 3, t.selected);
-
-        // Пиксельный ▶ курсор (горизонтальные линии разной длины)
+        lcd.fillRect(5, y + 1, M_LIST_W - 24, M_ROW_H - 3, t.selected);
+        // Пиксельный ▶ курсор
         for (int pi = 0; pi < 5; pi++)
-            lcd.drawFastHLine(8, cy - 2 + pi, 1 + pi / 2, t.accent);
-
-        th_fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.accent);
-        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 22).c_str(), 19, cy);
+            lcd.drawFastHLine(7, cy - 2 + pi, 1 + pi / 2, t.accent);
+        th_fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.accent);
+        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 13).c_str(), 16, cy);
     } else {
-        th_fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
-        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 24).c_str(), 12, cy);
+        th_fsm(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
+        lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 15).c_str(), 9, cy);
     }
+
+    // Звезда (favourite) справа
+    uint16_t sc = isFav ? TH_GOLD : (uint16_t)0x2965u;
+    int sx = M_LIST_W - 11;
+    lcd.fillTriangle(sx, cy-4, sx-3, cy+2, sx+3, cy+2, sc);
+    lcd.fillTriangle(sx, cy+3, sx-3, cy-2, sx+3, cy-2, sc);
 }
 
 // ════════════════════════════════════════════════════════════════════

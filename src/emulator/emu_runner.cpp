@@ -8,11 +8,14 @@ extern "C" {
 #include "emu_runner.h"
 #include "display/display_manager.h"
 #include "config.h"
+#include "settings.h"
+#include "emulator/game_genie.h"
 #include <stdio.h>
 
 // Declared in osd.cpp (C++ linkage)
 bool osd_rom_load(const char *path);
 void osd_rom_free();
+uint8_t *osd_getrom(uint32_t *sizeOut);
 
 // osd_shutdown() is declared extern "C" in nofrendo/osd.h
 extern "C" void osd_shutdown(void);
@@ -20,6 +23,15 @@ extern "C" void osd_shutdown(void);
 extern "C" int emu_run(const char *path) {
     printf("[EMU] Loading ROM: %s\n", path);
     if (!osd_rom_load(path)) return -1;
+
+    // ── Game Genie: патчим PRG ROM ДО запуска nofrendo ────────────────────
+    // osd_getrom() возвращает указатель на буфер, из которого nofrendo читает ROM.
+    // Патчинг здесь гарантирует что nofrendo видит уже изменённые байты.
+    if (settings.ggEnabled) {
+        uint32_t romSize = 0;
+        uint8_t *romBuf  = osd_getrom(&romSize);
+        if (romBuf && romSize > 0) gg_apply(romBuf, romSize);
+    }
 
     lcd.fillScreen(TFT_BLACK);
     printf("[EMU] Starting nofrendo...\n");

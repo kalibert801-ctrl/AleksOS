@@ -2,7 +2,7 @@
 // ── Версионирование ───────────────────────────────────────
 // Правило: minor изменения = вторая цифра +1 (v8.4→v8.5)
 //          major изменения = первая цифра +1, вторая = 0 (v8.x→v9.0)
-#define FIRMWARE_VERSION "AleksOS BETA v14.56"
+#define FIRMWARE_VERSION "AleksOS BETA v14.75"
 
 // ── Дисплей (VSPI) ────────────────────────────────────────
 #define TFT_CS   15
@@ -81,11 +81,25 @@
 #define SCREEN_H    240
 #define SCREEN_ROT    3
 
-// ── UI ────────────────────────────────────────────────────
+// ── UI (settings screens — оригинальные размеры, не менять) ──
 #define HDR_H        40
 #define ROW_H        32
 #define ROWS_VISIBLE  5
 #define BTNBAR_H     44
+
+// ── Компактное главное меню v2 (v14.72) ──────────────────────
+#define M_HDR_H    30                      // высота шапки меню
+#define M_BAR_H    40                      // высота подвала меню
+#define M_ROW_H    24                      // высота строки (компактный список)
+#define M_ROWS      7                      // видимых строк в списке
+#define M_LIST_W  196                      // ширина панели списка (левая)
+#define M_PANEL_X 196                      // X начала правой панели
+#define M_PANEL_W (SCREEN_W - M_PANEL_X)  // 124 пикселя
+#define M_DPAD_Y  (SCREEN_H - M_BAR_H)    // 200
+#define M_DPAD_CY (M_DPAD_Y + M_BAR_H/2)  // 220
+#define M_COVER_H  108                     // высота обложки в правой панели
+#define M_INFO_Y  (M_HDR_H + M_COVER_H)   // 138 — начало инфо-секции
+#define M_INFO_H  (M_DPAD_Y - M_INFO_Y)   // 62  — высота инфо-секции
 
 // ── Кнопки (маски BTN_* = INP_PAD_* из nesinput.h) ───────
 #define BTN_A       0x01

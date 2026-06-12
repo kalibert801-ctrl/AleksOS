@@ -19,9 +19,28 @@ uint8_t menuHandleTouch(int x, int y, int &romAction);
 void menuDraw();
 void menuScrollUp();
 void menuScrollDown();
-void menuTimeTick();     // call in loop() -- updates clock in bottom bar
+void menuTimeTick();          // call in loop() -- updates clock in bottom bar
 int  menuSelected();
 void showRomInfo(int idx);
+
+// Drag scroll (continuous touch tracking, call from main loop)
+void menuRawTouch(int x, int y);  // call while touch.rawTouched() && !tapped
+void menuTouchUp();               // call when touch released
+
+// Search filter
+void menuSetSearch(const char *q);  // apply search query (empty = clear)
+void menuClearSearch();             // clear search, redraw
+void menuDrawSearchKbBack();        // draw BACK button below search keyboard
+
+// -- Screenshot gallery ------------------------------------------------
+void galleryOpen();                 // scan /Screenshots/, build game list, draw
+void galleryDraw();                 // redraw current gallery state
+uint8_t galleryNavBtn(uint8_t btn); // BTN_B = exit gallery
+uint8_t galleryHandleTouch(int x, int y);
+
+// Accessors for theme plugins
+bool menuIsFavMode();
+int  menuSortMode();
 
 // -- Settings ----------------------------------------------------------
 uint8_t settingsHandleTouch(int x, int y);
@@ -76,3 +95,16 @@ void    fileMgrDraw();
 uint8_t fileMgrHandleTouch(int x, int y);
 uint8_t fileMgrNavBtn(uint8_t btn);
 int     fileMgrSelected();
+
+// -- Game Genie codes screen -------------------------------------------
+// Access: gi=32 in Settings → Controls.
+// ggScreenNavBtn returns:
+//   BTN_B        — back to settings
+//   0xC1..0xC8   — open keyboard for slot N (0xC0 + slot, slot=1..8)
+//   0             — redrawn, stay
+void    ggScreenDraw();
+uint8_t ggScreenNavBtn(uint8_t btn);
+uint8_t ggScreenHandleTouch(int x, int y);
+void    ggScreenSetSlot(int slot);
+int     ggScreenGetSlot();
+void    ggCodeSaveToSlot(const char *code);  // save code to current _ggSel slot

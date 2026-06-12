@@ -76,25 +76,26 @@ static void ios_drawMenuBar() {
 // ════════════════════════════════════════════════════════════════════
 static void ios_drawRomRow(int romIdx, int slot, bool sel) {
     const Theme565& t = getTheme();
-    int y  = HDR_H + slot * ROW_H;
-    int cy = y + ROW_H / 2;
+    int y  = M_HDR_H + slot * M_ROW_H;
+    int cy = y + M_ROW_H / 2;
     uint16_t hairline = t.shadow ? t.shadow : (uint16_t)0xC618;
 
     uint16_t bg = sel ? t.selected : t.rowEven;
-    lcd.fillRect(0, y, SCREEN_W, ROW_H, bg);
+    lcd.fillRect(0, y, M_LIST_W - 1, M_ROW_H, bg);
 
     // Hairline-разделитель (кроме первого слота)
-    if (slot > 0) lcd.drawFastHLine(16, y, SCREEN_W - 16, hairline);
+    if (slot > 0) lcd.drawFastHLine(16, y, M_LIST_W - 30, hairline);
 
     uint16_t tc = sel ? (t.selText ? t.selText : (uint16_t)0x0001) : t.textPri;
-    th_fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(tc);
-    lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 24).c_str(), 16, cy);
+    th_fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(tc);
+    lcd.drawString(th_trimName(sdMgr.get(romIdx).name, 15).c_str(), 10, cy);
 
-    // › disclosure indicator справа
-    uint16_t ac = sel ? tc : t.textSec;
-    int ax = SCREEN_W - 14;
-    lcd.drawLine(ax - 3, cy - 4, ax + 2, cy,     ac);
-    lcd.drawLine(ax + 2, cy,     ax - 3, cy + 4, ac);
+    // Звезда (favourite) справа
+    bool isFav = GameStats::favCheck(sdMgr.get(romIdx).path.c_str());
+    uint16_t sc = isFav ? TH_GOLD : (uint16_t)0x2965u;
+    int sx = M_LIST_W - 11;
+    lcd.fillTriangle(sx, cy-4, sx-3, cy+2, sx+3, cy+2, sc);
+    lcd.fillTriangle(sx, cy+3, sx-3, cy-2, sx+3, cy-2, sc);
 }
 
 // ════════════════════════════════════════════════════════════════════

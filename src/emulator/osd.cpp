@@ -11,6 +11,7 @@
 #include "driver/rtc_io.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
 #include "freertos/semphr.h"
@@ -19,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <SD.h>
+#include "nes_palettes.h"
 
 extern "C" {
 #include "nofrendo/nofrendo.h"
@@ -27,7 +29,9 @@ extern "C" {
 #include "nofrendo/bitmap.h"
 #include "nofrendo/vid_drv.h"
 #include "nofrendo/nes/nes.h"
+#include "nofrendo/nes/nes_pal.h"
 #include "nofrendo/nes/nesinput.h"
+#include "nofrendo/nes/nesstate.h"
 #include "nofrendo/event.h"
 #include "nofrendo/log.h"
 }
@@ -63,12 +67,20 @@ static volatile uint8_t _pad = 0;
 
 extern "C" void emu_setController(uint8_t state) { _pad = state; }
 
+// ─── путь текущего ROM (устанавливается в osd_rom_load) ───────────────────────
+static char _romPath[PATH_MAX + 1] = {};
+
 // ─── чистый выход из эмулятора ────────────────────────────────────────────────
-// Флаг выставляется из osd_getinput() когда HOME удержана 20 кадров.
+// Флаг выставляется из osd_getinput() когда пользователь выбрал "Выход" в меню
+// паузы или удержал HOME+SELECT.
 // main_loop() в nofrendo.c проверяет его после возврата из nes_emulate()
-// и вызывает main_eject() — UЖЕ вне стека frame-callback, без краша.
+// и вызывает main_eject() — уже вне стека frame-callback, без краша.
 static volatile bool _emuExitReq = false;
 extern "C" bool osd_exit_requested(void) { return _emuExitReq; }
+
+// ─── OSD громкости (показывается поверх игры при HOME+UP/DOWN) ────────────────
+static int     _volShowFrames = 0;   // кол-во кадров для отображения
+static uint32_t _volAdjLastMs = 0;   // rate-limit: не чаще 200 мс
 
 // ─── счётчики osd_getinput ────────────────────────────────────────────────────
 // Файловая область видимости — сбрасываются в osd_init() при каждом запуске.
@@ -327,6 +339,10 @@ static uint16_t _pal[256];
 // PSRAM access is fine: the CPU reads it line-by-line, no DMA involved.
 static uint8_t  *_fb  = nullptr;   // ps_malloc'd in osd_init()
 static bitmap_t *_bmp = nullptr;
+// Ссылка на primary_buffer nofrendo — обновляется в drv_custom_blit каждый кадр.
+// PPU рендерит именно в primary_buffer (bmp_create), а не в _bmp (bmp_createhw).
+// Используем для скриншота вместо _bmp.
+static bitmap_t *_blitBmp = nullptr;
 
 // RGB565 полный кадровый буфер — выделяется из внутренней DRAM heap (не PSRAM).
 // ESP32 SPI DMA может читать только из внутренней DRAM, поэтому именно heap.
@@ -352,11 +368,24 @@ static void drv_set_palette(rgb_t *pal) {
     // display_manager.h sets pc.invert=true (INVON). LovyanGFX compensates in its own
     // drawing calls, but writePixels() is raw — the display hardware will invert every
     // pixel we write. Pre-invert here so that display-invert(~color) == color.
-    for (int i = 0; i < 256; i++) {
-        uint16_t r = ((uint16_t)pal[i].r >> 3) & 0x1F;
-        uint16_t g = ((uint16_t)pal[i].g >> 2) & 0x3F;
-        uint16_t b = ((uint16_t)pal[i].b >> 3) & 0x1F;
-        _pal[i] = ~((r << 11) | (g << 5) | b); // pre-invert to cancel INVON
+    const rgb_t *src = nes_palette_get(settings.nesPalette);
+
+    if (src) {
+        // Альтернативная палитра: 64 цвета NES, повторяем для всех 256 слотов _pal.
+        for (int i = 0; i < 64; i++) {
+            uint16_t c = ~(((uint16_t)(src[i].r >> 3) << 11) |
+                           ((uint16_t)(src[i].g >> 2) << 5)  |
+                            (uint16_t)(src[i].b >> 3));
+            for (int rep = 0; rep < 4; rep++) _pal[i + rep * 64] = c;
+        }
+    } else {
+        // Дефолтная палитра: nofrendo передаёт все 256 записей (pal[0..255]).
+        for (int i = 0; i < 256; i++) {
+            uint16_t r = ((uint16_t)pal[i].r >> 3) & 0x1F;
+            uint16_t g = ((uint16_t)pal[i].g >> 2) & 0x3F;
+            uint16_t b = ((uint16_t)pal[i].b >> 3) & 0x1F;
+            _pal[i] = ~((r << 11) | (g << 5) | b);
+        }
     }
 }
 
@@ -397,6 +426,7 @@ static void blit_print_stats(void) {
 static uint16_t _line_buf[SCREEN_W];
 
 static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
+    _blitBmp = bmp;  // сохраняем primary_buffer для скриншота
     // ── Тактирование: nofrendo_ticks (60 Гц FreeRTOS таймер) ─────────────────
     // FPS кап УБРАН (v14.52) — он был причиной дёрганья картинки.
     //
@@ -461,6 +491,25 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
     }
 
     blit_print_stats();
+
+    // ── OSD громкости: рисуем поверх игры пока _volShowFrames > 0 ───────────
+    if (_volShowFrames > 0) {
+        _volShowFrames--;
+        const int bx = SCREEN_W - 82, by = 4, bw = 78, bh = 20;
+        lcd.fillRect(bx - 1, by - 1, bw + 2, bh + 2, 0x0000);        // чёрный фон
+        lcd.drawRect(bx, by, bw, bh, 0xFFFF);                          // белая рамка
+        // Заливка уровня громкости (зелёная)
+        int fill = (bw - 2) * settings.emuVolume / 100;
+        if (fill > 0) lcd.fillRect(bx + 1, by + 1, fill, bh - 2, 0x07E0);
+        // Текст
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%d%%", settings.emuVolume);
+        lcd.setFont(&lgfx::fonts::DejaVu9);
+        lcd.setTextDatum(MC_DATUM);
+        lcd.setTextColor(settings.emuVolume > 50 ? 0x0000 : 0xFFFF);
+        lcd.drawString(buf, bx + bw / 2, by + bh / 2 + 1);
+    }
+
     // audio_frame перемещён в начало blit (перед рендером) для параллельной работы
 }
 
@@ -506,6 +555,243 @@ extern "C" int osd_installtimer(int frequency, void *func, int funcsize,
     return 0;
 }
 
+// ─── Helper: извлечь имя ROM из пути ─────────────────────────────────────────
+static void _romNameFromPath(const char *path, char *name, size_t maxLen) {
+    const char *slash = strrchr(path, '/');
+    const char *base  = slash ? slash + 1 : path;
+    strncpy(name, base, maxLen - 1);
+    name[maxLen - 1] = '\0';
+    char *dot = strrchr(name, '.');
+    if (dot) *dot = '\0';
+}
+
+// ─── Скриншот: сохраняем текущий кадр на SD как RAW файл ────────────────────
+// Формат: 4 байта заголовка (w_lo, w_hi, h_lo, h_hi) + RGB565 пиксели.
+//
+// Файл сохраняется как /Screenshots/<romname>_NNN.raw (нумерованный).
+// Обложка /Screenshots/<romname>.raw НЕ перезаписывается, если уже существует
+// (первый скриншот устанавливает обложку автоматически, остальные — только через галерею).
+//
+// Пишем построчно — никакого большого буфера не нужно.
+// _line_buf (static, 320 пикселей / 640 байт) повторно используется для вывода.
+static void _takeScreenshot(void) {
+    const ScaleParams sp = getScaleParams();
+    uint16_t w = (uint16_t)sp.outW;
+    uint16_t h = (uint16_t)sp.outH;
+
+    if (!SD.exists("/Screenshots")) SD.mkdir("/Screenshots");
+    char romName[64];
+    _romNameFromPath(_romPath, romName, sizeof(romName));
+
+    // ── Находим следующий свободный номер ─────────────────────────────────────
+    char path[96];
+    int shotNum = 1;
+    while (shotNum <= 999) {
+        snprintf(path, sizeof(path), "/Screenshots/%s_%03d.raw", romName, shotNum);
+        if (!SD.exists(path)) break;
+        shotNum++;
+    }
+    if (shotNum > 999) {
+        printf("[EMU] Screenshot: all 999 slots used for %s\n", romName);
+        return;
+    }
+
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) {
+        printf("[EMU] Screenshot: cannot create %s\n", path);
+        return;
+    }
+
+    // Заголовок
+    f.write((uint8_t)( w & 0xFF));
+    f.write((uint8_t)((w >> 8) & 0xFF));
+    f.write((uint8_t)( h & 0xFF));
+    f.write((uint8_t)((h >> 8) & 0xFF));
+
+    if (_frame && _framePixels >= (size_t)w * h) {
+        // ── DMA burst mode: _frame уже содержит готовые pre-inverted пиксели ──
+        f.write((uint8_t *)_frame, (size_t)w * h * sizeof(uint16_t));
+
+    } else if (_blitBmp) {
+        // ── Fallback mode: рендерим из primary_buffer nofrendo ───────────────
+        // _blitBmp == primary_buffer (bmp_create) — именно туда PPU пишет данные.
+        // _bmp (bmp_createhw/_fb) никогда не заполняется PPU при наличии custom_blit.
+        // _line_buf — статический 320-элементный DRAM буфер, пишем построчно на SD.
+        const uint32_t xStep = ((uint32_t)NES_SCREEN_WIDTH  << 12) / (uint32_t)w;
+        const uint32_t yStep = ((uint32_t)NES_VISIBLE_HEIGHT << 12) / (uint32_t)h;
+        uint32_t yFp = 0;
+        for (int oy = 0; oy < h; oy++) {
+            const uint8_t *src = _blitBmp->line[(yFp >> 12) + VID_FIRST_LINE];
+            uint32_t xFp = 0;
+            for (int ox = 0; ox < w; ox++) {
+                _line_buf[ox] = _pal[src[xFp >> 12]];
+                xFp += xStep;
+            }
+            f.write((uint8_t *)_line_buf, (size_t)w * sizeof(uint16_t));
+            yFp += yStep;
+        }
+        printf("[EMU] Screenshot: fallback render %dx%d\n", w, h);
+
+    } else {
+        f.close();
+        SD.remove(path);
+        printf("[EMU] Screenshot: no frame data\n");
+        return;
+    }
+
+    f.flush();
+    f.close();
+    printf("[EMU] Screenshot saved: %s (%dx%d)\n", path, w, h);
+
+    // ── Если обложка ещё не существует — устанавливаем первый скриншот как обложку ──
+    char coverPath[96];
+    snprintf(coverPath, sizeof(coverPath), "/Screenshots/%s.raw", romName);
+    if (!SD.exists(coverPath)) {
+        // Копируем нумерованный файл в обложку
+        File src = SD.open(path, FILE_READ);
+        File dst = SD.open(coverPath, FILE_WRITE);
+        if (src && dst) {
+            uint8_t copyBuf[512];
+            int nr;
+            while ((nr = src.read(copyBuf, sizeof(copyBuf))) > 0) dst.write(copyBuf, nr);
+            dst.flush();
+            printf("[EMU] Cover art set: %s\n", coverPath);
+        }
+        if (src) src.close();
+        if (dst) dst.close();
+    }
+}
+
+// ─── In-game меню паузы ────────────────────────────────────────────────────────
+// Вызывается из osd_getinput() при удержании HOME.
+// Блокирует выполнение (эмулятор приостанавливается), рисует оверлей,
+// обрабатывает ввод, выполняет выбранное действие.
+static void _ingameMenu(void) {
+    // ── Рисуем затемнённый фон поверх игры ──────────────────────────────
+    const int MX = 35, MY = 50, MW = 250, MH = 140;
+    lcd.fillRect(MX, MY, MW, MH, 0x0820);         // тёмно-синий фон
+    lcd.drawRoundRect(MX, MY, MW, MH, 8, 0xAD55); // жёлтая рамка
+    lcd.drawRoundRect(MX+1, MY+1, MW-2, MH-2, 7, 0x630C); // внутренняя тень
+
+    // Заголовок
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(0xFD20);  // золотой
+    lcd.drawString("|| PAUSE ||", SCREEN_W / 2, MY + 14);
+    lcd.drawFastHLine(MX + 8, MY + 24, MW - 16, 0xAD55);
+
+    const char *items[] = {
+        "Continue",
+        "Save State",
+        "Load State",
+        "Screenshot",
+        "Exit to Menu"
+    };
+    const int N = 5;
+    int sel  = 0;
+
+    auto drawItems = [&]() {
+        for (int i = 0; i < N; i++) {
+            int iy = MY + 32 + i * 20;
+            bool s = (i == sel);
+            lcd.fillRect(MX + 2, iy, MW - 4, 19, s ? 0x001F : 0x0820);
+            lcd.setFont(&lgfx::fonts::DejaVu9);
+            lcd.setTextDatum(MC_DATUM);
+            lcd.setTextColor(s ? 0xFFFF : 0xC618);
+            lcd.drawString(items[i], SCREEN_W / 2, iy + 9);
+        }
+    };
+    drawItems();
+
+    // ── Дебаунс: ждём ПОЛНОГО отпускания HOME (до 3 с) перед опросом ──────────
+    // Без этого: если HOME ещё зажата на входе в цикл, level-triggered проверка
+    // немедленно закроет меню → меню мигает в цикле.
+    {
+        uint32_t to = millis() + 3000;
+        while ((buttons.readSysCurrent() & BTN_SYS_HOME) && millis() < to) {
+            buttons.update();
+            vTaskDelay(pdMS_TO_TICKS(16));
+        }
+        vTaskDelay(pdMS_TO_TICKS(80));  // короткий debounce после отпускания
+    }
+
+    bool    homePrev = false;   // для edge-detect повторного нажатия HOME
+    uint8_t prevPad  = 0xFF;
+    while (true) {
+        buttons.update();
+        uint8_t raw    = buttons.readCurrent();
+        uint8_t curPad = buttons.applyBtnMap(raw);
+        uint8_t newBtn = curPad & ~prevPad;
+        prevPad        = curPad;
+
+        bool homeNow = (buttons.readSysCurrent() & BTN_SYS_HOME) != 0;
+
+        if (newBtn & BTN_UP)   { sel = (sel - 1 + N) % N; drawItems(); }
+        if (newBtn & BTN_DOWN) { sel = (sel + 1)     % N; drawItems(); }
+
+        bool confirm = (newBtn & (BTN_STA | BTN_SEL));  // START или SELECT подтверждает
+        bool cancel  = (newBtn & BTN_B);                 // B = продолжить
+
+        if (cancel) { sel = 0; confirm = true; }         // B → Continue
+
+        if (confirm) {
+            switch (sel) {
+                case 0:  // Continue
+                    break;
+                case 1:  // Save State
+                    state_setslot(0);
+                    printf("[SS] Saving to: %s.ss0\n", nes_getcontextptr()->rominfo->filename);
+                    {
+                        int r = state_save();
+                        lcd.setFont(&lgfx::fonts::DejaVu9);
+                        lcd.setTextDatum(MC_DATUM);
+                        lcd.setTextColor(r == 0 ? (uint16_t)0x07E0 : (uint16_t)0xF800);
+                        lcd.drawString(r == 0 ? "State saved!" : "Save failed!", SCREEN_W / 2, MY + MH + 6);
+                        delay(900);
+                    }
+                    break;
+                case 2:  // Load State
+                    state_setslot(0);
+                    printf("[SS] Loading from: %s.ss0\n", nes_getcontextptr()->rominfo->filename);
+                    {
+                        int r = state_load();
+                        lcd.setFont(&lgfx::fonts::DejaVu9);
+                        lcd.setTextDatum(MC_DATUM);
+                        lcd.setTextColor(r == 0 ? (uint16_t)0x07E0 : (uint16_t)0xF800);
+                        lcd.drawString(r == 0 ? "State loaded!" : "No save found!", SCREEN_W / 2, MY + MH + 6);
+                        delay(900);
+                    }
+                    break;
+                case 3:  // Screenshot
+                    _takeScreenshot();
+                    {
+                        lcd.setFont(&lgfx::fonts::DejaVu9);
+                        lcd.setTextDatum(MC_DATUM);
+                        lcd.setTextColor(0x07E0);
+                        lcd.drawString("Screenshot saved!", SCREEN_W / 2, MY + MH + 6);
+                        lcd.setTextColor(0xC618);
+                        lcd.drawString("See Gallery in menu", SCREEN_W / 2, MY + MH + 18);
+                        delay(900);
+                    }
+                    break;
+                case 4:  // Exit to Menu
+                    _emuExitReq = true;
+                    nes_poweroff();
+                    return;
+            }
+            return;
+        }
+
+        // HOME повторно нажат (edge: не было → стало) → Continue
+        // Edge-trigger гарантирует: нужно отпустить HOME и нажать снова,
+        // а не просто «HOME сейчас зажата» (level-trigger вызывал мгновенное закрытие).
+        if (!homePrev && homeNow) { return; }
+        homePrev = homeNow;
+
+        vTaskDelay(pdMS_TO_TICKS(16));
+    }
+}
+
 // ─── input ─────────────────────────────────────────────────────────────────
 //
 // Физическая разводка Pico → биты пакета (подтверждено диагностикой):
@@ -521,20 +807,69 @@ extern "C" void osd_getinput(void) {
     // Опрашиваем Pico по Serial2 каждый кадр (loop() заблокирован в emu_run).
     buttons.update();
 
+    // Кормим watchdog каждый кадр (~60 Гц).
+    // Если ROM завис и osd_getinput() перестала вызываться, WDT перезагрузит ESP32.
+    esp_task_wdt_reset();
+
     // Применяем таблицу ремапа: физический бит i → settings.btnMap[i]
     uint8_t pad = buttons.applyBtnMap(buttons.readCurrent());
+    bool    homeHeld = (buttons.readSysCurrent() & BTN_SYS_HOME) != 0;
 
-    // ── Кнопка HOME (GP14 на Pico, пакет 0x43 бит 0) ─────────────────────────
-    // Выход из эмулятора в меню — без перезагрузки.
-    // Требуется УДЕРЖАНИЕ 20 кадров (~333 мс) — защита от floating pin и дребезга.
-    // Первые 90 кадров игнорируем (Pico инициализируется).
     _inp_frameCount++;
-    if (_inp_frameCount > 90 && (buttons.readSysCurrent() & BTN_SYS_HOME)) {
-        if (++_inp_homeFrames >= 20) {
+
+    // ── HOME + UP/DOWN → управление громкостью в игре ─────────────────────────
+    // Rate-limit: не чаще одного раза в 200 мс.
+    if (homeHeld && _inp_frameCount > 90) {
+        uint32_t now = millis();
+        if (now - _volAdjLastMs >= 200) {
+            uint8_t rawDir = buttons.readCurrent();  // физ. кнопки (до ремапа)
+            if (rawDir & BTN_UP) {
+                if (settings.emuVolume < 100) {
+                    settings.emuVolume = (uint8_t)min(100, (int)settings.emuVolume + 5);
+                }
+                _volShowFrames = 90;
+                _volAdjLastMs  = now;
+                _inp_homeFrames = 0;  // не открываем меню пока регулируем громкость
+                return;
+            }
+            if (rawDir & BTN_DOWN) {
+                if (settings.emuVolume > 0) {
+                    settings.emuVolume = (uint8_t)max(0, (int)settings.emuVolume - 5);
+                }
+                _volShowFrames = 90;
+                _volAdjLastMs  = now;
+                _inp_homeFrames = 0;
+                return;
+            }
+        } else if (buttons.readCurrent() & (BTN_UP | BTN_DOWN)) {
+            // Кнопка зажата но rate-limit ещё не истёк — просто не выходим
             _inp_homeFrames = 0;
-            printf("[EMU] HOME held → exit\n");
-            _emuExitReq = true;  // main_loop() увидит флаг после возврата nes_emulate()
-            nes_poweroff();      // выходим из while(false==nes.poweroff) безопасно
+            return;
+        }
+    }
+
+    // ── Кнопка HOME → открытие меню паузы ────────────────────────────────────────
+    // Первые 90 кадров игнорируем (Pico инициализируется).
+    // Порог 3 кадра (~50 мс) = достаточно для уверенного нажатия,
+    // но ощущается как простой тап — не нужно удерживать.
+    if (_inp_frameCount > 90 && homeHeld) {
+        if (++_inp_homeFrames >= 3) {
+            _inp_homeFrames = 0;
+            printf("[EMU] HOME → pause menu\n");
+            _ingameMenu();  // блокирует до выбора пользователем
+            if (_emuExitReq) return;
+            // ── Защита от повторного открытия: ждём отпускания HOME ──────────
+            // _ingameMenu() уже ждёт отпускания в начале, но если пользователь
+            // нажал HOME для закрытия и ещё держит — сбрасываем счётчик здесь.
+            {
+                uint32_t to = millis() + 1000;
+                while ((buttons.readSysCurrent() & BTN_SYS_HOME) && millis() < to) {
+                    buttons.update();
+                    vTaskDelay(pdMS_TO_TICKS(16));
+                }
+            }
+            _inp_homeFrames = 0;
+            _inp_exitFrames = 0;
             return;
         }
     } else {
@@ -553,6 +888,16 @@ extern "C" void osd_getinput(void) {
         }
     } else {
         _inp_exitFrames = 0;
+    }
+
+    // ── Турбо-кнопки: rapid-fire на назначенных кнопках ───────────────────────
+    // Турбо переключает нажатые кнопки каждые 2 кадра (30 Гц) для имитации
+    // быстрого нажатия. Применяется только к кнопкам в turboMask.
+    if (settings.turboEnabled && settings.turboMask) {
+        if (_inp_frameCount & 1) {
+            // На нечётных кадрах "отпускаем" турбо-кнопки
+            pad &= ~settings.turboMask;
+        }
     }
 
     // ── Передаём изменения состояния кнопок в nofrendo ───────────────────────
@@ -607,8 +952,15 @@ extern "C" void osd_getmouse(int *x, int *y, int *button) {}
 
 // ─── file helpers ──────────────────────────────────────────────────────────
 extern "C" void osd_fullname(char *fullname, const char *shortname) {
-    strncpy(fullname, shortname, PATH_MAX - 1);
-    fullname[PATH_MAX - 1] = '\0';
+    // Добавляем префикс /sd для VFS: Arduino SD.begin() монтирует карту в /sd,
+    // поэтому стандартный fopen("/sd/FomiCon/x.ss0") работает через newlib VFS.
+    // Это позволяет libsnss (который использует fopen/fwrite) писать сейв-стейты на SD.
+    if (shortname && shortname[0] == '/') {
+        snprintf(fullname, PATH_MAX, "/sd%s", shortname);
+    } else {
+        strncpy(fullname, shortname, PATH_MAX - 1);
+        fullname[PATH_MAX - 1] = '\0';
+    }
 }
 
 extern "C" char *osd_newextension(char *str, char *ext) {
@@ -634,8 +986,19 @@ extern "C" char *osd_getromdata() {
     return (char *)_rom_buf;
 }
 
+// Called by emu_runner.cpp before main_loop to apply Game Genie patches.
+// Returns writable pointer to ROM buffer and sets *sizeOut to buffer size.
+uint8_t *osd_getrom(uint32_t *sizeOut) {
+    if (sizeOut) *sizeOut = (uint32_t)_rom_size;
+    return _rom_buf;
+}
+
 // Load ROM file from SD into PSRAM. Called by emu_runner before main_loop.
 bool osd_rom_load(const char *path) {
+    // Сохраняем путь для скриншотов, сейв-стейтов и статистики
+    strncpy(_romPath, path, sizeof(_romPath) - 1);
+    _romPath[sizeof(_romPath) - 1] = '\0';
+
     if (_rom_buf) { free(_rom_buf); _rom_buf = nullptr; _rom_size = 0; }
     File f = SD.open(path, FILE_READ);
     if (!f) { printf("[OSD] Cannot open: %s\n", path); return false; }
@@ -659,11 +1022,13 @@ extern "C" int osd_main(int argc, char *argv[]) { return 0; }
 static int logprint(const char *s) { return printf("%s", s); }
 
 extern "C" int osd_init(void) {
-    _emuExitReq    = false;  // сбрасываем флаг при каждом запуске эмулятора
-    _inp_frameCount = 0;     // сброс счётчиков ввода — иначе защита первых 90 кадров
-    _inp_homeFrames = 0;     // не работает при повторном запуске эмулятора
+    _emuExitReq     = false;  // сбрасываем флаг при каждом запуске эмулятора
+    _inp_frameCount = 0;      // сброс счётчиков ввода — иначе защита первых 90 кадров
+    _inp_homeFrames = 0;      // не работает при повторном запуске эмулятора
     _inp_exitFrames = 0;
     _inp_prevPad    = 0;
+    _volShowFrames  = 0;      // скрываем OSD громкости
+    _volAdjLastMs   = 0;
     log_chain_logfunc(logprint);
 
     // ── NES 8-bit framebuffer → PSRAM (frees ~60 KB of internal DRAM) ──────

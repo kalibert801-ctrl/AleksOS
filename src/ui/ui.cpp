@@ -6,11 +6,16 @@
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
 
-// ── Forward declarations для иконок (используются до определения) ─────────
+// ── Forward declarations для иконок и меню (используются до определения) ────
 static void iconTag(int cx,int cy,uint16_t c);
 static void iconChip(int cx,int cy,uint16_t c);
 static void iconSave(int cx,int cy,uint16_t c);
 static void iconClock2(int cx,int cy,uint16_t c);
+// Вспомогательные из showRomInfo-секции (нужны в новом меню)
+static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint);
+static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh);
+static void _uiRomName(const char *path, char *out, size_t maxLen);
+static String _fmtPlaytime(uint32_t secs);
 // ─────────────────────────────────────────────────────────────────────────
 #include "display/display_manager.h"
 #include "storage/sd_manager.h"
@@ -19,8 +24,13 @@ static void iconClock2(int cx,int cy,uint16_t c);
 #include "config.h"
 #include "lang.h"
 #include "input/button_handler.h"
+#include "input/audio.h"
 #include <SD.h>
 #include <Arduino.h>
+#include "storage/game_stats.h"
+#include <esp_heap_caps.h>   // heap_caps_malloc — буферы в DRAM (не PSRAM) для SD read
+#include <algorithm>         // std::sort (для сортировки списка ROM)
+#include <time.h>            // time(), localtime() — дата в подвале меню
 
 // ── Шрифты ───────────────────────────────────────────────────
 #include "ui/font_cyr9.h"   // CyrDejaVu9 — ASCII + Кириллика 5×7
@@ -269,84 +279,494 @@ void drawSDError() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// ══ НОВОЕ ГЛАВНОЕ МЕНЮ ════════════════════════════════════════
+// ══ ГЛАВНОЕ МЕНЮ v2 — компактный layout с правой панелью ═════
+// ══  v14.72: шапка 30px | список 7×24px | панель 124px | подвал 40px
 // ══════════════════════════════════════════════════════════════
 
-static int _menuSel    = 0;
-static int _menuOffset = 0;
+// ── Состояние ──────────────────────────────────────────────────
+static int  _menuSel    = 0;
+static int  _menuOffset = 0;
 
-// drawMenuBar() and drawRomRow() moved to src/ui/themes/theme_*.cpp
-// Each theme plugin implements its own drawHeader/drawMenuBar/drawRomRow.
+static bool _favMode   = false;
+static int  _favIdx[256];
+static int  _favCount  = 0;
 
-static void drawScrollIndicators(int total) {
-    const Theme565 &t = getTheme();
-    if (_menuOffset > 0) {
-        // ▲ в правом верхнем углу списка
-        int ax = SCREEN_W - 14, ay = HDR_H + 8;
-        lcd.fillTriangle(ax, ay+6, ax-5, ay+12, ax+5, ay+12, t.accent);
-    }
-    if (_menuOffset + ROWS_VISIBLE < total) {
-        // ▼ в правом нижнем углу списка
-        int ax = SCREEN_W - 14, ay = DPAD_Y - 14;
-        lcd.fillTriangle(ax, ay+6, ax-5, ay, ax+5, ay, t.accent);
+static int  _sortMode  = 0;   // 0=original, 1=A→Z, 2=Z→A, 3=size
+static int  _sortIdx[256];
+static int  _sortCount = 0;
+
+static bool _searchActive = false;
+static char _searchQuery[48] = "";
+static int  _searchList[256];
+static int  _searchCount  = 0;
+
+static int  _coverLastRom = -2;
+
+// Drag scroll
+static bool _dragActive  = false;
+static int  _dragStartY  = 0;
+static int  _dragOff0    = 0;
+
+// ── Публичные аксессоры ─────────────────────────────────────────
+bool menuIsFavMode()  { return _favMode; }
+int  menuSortMode()   { return _sortMode; }
+
+// ── Списковые хелперы ──────────────────────────────────────────
+static int _menuListCount() {
+    if (_searchActive) return _searchCount;
+    if (_favMode)      return _favCount;
+    return (_sortMode > 0) ? _sortCount : sdMgr.count();
+}
+static int _menuActual(int listIdx) {
+    if (listIdx < 0) return -1;
+    if (_searchActive) return (listIdx < _searchCount) ? _searchList[listIdx] : -1;
+    if (_favMode)      return (listIdx < _favCount)    ? _favIdx[listIdx]     : -1;
+    if (_sortMode > 0) return (listIdx < _sortCount)   ? _sortIdx[listIdx]    : -1;
+    return (listIdx < sdMgr.count()) ? listIdx : -1;
+}
+static void _menuBuildFavList() {
+    _favCount = 0;
+    for (int i = 0; i < sdMgr.count() && _favCount < 256; i++)
+        if (GameStats::favCheck(sdMgr.get(i).path.c_str()))
+            _favIdx[_favCount++] = i;
+}
+static void _menuBuildSortedList() {
+    int n = sdMgr.count();
+    _sortCount = n;
+    for (int i = 0; i < n; i++) _sortIdx[i] = i;
+    if (_sortMode == 0) return;
+    std::sort(_sortIdx, _sortIdx + n, [](int a, int b) -> bool {
+        if (_sortMode == 2) return sdMgr.get(a).name > sdMgr.get(b).name;
+        if (_sortMode == 3) return sdMgr.get(a).size > sdMgr.get(b).size;
+        return sdMgr.get(a).name < sdMgr.get(b).name;  // 1=A→Z
+    });
+}
+static void _menuBuildSearchList() {
+    _searchCount = 0;
+    String q = String(_searchQuery); q.toLowerCase();
+    for (int i = 0; i < sdMgr.count() && _searchCount < 256; i++) {
+        String nm = sdMgr.get(i).name; nm.toLowerCase();
+        if (nm.indexOf(q) >= 0) _searchList[_searchCount++] = i;
     }
 }
 
-// ── Главная функция отрисовки меню — делегирует плагину темы ──────
+// ── Иконки нового меню (маленькие, используются в шапке/подвале) ─
+// Звезда (6-конечная из двух треугольников)
+static void _mStar(int cx, int cy, uint16_t c) {
+    lcd.fillTriangle(cx, cy-5, cx-3, cy+2, cx+3, cy+2, c);
+    lcd.fillTriangle(cx, cy+4, cx-3, cy-2, cx+3, cy-2, c);
+}
+// Лупа поиска
+static void _mSearch(int cx, int cy, uint16_t c) {
+    lcd.drawCircle(cx-1, cy-1, 5, c);
+    lcd.drawLine(cx+3, cy+3, cx+7, cy+7, c);
+    lcd.drawLine(cx+4, cy+3, cx+8, cy+7, c);
+}
+// WiFi (цвет передаётся явно: зелёный/красный/жёлтый)
+static void _mWifi(int cx, int cy, uint16_t c) {
+    lcd.drawLine(cx-7, cy+2, cx, cy-5, c);
+    lcd.drawLine(cx+7, cy+2, cx, cy-5, c);
+    lcd.drawLine(cx-4, cy+2, cx, cy-2, c);
+    lcd.drawLine(cx+4, cy+2, cx, cy-2, c);
+    lcd.fillCircle(cx, cy+4, 2, c);
+}
+// Батарея (заглушка, заряд неизвестен — нет ADC)
+static void _mBattery(int cx, int cy) {
+    uint16_t fc = 0xAD55u;
+    lcd.drawRect(cx-8, cy-4, 14, 8, fc);
+    lcd.fillRect(cx+6, cy-2, 3, 4, fc);
+    // 3 зелёных деления (условные 75%)
+    lcd.fillRect(cx-7, cy-3, 3, 6, 0x4EF0u);
+    lcd.fillRect(cx-3, cy-3, 3, 6, 0x4EF0u);
+    lcd.fillRect(cx+1, cy-3, 3, 6, 0x4EF0u);
+}
+
+// ── Шапка нового меню ──────────────────────────────────────────
+static void _menuDrawHeader() {
+    const Theme565& t = getTheme();
+    lcd.fillRect(0, 0, SCREEN_W, M_HDR_H, t.header);
+    lcd.drawFastHLine(0, M_HDR_H - 1, SCREEN_W, t.accent);
+
+    // ★ Избранные (x=0..29)
+    _mStar(14, M_HDR_H / 2, _favMode ? (uint16_t)COL_GOLD : t.textSec);
+
+    // 🔍 Поиск (x=30..58)
+    _mSearch(44, M_HDR_H / 2, _searchActive ? t.accent : t.textSec);
+
+    // Заголовок по центру
+    flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(COL_GOLD);
+    lcd.drawString("NES GAMES", SCREEN_W / 2, M_HDR_H / 2);
+
+    // Счётчик ROM (слева от ⋮)
+    char badge[8]; snprintf(badge, sizeof(badge), "%d", sdMgr.count());
+    fsm(); lcd.setTextDatum(MR_DATUM); lcd.setTextColor(t.textSec);
+    lcd.drawString(badge, SCREEN_W - 22, M_HDR_H / 2);
+
+    // ⋮ три точки (x=290..319)
+    int dx = 306;
+    for (int i = -1; i <= 1; i++)
+        lcd.fillCircle(dx, M_HDR_H / 2 + i * 5, 2, t.textSec);
+}
+
+// ── Подвал нового меню ─────────────────────────────────────────
+static void _menuDrawFooter() {
+    const Theme565& t = getTheme();
+    int by = M_DPAD_Y, cy = M_DPAD_CY;
+
+    lcd.fillRect(0, by, SCREEN_W, M_BAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+
+    // ▶ PLAY кнопка (x=2..93)
+    lcd.fillRoundRect(2, by + 4, 91, 32, 8, t.selected);
+    lcd.fillTriangle(13, cy - 7, 13, cy + 7, 23, cy, (uint16_t)COL_GOLD);
+    fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor((uint16_t)COL_WHITE);
+    lcd.drawString("PLAY", 27, cy);
+
+    // WiFi иконка (x=100..120)
+    bool wConn = wifiMgr.isConnected();
+    _mWifi(110, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
+
+    // Батарея (x=124..144)
+    _mBattery(133, cy);
+
+    // Время (x=155..212)
+    flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_CYAN);
+    lcd.drawString(timeGetString().c_str(), 181, cy);
+
+    // Дата (x=220..318)
+    time_t now = time(nullptr);
+    struct tm *ti = localtime(&now);
+    char dt[12];
+    snprintf(dt, sizeof(dt), "%02d.%02d.%02d",
+             ti->tm_mday, ti->tm_mon + 1, ti->tm_year % 100);
+    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
+    lcd.drawString(dt, 221, cy);
+}
+
+// ── Правая панель (обложка + инфо) ─────────────────────────────
+static void _menuDrawRightPanel(int romIdx) {
+    const Theme565& t = getTheme();
+    lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
+
+    if (romIdx < 0 || romIdx >= sdMgr.count()) {
+        // Заглушка: нет выбранной игры
+        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+        lcd.drawString("Select a ROM", M_PANEL_X + M_PANEL_W / 2,
+                       M_HDR_H + (M_DPAD_Y - M_HDR_H) / 2);
+        return;
+    }
+
+    const ROMInfo& rom = sdMgr.get(romIdx);
+
+    // ── Обложка (cover art) ──────────────────────────────────
+    char romName[64];
+    _uiRomName(rom.path.c_str(), romName, sizeof(romName));
+    _drawCoverArt(romName, M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4);
+
+    // ── Инфо-секция (y=138..200) ─────────────────────────────
+    lcd.fillRect(M_PANEL_X, M_INFO_Y, M_PANEL_W, M_INFO_H, t.header);
+    lcd.drawFastHLine(M_PANEL_X, M_INFO_Y, M_PANEL_W, t.accent);
+
+    int ix = M_PANEL_X + 4;
+    int iy = M_INFO_Y + 9;
+
+    // Playtime
+    fsm(); lcd.setTextDatum(ML_DATUM);
+    lcd.setTextColor(t.textSec); lcd.drawString("T:", ix, iy);
+    lcd.setTextColor(t.textPri);
+    lcd.drawString(_fmtPlaytime(GameStats::playTimeGet(rom.path.c_str())).c_str(), ix + 15, iy);
+    iy += 18;
+
+    // Size
+    char szStr[12];
+    uint32_t kb = rom.size / 1024;
+    if (kb > 0) snprintf(szStr, sizeof(szStr), "%uKB", (unsigned)kb);
+    else        snprintf(szStr, sizeof(szStr), "%uB",  (unsigned)rom.size);
+    lcd.setTextColor(t.textSec); lcd.drawString("S:", ix, iy);
+    lcd.setTextColor(t.textPri); lcd.drawString(szStr, ix + 15, iy);
+    iy += 18;
+
+    // ROM name (truncated to fit panel)
+    String sName = rom.name.length() > 13
+                   ? rom.name.substring(0, 11) + ".."
+                   : rom.name;
+    lcd.setTextColor(t.textSec); lcd.drawString(sName.c_str(), ix, iy);
+
+    _coverLastRom = romIdx;
+}
+
+// ── Стрелки прокрутки (в списке, правый край) ──────────────────
+static void _menuDrawScrollArrows(int total) {
+    const Theme565& t = getTheme();
+    int ax = M_LIST_W - 9;
+    if (_menuOffset > 0) {
+        int ay = M_HDR_H + 10;
+        lcd.fillTriangle(ax, ay, ax - 5, ay + 8, ax + 5, ay + 8, t.accent);
+    }
+    if (_menuOffset + M_ROWS < total) {
+        int ay = M_DPAD_Y - 10;
+        lcd.fillTriangle(ax, ay, ax - 5, ay - 8, ax + 5, ay - 8, t.accent);
+    }
+}
+
+// ── Частичное обновление (только изменившиеся строки + правая панель) ──
+static void _menuPartialUpdate(int oldIdx, int newIdx) {
+    const Theme565&    t  = getTheme();
+    const ThemePlugin* tp = ThemeRegistry::active();
+    int total = _menuListCount();
+
+    int oldSlot = oldIdx - _menuOffset;
+    int newSlot = newIdx - _menuOffset;
+
+    // Старая строка (снять выделение)
+    lcd.fillRect(0, M_HDR_H + oldSlot * M_ROW_H, M_LIST_W - 1, M_ROW_H, t.bg);
+    if (oldIdx >= 0 && oldIdx < total)
+        tp->drawRomRow(_menuActual(oldIdx), oldSlot, false);
+
+    // Новая строка (выделить)
+    lcd.fillRect(0, M_HDR_H + newSlot * M_ROW_H, M_LIST_W - 1, M_ROW_H, t.bg);
+    if (newIdx >= 0 && newIdx < total)
+        tp->drawRomRow(_menuActual(newIdx), newSlot, true);
+
+    // Разделитель
+    lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
+
+    // Стрелки
+    lcd.fillRect(M_LIST_W - 16, M_HDR_H, 16, M_DPAD_Y - M_HDR_H, t.bg);
+    _menuDrawScrollArrows(total);
+
+    // Правая панель
+    _menuDrawRightPanel(_menuActual(newIdx));
+}
+
+// ── Диалог подтверждения удаления ──────────────────────────────
+static bool _menuConfirmDelete(const char *name) {
+    const Theme565& t = getTheme();
+    const int PX = 10, PY = 70, PW = 300, PH = 92;
+    const int BW = 130, BH = 26, BY = PY + 56;
+
+    lcd.fillRoundRect(PX, PY, PW, PH, 8, t.header);
+    lcd.drawRoundRect(PX, PY, PW, PH, 8, t.danger);
+
+    fmd(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.danger);
+    lcd.drawString("Delete ROM?", SCREEN_W / 2, PY + 20);
+
+    String n = String(name);
+    if (n.length() > 26) n = n.substring(0, 24) + "..";
+    fsm(); lcd.setTextColor(t.textPri);
+    lcd.drawString(n.c_str(), SCREEN_W / 2, PY + 38);
+
+    lcd.fillRoundRect(PX + 8,           BY, BW, BH, 6, t.danger);
+    lcd.fillRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, t.selected);
+    fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("YES Delete", PX + 8 + BW / 2,           BY + BH / 2);
+    lcd.setTextColor(t.textSec);
+    lcd.drawString("NO Cancel",  PX + PW - 8 - BW / 2,     BY + BH / 2);
+
+    delay(300);
+    uint32_t until = millis() + 8000;
+    while (millis() < until) {
+        if (touch.isTouched()) {
+            delay(40);
+            int tx = 0, ty = 0;
+            touch.getXY(tx, ty);
+            if (ty >= BY && ty < BY + BH) {
+                if (tx >= PX + 8 && tx < PX + 8 + BW) return true;
+            }
+            return false;
+        }
+        delay(20);
+    }
+    return false;
+}
+
+// ── Три-точечное контекстное меню ──────────────────────────────
+// Возвращает true если нужно перейти в Settings.
+// Возвращает: 0=ничего, 1=Settings, 2=Gallery
+static uint8_t _menuDotMenu() {
+    const Theme565& t = getTheme();
+    static const char* sortLabels[] = {
+        "Sort A-Z", "Sort Z-A", "Sort Size", "Sort Default"
+    };
+    const char* items[4] = {
+        sortLabels[_sortMode % 4],   // следующий режим сортировки
+        "Delete ROM",
+        "Gallery",
+        "Settings"
+    };
+    const int PX = 182, PY = M_HDR_H + 1, PW = 136, PH = 124, RH = 30;
+
+    // ── Вспомогательная функция: рисует один пункт меню (с подсветкой или без) ──
+    auto drawItem = [&](int idx, bool hi) {
+        int iy = PY + 1 + idx * RH;
+        uint16_t bg = hi ? t.accent : t.header;
+        lcd.fillRect(PX + 1, iy, PW - 2, RH, bg);
+        // Разделитель над пунктом
+        if (idx > 0) lcd.drawFastHLine(PX + 4, iy, PW - 8, (uint16_t)COL_SEP);
+        // Разделитель под пунктом (= начало следующего)
+        if (idx < 3) lcd.drawFastHLine(PX + 4, iy + RH, PW - 8, (uint16_t)COL_SEP);
+        uint16_t ic = (idx == 1) ? (hi ? (uint16_t)COL_WHITE : t.danger)
+                                 : (hi ? (uint16_t)COL_WHITE : t.textPri);
+        fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(ic);
+        lcd.drawString(items[idx], PX + 10, iy + RH / 2);
+    };
+
+    lcd.fillRoundRect(PX, PY, PW, PH, 6, t.header);
+    lcd.drawRoundRect(PX, PY, PW, PH, 6, t.accent);
+    for (int i = 0; i < 4; i++) drawItem(i, false);
+
+    delay(200);
+    uint32_t until = millis() + 6000;
+    int choice = -1;
+    int hiSel  = -1;   // -1 = кнопки ещё не нажимались, подсветка не показана
+
+    while (millis() < until && choice < 0) {
+        // ── Обработка касания ──────────────────────────────────────────
+        if (touch.isTouched()) {
+            delay(40);
+            int tx = 0, ty = 0;
+            touch.getXY(tx, ty);
+            if (tx >= PX && tx < PX + PW && ty >= PY && ty < PY + PH)
+                choice = (ty - PY - 1) / RH;
+            else
+                choice = -2;  // тап вне меню = закрыть
+        }
+
+        // ── Управление кнопками ────────────────────────────────────────
+        buttons.update();
+        uint8_t btn = buttons.applyBtnMap(buttons.readNew());
+
+        if (btn & (BTN_B | BTN_SEL)) { choice = -2; break; }   // отмена
+
+        if (btn & BTN_UP) {
+            int prev = hiSel;
+            hiSel = (hiSel <= 0) ? 3 : hiSel - 1;
+            if (prev >= 0) drawItem(prev, false);
+            drawItem(hiSel, true);
+            until = millis() + 6000;   // сбрасываем таймаут
+        }
+        if (btn & BTN_DOWN) {
+            int prev = hiSel;
+            hiSel = (hiSel < 0) ? 0 : (hiSel + 1) % 4;
+            if (prev >= 0) drawItem(prev, false);
+            drawItem(hiSel, true);
+            until = millis() + 6000;
+        }
+        if (btn & (BTN_A | BTN_STA)) {
+            if (hiSel >= 0) { choice = hiSel; break; }
+        }
+        delay(10);
+    }
+
+    switch (choice) {
+        case 0: {  // Сортировка
+            _sortMode = (_sortMode + 1) % 4;
+            _menuBuildSortedList();
+            _menuSel = 0; _menuOffset = 0;
+            menuDraw();
+            break;
+        }
+        case 1: {  // Удалить ROM
+            int actual = _menuActual(_menuSel);
+            if (actual >= 0 && actual < sdMgr.count()) {
+                const char* rname = sdMgr.get(actual).name.c_str();
+                if (_menuConfirmDelete(rname)) {
+                    sdMgr.removeROM(actual);
+                    _menuBuildFavList();
+                    _menuBuildSortedList();
+                    int total = _menuListCount();
+                    if (_menuSel >= total) _menuSel = max(0, total - 1);
+                    _menuOffset = max(0, min(_menuOffset, max(0, total - M_ROWS)));
+                    _coverLastRom = -2;
+                }
+            }
+            menuDraw();
+            break;
+        }
+        case 2:  // Gallery → сигнализируем вызывающей стороне
+            menuDraw();
+            return 2;
+        case 3:  // Settings
+            menuDraw();
+            return 1;
+        default:
+            menuDraw();
+            break;
+    }
+    return 0;
+}
+
+// ══════════════════════════════════════════════════════════════
+// PUBLIC MENU FUNCTIONS
+// ══════════════════════════════════════════════════════════════
+
 void menuDraw() {
     const ThemePlugin* tp = ThemeRegistry::active();
     const Theme565& t     = getTheme();
 
     lcd.fillScreen(t.bg);
 
-    // Шапка — каждая тема рисует свою (title bar / app bar / nav bar)
-    tp->drawHeader(sdMgr.count());
+    // ── Шапка ──────────────────────────────────────────────────
+    _menuDrawHeader();
 
-    // Список ROM
-    int total = sdMgr.count();
+    // ── Разделитель список | панель ────────────────────────────
+    lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
+
+    // ── Список ROM ─────────────────────────────────────────────
+    int total = _menuListCount();
     if (total == 0) {
         fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-        int emptyY = HDR_H + (DPAD_Y - HDR_H) / 2;
-        lcd.drawString(cyrStr(S().noRoms),     SCREEN_W / 2, emptyY - 12);
-        fsm(); lcd.drawString(cyrStr(S().noRomsHint), SCREEN_W / 2, emptyY + 12);
+        int ey = M_HDR_H + (M_DPAD_Y - M_HDR_H) / 2;
+        if (_searchActive)
+            lcd.drawString("No results", M_LIST_W / 2, ey);
+        else if (_favMode)
+            lcd.drawString("No favourites", M_LIST_W / 2, ey);
+        else {
+            lcd.drawString(cyrStr(S().noRoms),      M_LIST_W / 2, ey - 10);
+            fsm(); lcd.drawString(cyrStr(S().noRomsHint), M_LIST_W / 2, ey + 10);
+        }
     } else {
-        int end = min(_menuOffset + ROWS_VISIBLE, total);
+        int end = min(_menuOffset + M_ROWS, total);
         for (int i = _menuOffset; i < end; i++)
-            tp->drawRomRow(i, i - _menuOffset, i == _menuSel);
-        drawScrollIndicators(total);
+            tp->drawRomRow(_menuActual(i), i - _menuOffset, i == _menuSel);
+        _menuDrawScrollArrows(total);
     }
 
-    // Нижняя панель — taskbar / bottom nav / tab bar / default bar
-    tp->drawMenuBar();
+    // ── Правая панель ──────────────────────────────────────────
+    int selActual = _menuActual(_menuSel);
+    _menuDrawRightPanel(selActual);
+
+    // ── Подвал ─────────────────────────────────────────────────
+    _menuDrawFooter();
 }
 
-// ── Обновление только времени (раз в минуту) — делегирует плагину ─
+// ── Обновление времени раз в минуту (inline, без делегации плагину) ─
 static uint8_t _menuLastMin = 0xFF;
 void menuTimeTick() {
     uint8_t m = timeGetM();
     if (m == _menuLastMin) return;
     _menuLastMin = m;
-    ThemeRegistry::active()->timeTick();
-}
 
-// ── Partial-redraw helpers (smooth scroll) ─────────────────────────────────
-// Redraws only the two rows that changed + scroll indicators.
-// A full menuDraw() is only triggered when the viewport offset changes.
+    const Theme565& t = getTheme();
+    int by = M_DPAD_Y, cy = M_DPAD_CY;
 
-static void menuPartialUpdate(int slotA, int romA, int slotB, int romB) {
-    const Theme565&   t  = getTheme();
-    const ThemePlugin* tp = ThemeRegistry::active();
-    // Erase and redraw row A
-    lcd.fillRect(0, HDR_H + slotA * ROW_H, SCREEN_W, ROW_H, t.bg);
-    if (romA >= 0 && romA < sdMgr.count())
-        tp->drawRomRow(romA, slotA, romA == _menuSel);
-    // Erase and redraw row B
-    lcd.fillRect(0, HDR_H + slotB * ROW_H, SCREEN_W, ROW_H, t.bg);
-    if (romB >= 0 && romB < sdMgr.count())
-        tp->drawRomRow(romB, slotB, romB == _menuSel);
-    // Erase right-column indicator zones and redraw
-    lcd.fillRect(SCREEN_W - 20, HDR_H, 20, DPAD_Y - HDR_H, t.bg);
-    drawScrollIndicators(sdMgr.count());
+    // Обновляем зону WiFi + батарея + время + дата
+    lcd.fillRect(96, by + 1, SCREEN_W - 96, M_BAR_H - 2, t.header);
+
+    bool wConn = wifiMgr.isConnected();
+    _mWifi(110, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
+    _mBattery(133, cy);
+
+    flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_CYAN);
+    lcd.drawString(timeGetString().c_str(), 181, cy);
+
+    time_t now = time(nullptr);
+    struct tm *ti = localtime(&now);
+    char dt[12];
+    snprintf(dt, sizeof(dt), "%02d.%02d.%02d",
+             ti->tm_mday, ti->tm_mon + 1, ti->tm_year % 100);
+    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
+    lcd.drawString(dt, 221, cy);
 }
 
 void menuScrollUp() {
@@ -354,117 +774,407 @@ void menuScrollUp() {
     int oldSel = _menuSel--;
     if (_menuSel < _menuOffset) {
         _menuOffset = _menuSel;
-        menuDraw();   // viewport scrolled — full redraw
+        menuDraw();
     } else {
-        menuPartialUpdate(_menuSel  - _menuOffset, _menuSel,
-                          oldSel    - _menuOffset, oldSel);
+        _menuPartialUpdate(oldSel, _menuSel);
     }
 }
 
 void menuScrollDown() {
-    int total = sdMgr.count();
+    int total = _menuListCount();
     if (_menuSel >= total - 1) return;
     int oldSel = _menuSel++;
-    if (_menuSel >= _menuOffset + ROWS_VISIBLE) {
-        _menuOffset = _menuSel - ROWS_VISIBLE + 1;
-        menuDraw();   // viewport scrolled — full redraw
+    if (_menuSel >= _menuOffset + M_ROWS) {
+        _menuOffset = _menuSel - M_ROWS + 1;
+        menuDraw();
     } else {
-        menuPartialUpdate(oldSel  - _menuOffset, oldSel,
-                          _menuSel - _menuOffset, _menuSel);
+        _menuPartialUpdate(oldSel, _menuSel);
     }
 }
 
 uint8_t menuHandleTouch(int x, int y, int &romAction) {
     romAction = 0;
-    const ThemePlugin* tp = ThemeRegistry::active();
 
-    // ── Нижняя панель — тема сама обрабатывает нажатие ────────
-    if (y >= DPAD_Y) {
-        ThemeAction a = tp->onBarTap(x, y);
-        if (a.act == ACT_PLAY) { romAction = 1; return BTN_A; }
-        return a.btnMask;   // BTN_SEL / BTN_LEFT / 0 и т.д.
+    // ── Подвал ─────────────────────────────────────────────────
+    if (y >= M_DPAD_Y) {
+        if (x <= 93) { romAction = 1; return BTN_A; }  // ▶ PLAY
+        return 0;
     }
 
-    // ── Шапка — тема обрабатывает нажатие ─────────────────────
-    if (y < HDR_H) {
-        ThemeAction a = tp->onHeaderTap(x, y);
-        if (a.act == ACT_PLAY) { romAction = 1; return BTN_A; }
-        return a.btnMask;
+    // ── Шапка ──────────────────────────────────────────────────
+    if (y < M_HDR_H) {
+        if (x < 29) {
+            // ★ Избранные
+            _favMode = !_favMode;
+            _searchActive = false;
+            if (_favMode) _menuBuildFavList();
+            _menuSel = 0; _menuOffset = 0;
+            menuDraw(); soundClick();
+            return 0;
+        }
+        if (x >= 29 && x < 62) {
+            // 🔍 Поиск — сигнал в main.cpp
+            return 0xC0;
+        }
+        if (x >= 280) {
+            // ⋮ три точки
+            uint8_t r = _menuDotMenu();
+            if (r == 1) return BTN_SEL;  // → Settings
+            if (r == 2) return 0xD0;     // → Gallery
+            return 0;
+        }
+        return 0;
     }
 
-    // ── Индикаторы прокрутки (правая полоса списка) ───────────
-    if (x > SCREEN_W - 22) {
-        if (y < HDR_H + ROW_H) { menuScrollUp();   return 0; }
-        if (y > DPAD_Y - ROW_H){ menuScrollDown(); return 0; }
+    // ── Правая панель — тап → ROM Info ────────────────────────
+    if (x >= M_PANEL_X) {
+        int actual = _menuActual(_menuSel);
+        if (actual >= 0 && actual < sdMgr.count()) {
+            romAction = 2; return BTN_A;
+        }
+        return 0;
     }
 
-    // ── Строки ROM ────────────────────────────────────────────
-    if (y > HDR_H && y < DPAD_Y && sdMgr.count() > 0) {
-        int row    = (y - HDR_H) / ROW_H;
-        int tapped = _menuOffset + row;
-        if (tapped < 0 || tapped >= sdMgr.count()) return 0;
-        TapType tt = touch.checkDoubleTap(x, y, tapped);
-        int tapCount = (tt == TAP_DOUBLE) ? 2 : 1;
-        if (tapped != _menuSel) { _menuSel = tapped; menuDraw(); }
-        ThemeAction a = tp->onRowTap(row, tapCount);
-        if (a.act == ACT_ROMINFO) { romAction = 2; return BTN_A; }
-        if (a.act == ACT_PLAY)    { romAction = tapCount; return BTN_A; }
-        return a.btnMask;
+    // ── Стрелки прокрутки (правый край списка) ─────────────────
+    if (x >= M_LIST_W - 16) {
+        if (y < M_HDR_H + 24) { menuScrollUp();   return 0; }
+        if (y > M_DPAD_Y - 24){ menuScrollDown(); return 0; }
     }
+
+    // ── Строки ROM ─────────────────────────────────────────────
+    if (y >= M_HDR_H && y < M_DPAD_Y) {
+        int total = _menuListCount();
+        if (total == 0) return 0;
+
+        int row     = (y - M_HDR_H) / M_ROW_H;
+        int listIdx = _menuOffset + row;
+        if (listIdx < 0 || listIdx >= total) return 0;
+
+        int actual = _menuActual(listIdx);
+        if (actual < 0) return 0;
+
+        // ★ Звезда в конце строки
+        if (x >= M_LIST_W - 18) {
+            GameStats::favToggle(sdMgr.get(actual).path.c_str());
+            GameStats::save();
+            soundClick();
+            if (_favMode) {
+                _menuBuildFavList();
+                int tc = _menuListCount();
+                if (_menuSel >= tc) {
+                    _menuSel = max(0, tc - 1);
+                    _menuOffset = max(0, _menuSel - M_ROWS / 2);
+                }
+            }
+            menuDraw();
+            return 0;
+        }
+
+        // Обычный тап — выбрать / запустить
+        TapType tt = touch.checkDoubleTap(x, y, listIdx);
+        if (listIdx != _menuSel) {
+            int oldSel = _menuSel;
+            _menuSel = listIdx;
+            _menuPartialUpdate(oldSel, _menuSel);
+        }
+        if (tt == TAP_DOUBLE) {
+            romAction = 1; return BTN_A;
+        }
+        return 0;
+    }
+
     return 0;
 }
 
-int menuSelected() { return _menuSel; }
+int menuSelected() { return _menuActual(_menuSel); }
+
+// ── Drag scroll (вызывается из main.cpp пока touch.rawTouched()) ──
+void menuRawTouch(int x, int y) {
+    // Только для области списка
+    if (x >= M_PANEL_X || y < M_HDR_H || y >= M_DPAD_Y) {
+        _dragActive = false;
+        return;
+    }
+    if (!_dragActive) {
+        _dragActive = true;
+        _dragStartY = y;
+        _dragOff0   = _menuOffset;
+        return;
+    }
+    int dy = _dragStartY - y;
+    int steps = dy / (M_ROW_H / 2);
+    int newOff = _dragOff0 + steps;
+    int total = _menuListCount();
+    int maxOff = max(0, total - M_ROWS);
+    newOff = constrain(newOff, 0, maxOff);
+    if (newOff != _menuOffset) {
+        _menuOffset = newOff;
+        _menuSel    = constrain(_menuSel, _menuOffset, _menuOffset + M_ROWS - 1);
+        menuDraw();
+    }
+}
+
+void menuTouchUp() {
+    _dragActive = false;
+}
+
+// ── Поиск ──────────────────────────────────────────────────────
+void menuSetSearch(const char *q) {
+    strncpy(_searchQuery, q, sizeof(_searchQuery) - 1);
+    _searchQuery[sizeof(_searchQuery) - 1] = '\0';
+    _searchActive = (_searchQuery[0] != '\0');
+    if (_searchActive) {
+        _menuBuildSearchList();
+        _favMode = false;
+    }
+    _menuSel = 0; _menuOffset = 0;
+    menuDraw();
+}
+
+void menuClearSearch() {
+    _searchActive = false;
+    _searchQuery[0] = '\0';
+    _menuSel = 0; _menuOffset = 0;
+    menuDraw();
+}
 
 // ══════════════════════════════════════════════════════════════
 // ROM INFO POPUP
 // ══════════════════════════════════════════════════════════════
 
+// ── Helpers for ROM info screen ───────────────────────────────────────────────
+
+// Extract ROM base name (strip directory + extension) from full path
+static void _uiRomName(const char *path, char *out, size_t maxLen) {
+    const char *slash = strrchr(path, '/');
+    const char *base  = slash ? slash + 1 : path;
+    strncpy(out, base, maxLen - 1);
+    out[maxLen - 1] = '\0';
+    char *dot = strrchr(out, '.');
+    if (dot) *dot = '\0';
+}
+
+// Format total seconds → "Xh Ym" / "Ym Xs" / "Xs" / "---"
+static String _fmtPlaytime(uint32_t secs) {
+    if (secs == 0) return "---";
+    uint32_t h = secs / 3600;
+    uint32_t m = (secs % 3600) / 60;
+    uint32_t s = secs % 60;
+    char buf[24];
+    if      (h > 0) snprintf(buf, sizeof(buf), "%uh %02um", (unsigned)h, (unsigned)m);
+    else if (m > 0) snprintf(buf, sizeof(buf), "%um %02us", (unsigned)m, (unsigned)s);
+    else            snprintf(buf, sizeof(buf), "%us",        (unsigned)s);
+    return String(buf);
+}
+
+// ── Отрисовка .raw файла (общая функция) ─────────────────────────────────────
+// Читает строго ПОСЛЕДОВАТЕЛЬНО все строки — без seek, надёжно на любой SD.
+// Пиксели в файле pre-inverted (~rgb565). Делаем un-invert через pushImage().
+// noArtHint — показывать подсказку если файл не найден.
+static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
+                         bool noArtHint = true) {
+    lcd.fillRect(dx, dy, dw, dh, 0x18C3);
+    lcd.drawRect(dx, dy, dw, dh, 0x4208);
+
+    File f = SD.open(path, FILE_READ);
+    if (!f) {
+        if (noArtHint) {
+            lcd.setFont(&lgfx::fonts::DejaVu9);
+            lcd.setTextDatum(MC_DATUM);
+            lcd.setTextColor(0x4208);
+            lcd.drawString("NO ART", dx + dw / 2, dy + dh / 2 - 7);
+            lcd.setTextColor(0x2965);
+            lcd.drawString("HOME>Screenshot", dx + dw / 2, dy + dh / 2 + 7);
+        }
+        return;
+    }
+
+    uint8_t hdr[4] = {};
+    f.read(hdr, 4);
+    uint16_t srcW = (uint16_t)(hdr[0] | (hdr[1] << 8));
+    uint16_t srcH = (uint16_t)(hdr[2] | (hdr[3] << 8));
+
+    if (srcW == 0 || srcH == 0 || srcW > 400 || srcH > 300) {
+        f.close(); return;
+    }
+
+    uint16_t *srcBuf = (uint16_t *)heap_caps_malloc(srcW * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint16_t *dstBuf = (uint16_t *)heap_caps_malloc(dw   * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!srcBuf || !dstBuf) {
+        heap_caps_free(srcBuf); heap_caps_free(dstBuf); f.close(); return;
+    }
+
+    for (int srcY = 0; srcY < (int)srcH; srcY++) {
+        if (f.read((uint8_t *)srcBuf, srcW * 2) != (int)(srcW * 2)) break;
+        for (int dstY = 0; dstY < dh; dstY++) {
+            if ((dstY * (int)srcH) / dh != srcY) continue;
+            for (int x = 0; x < dw; x++)
+                dstBuf[x] = srcBuf[(x * (int)srcW) / dw];
+            lcd.startWrite();
+            lcd.setAddrWindow(dx, dy + dstY, dw, 1);
+            lcd.writePixels(dstBuf, dw, true);
+            lcd.endWrite();
+        }
+    }
+
+    heap_caps_free(srcBuf);
+    heap_caps_free(dstBuf);
+    f.close();
+}
+
+// ── Обёртка для обложки игры (по имени ROM) ───────────────────────────────────
+static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh) {
+    char path[96];
+    snprintf(path, sizeof(path), "/Screenshots/%s.raw", romName);
+    printf("[UI] Cover: %s\n", path);
+    _drawRawFile(path, dx, dy, dw, dh, /*noArtHint=*/true);
+}
+
+// ── Main ROM info popup ────────────────────────────────────────────────────────
 void showRomInfo(int idx) {
     if (idx < 0 || idx >= sdMgr.count()) return;
     const ROMInfo &rom = sdMgr.get(idx);
     const Theme565 &t = getTheme();
 
-    int px = 16, py = 36, pw = SCREEN_W-32, ph = SCREEN_H-80;
-    lcd.fillRoundRect(px+3, py+3, pw, ph, 10, 0x0841);
-    lcd.fillRoundRect(px, py, pw, ph, 10, t.header);
-    lcd.drawRoundRect(px, py, pw, ph, 10, t.accent);
-    lcd.drawFastHLine(px+8, py+34, pw-16, 0x2945);
-    fmd(); lcd.setTextColor(t.accent); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString(cyrStr(S().romInfo), SCREEN_W/2, py+17);
+    char romName[64];
+    _uiRomName(rom.path.c_str(), romName, sizeof(romName));
 
-    fsm(); lcd.setTextDatum(ML_DATUM);
-    int lx = px+12, rx = px+pw-12, ly = py+46;
-    auto row = [&](const char *lbl, String val) {
-        lcd.setTextColor(t.textSec); lcd.drawString(lbl, lx, ly);
-        lcd.setTextColor(t.textPri); lcd.setTextDatum(MR_DATUM);
-        lcd.drawString(val.c_str(), rx, ly);
-        lcd.setTextDatum(ML_DATUM);
-        ly += 22;
-    };
-    row(cyrStr(S().romMapper), "N/A");
-    String sz = rom.size < 1024 ? String(rom.size)+"B" : String(rom.size/1024)+"KB";
-    row(cyrStr(S().romSize), sz);
-    String p = rom.path; if(p.length()>26) p=p.substring(0,24)+"..";
-    row(cyrStr(S().romPath), p);
-    String n = rom.name; if(n.length()>22) n=n.substring(0,20)+"..";
-    row("Name:", n);
+    // Layout constants
+    const int PX = 4,  PY = 4;
+    const int PW = SCREEN_W - 8, PH = SCREEN_H - 8;   // 312 × 232
+    const int POP_HDR  = 30;                            // popup header height
+    const int COVER_X  = PX + 10;
+    const int COVER_W  = 110, COVER_H = 110;
+    const int INFO_X   = COVER_X + COVER_W + 10;       // ≈ 134
+    const int BTN_Y    = PY + PH - 36;                 // 200
+    const int BTN_H    = 28;
+    const int BTN_W    = (PW - 24) / 2;                // ≈ 144
 
-    int bw = pw-40, bx = px+20, by = ly+6;
-    lcd.fillRoundRect(bx, by, bw, 28, 8, t.accent);
-    fsm(); lcd.setTextColor(t.header); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("OK", px+pw/2, by+14);
-
-    delay(300);
     extern TouchHandler touch;
     extern ButtonHandler buttons;
-    uint32_t until = millis()+8000;
-    while (millis()<until) {
-        if (touch.isTouched()) break;
-        // LEFT кнопка или любая кнопка закрывает инфо
-        buttons.update();
-        if (buttons.readNew()) break;
-        delay(20);
+
+    bool redraw = true;
+    while (redraw) {
+        redraw = false;
+
+        bool isFav = GameStats::favCheck(rom.path.c_str());
+
+        // ── Popup shell ────────────────────────────────────────────────────
+        lcd.fillRoundRect(PX + 3, PY + 3, PW, PH, 10, 0x0841);    // shadow
+        lcd.fillRoundRect(PX, PY, PW, PH, 10, t.bg);
+        lcd.drawRoundRect(PX, PY, PW, PH, 10, t.accent);
+
+        // Header bar
+        lcd.fillRoundRect(PX, PY, PW, POP_HDR + 2, 10, t.header);
+        lcd.fillRect(PX, PY + POP_HDR / 2, PW, POP_HDR / 2 + 2, t.header);
+        lcd.drawFastHLine(PX, PY + POP_HDR, PW, t.accent);
+        fmd();
+        lcd.setTextColor(t.accent);
+        lcd.setTextDatum(MC_DATUM);
+        lcd.drawString(cyrStr(S().romInfo), SCREEN_W / 2, PY + POP_HDR / 2);
+
+        // Game title (full width strip below header)
+        const int TITLE_Y = PY + POP_HDR + 2;
+        const int TITLE_H = 18;
+        lcd.fillRect(PX + 1, TITLE_Y, PW - 2, TITLE_H, t.bg);
+        String dispName = rom.name;
+        if (dispName.length() > 28) dispName = dispName.substring(0, 26) + "..";
+        fsm();
+        lcd.setTextColor(t.textPri);
+        lcd.setTextDatum(MC_DATUM);
+        lcd.drawString(dispName.c_str(), SCREEN_W / 2, TITLE_Y + TITLE_H / 2);
+        lcd.drawFastHLine(PX + 8, TITLE_Y + TITLE_H, PW - 16, 0x2945);
+
+        // Cover art
+        const int COVER_Y2 = TITLE_Y + TITLE_H + 4;
+        _drawCoverArt(romName, COVER_X, COVER_Y2, COVER_W, COVER_H);
+
+        // Info rows (right of cover)
+        fsm();
+        lcd.setTextDatum(ML_DATUM);
+        int iy = COVER_Y2 + 4;
+
+        auto infoRow = [&](const char *lbl, const String &val,
+                           uint16_t valCol = 0) {
+            lcd.setTextColor(t.textSec);
+            lcd.drawString(lbl, INFO_X, iy);
+            iy += 14;
+            lcd.setTextColor(valCol ? valCol : t.textPri);
+            lcd.drawString(val.c_str(), INFO_X, iy);
+            iy += 18;
+        };
+
+        // Size
+        String sz = rom.size < 1024
+                    ? String(rom.size) + " B"
+                    : String(rom.size / 1024) + " KB";
+        infoRow("Size:", sz);
+
+        // Playtime
+        infoRow("Played:", _fmtPlaytime(GameStats::playTimeGet(rom.path.c_str())));
+
+        // Favourite
+        infoRow("Fav:", isFav ? "YES  *" : "No",
+                isFav ? 0xFFE0 : t.textSec);
+
+        // Path (short)
+        String shortPath = rom.path;
+        if (shortPath.length() > 18) shortPath = ".." + shortPath.substring(shortPath.length() - 16);
+        infoRow("Path:", shortPath);
+
+        // ── Bottom buttons ─────────────────────────────────────────────────
+        int btn1X = PX + 8;
+        int btn2X = PX + PW - 8 - BTN_W;
+
+        // FAV button
+        uint16_t favBg  = isFav ? 0xFBE0 : t.hilite;
+        uint16_t favTxt = isFav ? 0x8400 : t.selText;
+        lcd.fillRoundRect(btn1X, BTN_Y, BTN_W, BTN_H, 6, favBg);
+        lcd.drawRoundRect(btn1X, BTN_Y, BTN_W, BTN_H, 6, isFav ? 0xFD40 : t.accent);
+        fsm(); lcd.setTextColor(favTxt); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString(isFav ? "* Unfavourite" : "* Favourite",
+                       btn1X + BTN_W / 2, BTN_Y + BTN_H / 2);
+
+        // OK button
+        lcd.fillRoundRect(btn2X, BTN_Y, BTN_W, BTN_H, 6, t.accent);
+        lcd.setTextColor(t.header);
+        lcd.drawString("OK  [B]", btn2X + BTN_W / 2, BTN_Y + BTN_H / 2);
+
+        // ── Input loop ─────────────────────────────────────────────────────
+        delay(250);
+        uint32_t until = millis() + 12000;
+        while (millis() < until) {
+
+            if (touch.isTouched()) {
+                delay(40);
+                int tx = 0, ty = 0;
+                touch.getXY(tx, ty);
+
+                // Tap FAV button
+                if (ty >= BTN_Y && ty < BTN_Y + BTN_H &&
+                    tx >= btn1X && tx < btn1X + BTN_W) {
+                    GameStats::favToggle(rom.path.c_str());
+                    GameStats::save();
+                    soundClick();
+                    redraw = true;
+                    break;
+                }
+                // Tap OK or anywhere else → close
+                break;
+            }
+
+            buttons.update();
+            uint8_t b = buttons.readNew();
+            if (b & BTN_A) {                  // A → toggle favourite
+                GameStats::favToggle(rom.path.c_str());
+                GameStats::save();
+                soundClick();
+                redraw = true;
+                break;
+            }
+            if (b) break;                     // any other button → close
+            delay(20);
+        }
     }
 }
 
@@ -485,9 +1195,9 @@ static const char *_catName[] = {
 static const int _catItems[][8] = {
     { 0, 4, 7, -1, -1, -1, -1, -1 },          // Display
     { 1, 14, 8, 9, -1, -1, -1, -1 },           // Audio
-    { 2, 3, -1, -1, -1, -1, -1, -1 },          // Appearance
+    { 2, 3, 29, -1, -1, -1, -1, -1 },          // Appearance  (gi=29=NES Palette)
     { 5, 6, 17, 18, 19, 24, 25, 26 },          // System
-    { 12, 13, 15, 16, 28, -1, -1, -1 },        // Controls  (gi=28 = Pico version)
+    { 12, 13, 15, 16, 30, 31, 32, 28 },         // Controls  (gi=30=Turbo, gi=31=TurboMode, gi=32=GameGenie, gi=28=Pico)
     { 10, 11, -1, -1, -1, -1, -1, -1 },        // Info
     { 20, 21, 22, 23, -1, -1, -1, -1 },        // Debug (virtual sub-screen)
 };
@@ -585,6 +1295,23 @@ static String settingValue(int gi) {
         case 25: return "Edit >";      // Debug sub-screen
         case 26: return "Check >";     // OTA update
         case 28: return picoVerStr();  // Pico firmware version (read-only)
+        case 29: {  // NES Palette
+            const char *pals[] = {"Default","Nestopia","FCEUX","Virtual"};
+            return pals[settings.nesPalette % 4];
+        }
+        case 30: return settings.turboEnabled ? "On" : "Off";  // Turbo Buttons
+        case 32: {  // Game Genie
+            int n = 0;
+            for (int i = 0; i < 8; i++) if (settings.ggCodes[i][0]) n++;
+            if (!settings.ggEnabled) return "Off";
+            static char buf[16]; snprintf(buf, sizeof(buf), "On (%d)", n); return buf;
+        }
+        case 31: {  // Turbo Mode
+            if (settings.turboMask == 0x04) return "A";
+            if (settings.turboMask == 0x08) return "B";
+            if (settings.turboMask == 0x0C) return "A+B";
+            return "Off";
+        }
     }
     return "";
 }
@@ -617,6 +1344,16 @@ static void settingInc(int gi) {
         case 21: settings.diagFPS     = !settings.diagFPS;     break;
         case 22: settings.diagEmu     = !settings.diagEmu;     break;
         case 23: settings.diagTouch   = !settings.diagTouch;   break;
+        case 29: settings.nesPalette = (settings.nesPalette + 1) % 4; break;  // NES Palette
+        case 30: settings.turboEnabled = !settings.turboEnabled; break;         // Turbo toggle
+        case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
+        case 31: {  // Turbo mode cycle: Off→A→B→A+B
+            static const uint8_t masks[] = {0x00, 0x04, 0x08, 0x0C};
+            int cur = 0;
+            for (int m = 0; m < 4; m++) if (masks[m] == settings.turboMask) { cur = m; break; }
+            settings.turboMask = masks[(cur + 1) % 4];
+            break;
+        }
     }
 }
 
@@ -648,6 +1385,16 @@ static void settingDec(int gi) {
         case 21: settings.diagFPS     = !settings.diagFPS;     break;
         case 22: settings.diagEmu     = !settings.diagEmu;     break;
         case 23: settings.diagTouch   = !settings.diagTouch;   break;
+        case 29: settings.nesPalette = (settings.nesPalette + 3) % 4; break;  // NES Palette (back)
+        case 30: settings.turboEnabled = !settings.turboEnabled; break;
+        case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
+        case 31: {  // Turbo mode cycle backward
+            static const uint8_t masks[] = {0x00, 0x04, 0x08, 0x0C};
+            int cur = 0;
+            for (int m = 0; m < 4; m++) if (masks[m] == settings.turboMask) { cur = m; break; }
+            settings.turboMask = masks[(cur + 3) % 4];
+            break;
+        }
     }
 }
 
@@ -1186,6 +1933,8 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
             break;
         case 26:            iconDownload(cx,cy,c); break; // OTA
         case 28:            iconChip(cx,cy,c); break;    // Pico version (read-only)
+        case 29:                iconDiamond(cx,cy,c); break; // NES Palette
+        case 30: case 31: case 32: iconGamepad(cx,cy,c); break; // Turbo / Game Genie
         default:            iconInfo(cx,cy,c); break;
     }
 }
@@ -1209,6 +1958,10 @@ static const char* getLabelForGi(int gi) {
         case 25: return "Debug";
         case 26: return "Check Update";
         case 28: return "Pico Controller";
+        case 29: return "NES Palette";
+        case 30: return "Turbo Buttons";
+        case 31: return "Turbo Mode";
+        case 32: return "Game Genie";
     }
     return "";
 }
@@ -1403,6 +2156,7 @@ static uint8_t handleCategoryDetail(int x, int y) {
         if (gi == 12) return 0x40;   // Remap Buttons → открыть remap
         if (gi == 24) return 0x80;   // WiFi → открыть WiFi менеджер
         if (gi == 26) return 0xA0;   // Check Update → OTA screen
+        if (gi == 32) return 0xB0;   // Game Genie → открыть GG экран
         if (gi == 25) {
             // Debug sub-экран — открываем кат=6 (виртуальный)
             _prevCat = _settingsCat;
@@ -1582,6 +2336,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 12) return 0x40;  // open remap signal
             if (gi == 24) return 0x80;  // open WiFi
             if (gi == 26) return 0xA0;  // OTA check
+            if (gi == 32) return 0xB0;  // open Game Genie codes screen
             if (gi == 25) {
                 _prevCat = _settingsCat; _settingsCat = 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
@@ -1594,6 +2349,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 12) return 0x40;  // open remap signal
             if (gi == 24) return 0x80;  // open WiFi
             if (gi == 26) return 0xA0;  // OTA check
+            if (gi == 32) return 0xB0;  // open Game Genie
             if (gi == 25) {
                 _prevCat = _settingsCat; _settingsCat = 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
@@ -1607,6 +2363,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 12) return 0x40;
             if (gi == 24) return 0x80;
             if (gi == 26) return 0xA0;
+            if (gi == 32) return 0xB0;  // open Game Genie
             if (gi == 25) {
                 _prevCat = _settingsCat; _settingsCat = 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
@@ -2183,6 +2940,20 @@ void wifiKeyboardSetMask(bool mask) {
     _kbMask = mask;
 }
 
+// ── Кнопка "← НАЗАД" для экрана поиска (рисуется под клавиатурой) ───────────
+// Клавиатура занимает y=0..209; свободная полоса y=210..239 (30px)
+// Тач-зона: x=0..119, y=210..239
+void menuDrawSearchKbBack() {
+    const Theme565& t = getTheme();
+    const int BY = KB_ROW_Y + KB_ROW_H * 4;  // 74 + 136 = 210
+    const int BH = SCREEN_H - BY;             // 30px
+    lcd.fillRect(0, BY, SCREEN_W, BH, t.bg);
+    lcd.fillRoundRect(4, BY + 3, 112, BH - 6, 5, t.rowOdd);
+    lcd.drawRoundRect(4, BY + 3, 112, BH - 6, 5, t.accent);
+    fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textPri);
+    lcd.drawString("<- BACK", 60, BY + BH / 2);
+}
+
 // ══════════════════════════════════════════════════════════════
 // OTA SCREEN
 // ══════════════════════════════════════════════════════════════
@@ -2653,5 +3424,673 @@ uint8_t fileMgrNavBtn(uint8_t btn) {
         }
         fileMgrDraw();
     }
+    return 0;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GAME GENIE CODES SCREEN
+// ══════════════════════════════════════════════════════════════════════════════
+// Layout (320×240):
+//   Header   y=0..39    (40px)  — заголовок + B кнопка
+//   Toggle   y=40..63   (24px)  — "Enabled: ON/OFF"
+//   Slots    y=64..215  (19px × 8 = 152px)  — 8 слотов кодов
+//   Hint     y=216..239 (24px)  — подсказки кнопок
+//
+// Навигация:
+//   UP/DOWN  — переключение выбранного слота (0=toggle, 1-8=коды)
+//   RIGHT/A  — редактировать выбранный слот (возвращает 0xC0+слот)
+//   LEFT/B   — очистить выбранный слот / вернуться (если toggle — возврат)
+//   SELECT   — вернуться в настройки
+//   START    — переключить ggEnabled
+
+#define GG_HDR_H    40
+#define GG_TOG_Y    40
+#define GG_TOG_H    24
+#define GG_SLOT_Y   64
+#define GG_SLOT_H   19
+#define GG_HINT_Y   216
+
+static int _ggSel = 0;   // 0=toggle, 1-8=слот кода
+
+static void _ggDrawRow(int idx, bool selected) {
+    const Theme565 &t = getTheme();
+    int y = (idx == 0) ? GG_TOG_Y : GG_SLOT_Y + (idx - 1) * GG_SLOT_H;
+    int h = (idx == 0) ? GG_TOG_H : GG_SLOT_H;
+
+    uint16_t bg  = selected ? t.selected : (idx % 2 ? t.rowOdd : t.rowEven);
+    uint16_t fg  = selected ? t.selText  : t.textPri;
+    lcd.fillRect(0, y, SCREEN_W, h, bg);
+
+    lcd.setTextDatum(ML_DATUM);
+    lcd.setFont(&lgfx::fonts::DejaVu9);
+    lcd.setTextColor(fg);
+
+    char buf[64];
+    if (idx == 0) {
+        // Строка включения
+        snprintf(buf, sizeof(buf), "Enabled: %s", settings.ggEnabled ? "ON" : "OFF");
+        lcd.drawString(buf, 8, y + h / 2);
+        // Цветной индикатор справа
+        uint16_t dotCol = settings.ggEnabled ? t.ok : t.danger;
+        lcd.fillCircle(SCREEN_W - 12, y + h / 2, 5, dotCol);
+    } else {
+        int slot = idx - 1;
+        const char *code = settings.ggCodes[slot];
+        if (code[0]) {
+            snprintf(buf, sizeof(buf), "%d: %s", idx, code);
+            lcd.setTextColor(fg);
+        } else {
+            snprintf(buf, sizeof(buf), "%d: ---", idx);
+            lcd.setTextColor(selected ? t.selText : t.textSec);
+        }
+        lcd.drawString(buf, 8, y + h / 2);
+    }
+}
+
+void ggScreenDraw() {
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+
+    // ── Заголовок ──────────────────────────────────────────────────────────
+    lcd.fillRect(0, 0, SCREEN_W, GG_HDR_H, t.header);
+    lcd.setTextDatum(ML_DATUM);
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextColor(t.textPri);
+    lcd.drawString("Game Genie Codes", 10, GG_HDR_H / 2);
+    // B = назад
+    lcd.setTextDatum(MR_DATUM);
+    lcd.setTextColor(t.accent);
+    lcd.drawString("[B:Back]", SCREEN_W - 6, GG_HDR_H / 2);
+
+    // ── Toggle + слоты ────────────────────────────────────────────────────
+    for (int i = 0; i <= 8; i++) _ggDrawRow(i, i == _ggSel);
+
+    // ── Подсказка ──────────────────────────────────────────────────────────
+    lcd.fillRect(0, GG_HINT_Y, SCREEN_W, SCREEN_H - GG_HINT_Y, t.header);
+    lcd.setFont(&lgfx::fonts::DejaVu9);
+    lcd.setTextColor(t.textSec);
+    lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("A:Edit  B:Clear  START:Enable/Disable", SCREEN_W / 2, GG_HINT_Y + 12);
+}
+
+// Возвращаемые коды:
+//   BTN_B     — вернуться в настройки
+//   0xC1..C8  — открыть клавиатуру для слота (0xC0 + slot_number)
+//   0          — просто перерисовано
+uint8_t ggScreenNavBtn(uint8_t btn) {
+    if (btn & BTN_UP) {
+        if (_ggSel > 0) { _ggSel--; ggScreenDraw(); }
+        return 0;
+    }
+    if (btn & BTN_DOWN) {
+        if (_ggSel < 8) { _ggSel++; ggScreenDraw(); }
+        return 0;
+    }
+    if (btn & BTN_SEL) return BTN_B;  // SELECT = назад
+
+    if (btn & BTN_STA) {
+        // START = переключить ggEnabled
+        settings.ggEnabled = !settings.ggEnabled;
+        _ggDrawRow(0, _ggSel == 0);
+        return 0;
+    }
+
+    if (btn & (BTN_A | BTN_RIGHT)) {
+        if (_ggSel == 0) {
+            // На toggle — переключить enabled
+            settings.ggEnabled = !settings.ggEnabled;
+            _ggDrawRow(0, true);
+            return 0;
+        }
+        // Открыть клавиатуру для слота _ggSel (1..8)
+        return (uint8_t)(0xC0 + _ggSel);
+    }
+
+    if (btn & BTN_B) {
+        if (_ggSel == 0) return BTN_B;  // на toggle → выход
+        // Очистить выбранный слот
+        settings.ggCodes[_ggSel - 1][0] = '\0';
+        _ggDrawRow(_ggSel, true);
+        return 0;
+    }
+
+    return 0;
+}
+
+uint8_t ggScreenHandleTouch(int x, int y) {
+    // Тап по заголовку — назад
+    if (y < GG_HDR_H) return BTN_B;
+
+    // Тап по строке toggle
+    if (y >= GG_TOG_Y && y < GG_TOG_Y + GG_TOG_H) {
+        _ggSel = 0;
+        settings.ggEnabled = !settings.ggEnabled;
+        ggScreenDraw();
+        return 0;
+    }
+
+    // Тап по слоту
+    if (y >= GG_SLOT_Y && y < GG_SLOT_Y + GG_SLOT_H * 8) {
+        int slot = (y - GG_SLOT_Y) / GG_SLOT_H + 1;  // 1..8
+        if (slot != _ggSel) {
+            _ggSel = slot;
+            ggScreenDraw();
+            return 0;  // первый тап = выбор
+        }
+        // Второй тап = редактировать
+        return (uint8_t)(0xC0 + slot);
+    }
+
+    return 0;
+}
+
+void ggScreenSetSlot(int slot) {
+    if (slot >= 1 && slot <= 8) _ggSel = slot;
+}
+
+int ggScreenGetSlot() { return _ggSel; }
+
+// Сохраняет код в текущий выбранный слот (_ggSel, 1..8).
+// Вызывается из main.cpp после валидации через gg_decode().
+void ggCodeSaveToSlot(const char *code) {
+    if (_ggSel < 1 || _ggSel > 8) return;
+    strncpy(settings.ggCodes[_ggSel - 1], code, 7);
+    settings.ggCodes[_ggSel - 1][7] = '\0';
+}
+
+// ══════════════════════════════════════════════════════════════
+// ГАЛЕРЕЯ СКРИНШОТОВ
+// ══════════════════════════════════════════════════════════════
+// Уровни:  0 = список игр   1 = список скриншотов   2 = полный экран
+//
+// Файловая схема:
+//   /Screenshots/<name>_NNN.raw  — нумерованные снимки
+//   /Screenshots/<name>.raw      — обложка (может отсутствовать)
+// ──────────────────────────────────────────────────────────────
+
+#define GAL_MAX_GAMES 50
+#define GAL_MAX_SHOTS 30
+#define GAL_ROWS      7    // строк на экране
+#define GAL_ROW_H     M_ROW_H
+
+static int   _galLevel    = 0;
+
+// Уровень 0 — список игр
+static char  _galGames[GAL_MAX_GAMES][48];
+static int   _galGameCnt  = 0;
+static int   _galGameSel  = 0;
+static int   _galGameOff  = 0;
+
+// Уровень 1 — список скриншотов выбранной игры
+static char  _galShots[GAL_MAX_SHOTS][96];
+static int   _galShotCnt  = 0;
+static int   _galShotSel  = 0;
+static int   _galShotOff  = 0;
+
+// ── Сканирование ──────────────────────────────────────────────────────────────
+
+// Сканирует /Screenshots/ и строит список имён игр, у которых есть <name>_NNN.raw
+static void _galScanGames() {
+    _galGameCnt = 0;
+    File dir = SD.open("/Screenshots");
+    if (!dir) return;
+    File f = dir.openNextFile();
+    while (f) {
+        if (!f.isDirectory()) {
+            String nm = String(f.name());
+            int len = nm.length();
+            // Проверяем паттерн: <name>_NNN.raw  (NNN = ровно 3 цифры)
+            if (len >= 9 && nm.endsWith(".raw")) {
+                // Позиция суффикса _NNN.raw: len-8
+                if (nm[len-8] == '_' &&
+                    isdigit(nm[len-7]) && isdigit(nm[len-6]) && isdigit(nm[len-5])) {
+                    String game = nm.substring(0, len - 8);
+                    // Дедупликация
+                    bool found = false;
+                    for (int i = 0; i < _galGameCnt; i++) {
+                        if (strcmp(_galGames[i], game.c_str()) == 0) { found = true; break; }
+                    }
+                    if (!found && _galGameCnt < GAL_MAX_GAMES) {
+                        strncpy(_galGames[_galGameCnt++], game.c_str(), 47);
+                    }
+                }
+            }
+        }
+        f = dir.openNextFile();
+    }
+    dir.close();
+    // Сортировка (пузырёк, список маленький)
+    for (int i = 0; i < _galGameCnt - 1; i++)
+        for (int j = i + 1; j < _galGameCnt; j++)
+            if (strcmp(_galGames[i], _galGames[j]) > 0) {
+                char tmp[48]; strcpy(tmp, _galGames[i]);
+                strcpy(_galGames[i], _galGames[j]); strcpy(_galGames[j], tmp);
+            }
+}
+
+// Сканирует скриншоты конкретной игры
+static void _galScanShots(const char *gameName) {
+    _galShotCnt = 0;
+    File dir = SD.open("/Screenshots");
+    if (!dir) return;
+    char prefix[56];
+    snprintf(prefix, sizeof(prefix), "%s_", gameName);
+    int plen = strlen(prefix);
+    File f = dir.openNextFile();
+    while (f) {
+        if (!f.isDirectory()) {
+            String nm = String(f.name());
+            int len = nm.length();
+            if (len >= plen + 7 && nm.endsWith(".raw")) {
+                if (strncmp(nm.c_str(), prefix, plen) == 0) {
+                    const char *numPart = nm.c_str() + plen;
+                    int numLen = len - plen - 4;  // без ".raw"
+                    if (numLen == 3 && isdigit(numPart[0]) && isdigit(numPart[1]) && isdigit(numPart[2])) {
+                        if (_galShotCnt < GAL_MAX_SHOTS) {
+                            snprintf(_galShots[_galShotCnt++], 95,
+                                     "/Screenshots/%s", nm.c_str());
+                        }
+                    }
+                }
+            }
+        }
+        f = dir.openNextFile();
+    }
+    dir.close();
+    // Сортировка по имени файла = по номеру
+    for (int i = 0; i < _galShotCnt - 1; i++)
+        for (int j = i + 1; j < _galShotCnt; j++)
+            if (strcmp(_galShots[i], _galShots[j]) > 0) {
+                char tmp[96]; strcpy(tmp, _galShots[i]);
+                strcpy(_galShots[i], _galShots[j]); strcpy(_galShots[j], tmp);
+            }
+}
+
+// ── Копирование скриншота как обложки ────────────────────────────────────────
+static bool _galSetAsCover(const char *shotPath, const char *gameName) {
+    char coverPath[96];
+    snprintf(coverPath, sizeof(coverPath), "/Screenshots/%s.raw", gameName);
+    File src = SD.open(shotPath, FILE_READ);
+    if (!src) return false;
+    SD.remove(coverPath);
+    File dst = SD.open(coverPath, FILE_WRITE);
+    if (!dst) { src.close(); return false; }
+    uint8_t buf[512]; int nr;
+    while ((nr = src.read(buf, sizeof(buf))) > 0) dst.write(buf, nr);
+    dst.flush(); src.close(); dst.close();
+    return true;
+}
+
+// ── Диалог «Установить как обложку?» ─────────────────────────────────────────
+static bool _galConfirmCover(const char *gameName) {
+    const Theme565& t = getTheme();
+    const int PX = 10, PY = 65, PW = 300, PH = 100;
+    const int BW = 130, BH = 26, BY = PY + 62;
+    lcd.fillRoundRect(PX, PY, PW, PH, 8, t.header);
+    lcd.drawRoundRect(PX, PY, PW, PH, 8, t.accent);
+    fmd(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.accent);
+    lcd.drawString("Set as cover art?", SCREEN_W / 2, PY + 18);
+    String gn = String(gameName); if (gn.length() > 26) gn = gn.substring(0, 24) + "..";
+    fsm(); lcd.setTextColor(t.textPri);
+    lcd.drawString(gn.c_str(), SCREEN_W / 2, PY + 38);
+    lcd.fillRoundRect(PX + 8,           BY, BW, BH, 6, t.ok);
+    lcd.fillRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, t.selected);
+    fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("YES - Set cover", PX + 8 + BW / 2,        BY + BH / 2);
+    lcd.setTextColor(t.textSec);
+    lcd.drawString("NO - Cancel",     PX + PW - 8 - BW / 2,  BY + BH / 2);
+    delay(300);
+    uint32_t until = millis() + 8000;
+    while (millis() < until) {
+        if (touch.isTouched()) {
+            delay(40); int tx = 0, ty = 0; touch.getXY(tx, ty);
+            if (ty >= BY && ty < BY + BH) {
+                if (tx >= PX + 8 && tx < PX + 8 + BW) return true;
+                return false;
+            }
+            return false;
+        }
+        buttons.update();
+        uint8_t btn = buttons.applyBtnMap(buttons.readNew());
+        if (btn & BTN_A)             return true;
+        if (btn & (BTN_B | BTN_SEL)) return false;
+        delay(20);
+    }
+    return false;
+}
+
+// ── Отрисовка ─────────────────────────────────────────────────────────────────
+
+static void _galDrawHeader(const char *title, int count, bool backArrow) {
+    const Theme565& t = getTheme();
+    lcd.fillRect(0, 0, SCREEN_W, M_HDR_H, t.header);
+    lcd.drawFastHLine(0, M_HDR_H - 1, SCREEN_W, t.accent);
+    fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textPri);
+    if (backArrow) {
+        lcd.setTextDatum(ML_DATUM);
+        lcd.drawString("<", 6, M_HDR_H / 2);
+        lcd.setTextDatum(MC_DATUM);
+    }
+    lcd.drawString(title, SCREEN_W / 2, M_HDR_H / 2);
+    if (count >= 0) {
+        char badge[8]; snprintf(badge, sizeof(badge), "%d", count);
+        fsm(); lcd.setTextDatum(MR_DATUM); lcd.setTextColor(t.accent);
+        lcd.drawString(badge, SCREEN_W - 8, M_HDR_H / 2);
+    }
+}
+
+static void _galDrawFooter(const char *leftHint, const char *rightHint) {
+    const Theme565& t = getTheme();
+    int by = M_DPAD_Y;
+    lcd.fillRect(0, by, SCREEN_W, M_BAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, t.accent);
+    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
+    lcd.drawString(leftHint,  8,            by + M_BAR_H / 2);
+    lcd.setTextDatum(MR_DATUM);
+    lcd.drawString(rightHint, SCREEN_W - 8, by + M_BAR_H / 2);
+}
+
+// Рисует одну строку в галерейном списке
+static void _galDrawRow(int slot, bool sel, const char *label, const char *badge) {
+    const Theme565& t = getTheme();
+    int y  = M_HDR_H + slot * GAL_ROW_H;
+    int cy = y + GAL_ROW_H / 2;
+    uint16_t bg = sel ? t.selected : ((slot % 2) ? t.rowOdd : t.rowEven);
+    lcd.fillRect(0, y, M_LIST_W - 1, GAL_ROW_H, bg);
+    if (slot < GAL_ROWS - 1)
+        lcd.drawFastHLine(0, y + GAL_ROW_H - 1, M_LIST_W - 1, t.header);
+    uint16_t tc = sel ? (t.selText ? t.selText : (uint16_t)COL_WHITE) : t.textPri;
+    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(tc);
+    // Метка обрезается; если есть счётчик — оставляем место
+    int maxLen = badge ? 14 : 17;
+    String lbl_s = String(label);
+    if ((int)lbl_s.length() > maxLen) lbl_s = lbl_s.substring(0, maxLen - 2) + "..";
+    lcd.drawString(lbl_s.c_str(), 8, cy);
+    if (badge) {
+        lcd.setTextDatum(MR_DATUM); lcd.setTextColor(sel ? tc : t.textSec);
+        lcd.drawString(badge, M_LIST_W - 6, cy);
+    }
+}
+
+// ── Уровень 0: список игр ────────────────────────────────────────────────────
+
+static void _galDrawGamesLevel() {
+    const Theme565& t = getTheme();
+    lcd.fillScreen(t.bg);
+    _galDrawHeader("GALLERY", _galGameCnt, false);
+    // Правая панель — превью выбранной игры
+    lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
+    lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
+    if (_galGameCnt > 0) {
+        char covPath[96];
+        snprintf(covPath, sizeof(covPath), "/Screenshots/%s.raw", _galGames[_galGameSel]);
+        _drawRawFile(covPath, M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
+        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+        lcd.drawString(_galGames[_galGameSel], M_PANEL_X + M_PANEL_W / 2, M_INFO_Y + 12);
+    }
+    // Список игр
+    int visible = min(_galGameCnt - _galGameOff, GAL_ROWS);
+    for (int s = 0; s < GAL_ROWS; s++) {
+        int idx = _galGameOff + s;
+        if (idx >= _galGameCnt) {
+            lcd.fillRect(0, M_HDR_H + s * GAL_ROW_H, M_LIST_W - 1, GAL_ROW_H,
+                         (s % 2) ? t.rowOdd : t.rowEven);
+            continue;
+        }
+        // Подсчёт снимков для этой игры (кэш не нужен — список маленький)
+        char badge[6] = "";
+        // Не сканируем здесь — слишком медленно; показываем просто имя
+        _galDrawRow(s, idx == _galGameSel, _galGames[idx], nullptr);
+    }
+    (void)visible;
+    _galDrawFooter("B: Back", "A: Open");
+}
+
+// ── Уровень 1: список скриншотов ─────────────────────────────────────────────
+
+static void _galDrawShotsLevel() {
+    const Theme565& t = getTheme();
+    lcd.fillScreen(t.bg);
+    // Заголовок с именем игры
+    char hdr[52];
+    snprintf(hdr, sizeof(hdr), "< %s", _galGames[_galGameSel]);
+    _galDrawHeader(hdr, _galShotCnt, true);
+    // Разделитель и правая панель
+    lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
+    lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
+    // Превью выбранного скриншота
+    if (_galShotCnt > 0)
+        _drawRawFile(_galShots[_galShotSel],
+                     M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
+    // Список скриншотов
+    for (int s = 0; s < GAL_ROWS; s++) {
+        int idx = _galShotOff + s;
+        if (idx >= _galShotCnt) {
+            lcd.fillRect(0, M_HDR_H + s * GAL_ROW_H, M_LIST_W - 1, GAL_ROW_H,
+                         (s % 2) ? t.rowOdd : t.rowEven);
+            continue;
+        }
+        // Имя из пути: "/Screenshots/Name_001.raw" → "Shot 001"
+        const char *fn = strrchr(_galShots[idx], '/');
+        fn = fn ? fn + 1 : _galShots[idx];
+        // Берём последние 7 символов файла (NNN.raw) → номер
+        int fnLen = strlen(fn);
+        char label[24] = "Shot ???";
+        if (fnLen >= 7) snprintf(label, sizeof(label), "Shot %c%c%c", fn[fnLen-7], fn[fnLen-6], fn[fnLen-5]);
+        _galDrawRow(s, idx == _galShotSel, label, nullptr);
+    }
+    _galDrawFooter("B: Back", "A: Fullscreen");
+}
+
+// ── Уровень 2: полный экран ───────────────────────────────────────────────────
+
+static void _galDrawFullscreen() {
+    if (_galShotCnt == 0) return;
+    // Рисуем скриншот на весь экран
+    _drawRawFile(_galShots[_galShotSel], 0, 0, SCREEN_W, SCREEN_H, false);
+    // Нижняя панель-подсказка
+    const Theme565& t = getTheme();
+    lcd.fillRect(0, SCREEN_H - 28, SCREEN_W, 28, 0x0000u);
+    lcd.fillRect(0, SCREEN_H - 28, SCREEN_W, 1, t.accent);
+    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("STA: Set cover", 8, SCREEN_H - 14);
+    lcd.setTextDatum(MR_DATUM); lcd.setTextColor(t.textSec);
+    lcd.drawString("B: Back", SCREEN_W - 8, SCREEN_H - 14);
+}
+
+// ── Частичное обновление правой панели (уровни 0 и 1) ───────────────────────
+
+static void _galUpdatePanel() {
+    const Theme565& t = getTheme();
+    lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
+    if (_galLevel == 0 && _galGameCnt > 0) {
+        char covPath[96];
+        snprintf(covPath, sizeof(covPath), "/Screenshots/%s.raw", _galGames[_galGameSel]);
+        _drawRawFile(covPath, M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
+        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+        lcd.drawString(_galGames[_galGameSel], M_PANEL_X + M_PANEL_W / 2, M_INFO_Y + 12);
+    } else if (_galLevel == 1 && _galShotCnt > 0) {
+        _drawRawFile(_galShots[_galShotSel],
+                     M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
+    }
+}
+
+// ── Переключение строки списка с частичной перерисовкой ──────────────────────
+
+static void _galMoveSel(int delta) {
+    if (_galLevel == 0) {
+        if (_galGameCnt == 0) return;
+        int oldSel = _galGameSel;
+        _galGameSel = constrain(_galGameSel + delta, 0, _galGameCnt - 1);
+        if (_galGameSel == oldSel) return;
+        // Прокрутка окна
+        if (_galGameSel < _galGameOff) _galGameOff = _galGameSel;
+        if (_galGameSel >= _galGameOff + GAL_ROWS) _galGameOff = _galGameSel - GAL_ROWS + 1;
+        // Перерисовываем затронутые строки
+        int olds = oldSel - _galGameOff, news = _galGameSel - _galGameOff;
+        if (olds >= 0 && olds < GAL_ROWS) {
+            const char *lbl = _galGames[oldSel];
+            _galDrawRow(olds, false, lbl, nullptr);
+        }
+        if (news >= 0 && news < GAL_ROWS) {
+            _galDrawRow(news, true, _galGames[_galGameSel], nullptr);
+        }
+        _galUpdatePanel();
+    } else if (_galLevel == 1) {
+        if (_galShotCnt == 0) return;
+        int oldSel = _galShotSel;
+        _galShotSel = constrain(_galShotSel + delta, 0, _galShotCnt - 1);
+        if (_galShotSel == oldSel) return;
+        if (_galShotSel < _galShotOff) _galShotOff = _galShotSel;
+        if (_galShotSel >= _galShotOff + GAL_ROWS) _galShotOff = _galShotSel - GAL_ROWS + 1;
+        int olds = oldSel - _galShotOff, news = _galShotSel - _galShotOff;
+        // Имя из пути для старой и новой строки
+        auto shotLabel = [](int idx, char *buf, int bufsz) {
+            const char *fn = strrchr(_galShots[idx], '/');
+            fn = fn ? fn + 1 : _galShots[idx];
+            int fnl = strlen(fn);
+            if (fnl >= 7) snprintf(buf, bufsz, "Shot %c%c%c", fn[fnl-7], fn[fnl-6], fn[fnl-5]);
+            else          snprintf(buf, bufsz, "Shot ???");
+        };
+        char lbl[24];
+        if (olds >= 0 && olds < GAL_ROWS) { shotLabel(oldSel, lbl, sizeof(lbl)); _galDrawRow(olds, false, lbl, nullptr); }
+        if (news >= 0 && news < GAL_ROWS) { shotLabel(_galShotSel, lbl, sizeof(lbl)); _galDrawRow(news, true, lbl, nullptr); }
+        _galUpdatePanel();
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// PUBLIC GALLERY API
+// ══════════════════════════════════════════════════════════════
+
+void galleryOpen() {
+    _galLevel = 0;
+    _galGameSel = 0; _galGameOff = 0;
+    _galShotSel = 0; _galShotOff = 0;
+    _galScanGames();
+    _galDrawGamesLevel();
+}
+
+void galleryDraw() {
+    if      (_galLevel == 0) _galDrawGamesLevel();
+    else if (_galLevel == 1) _galDrawShotsLevel();
+    else if (_galLevel == 2) _galDrawFullscreen();
+}
+
+// Возвращает BTN_B когда пользователь вышел из галереи
+uint8_t galleryNavBtn(uint8_t btn) {
+    if (_galLevel == 2) {
+        // Полный экран: STA = установить обложку, B/SEL = назад
+        if (btn & BTN_STA) {
+            if (_galConfirmCover(_galGames[_galGameSel])) {
+                _galSetAsCover(_galShots[_galShotSel], _galGames[_galGameSel]);
+                _coverLastRom = -2;  // сбрасываем кэш обложки в меню
+            }
+            _galDrawFullscreen();
+            return 0;
+        }
+        if (btn & (BTN_B | BTN_SEL)) {
+            _galLevel = 1; _galDrawShotsLevel(); return 0;
+        }
+        return 0;
+    }
+    if (_galLevel == 1) {
+        if (btn & BTN_UP)   { _galMoveSel(-1); return 0; }
+        if (btn & BTN_DOWN) { _galMoveSel(+1); return 0; }
+        if (btn & (BTN_A | BTN_STA)) {
+            _galLevel = 2; _galDrawFullscreen(); return 0;
+        }
+        if (btn & (BTN_B | BTN_SEL)) {
+            _galLevel = 0; _galDrawGamesLevel(); return 0;
+        }
+        return 0;
+    }
+    // Уровень 0
+    if (btn & BTN_UP)   { _galMoveSel(-1); return 0; }
+    if (btn & BTN_DOWN) { _galMoveSel(+1); return 0; }
+    if (btn & (BTN_A | BTN_STA)) {
+        if (_galGameCnt == 0) return 0;
+        _galShotSel = 0; _galShotOff = 0;
+        _galScanShots(_galGames[_galGameSel]);
+        _galLevel = 1; _galDrawShotsLevel(); return 0;
+    }
+    if (btn & (BTN_B | BTN_SEL)) return BTN_B;  // выход из галереи
+    return 0;
+}
+
+uint8_t galleryHandleTouch(int x, int y) {
+    if (_galLevel == 2) {
+        // Нижняя панель (y >= SCREEN_H-28):
+        //   левая половина → Set cover  |  правая половина → Back
+        if (y >= SCREEN_H - 28) {
+            if (x < SCREEN_W / 2) {
+                // Установить обложку
+                if (_galConfirmCover(_galGames[_galGameSel])) {
+                    _galSetAsCover(_galShots[_galShotSel], _galGames[_galGameSel]);
+                    _coverLastRom = -2;
+                }
+                _galDrawFullscreen();
+            } else {
+                // Назад
+                _galLevel = 1; _galDrawShotsLevel();
+            }
+            return 0;
+        }
+        // Тап по картинке → назад
+        _galLevel = 1; _galDrawShotsLevel(); return 0;
+    }
+    if (_galLevel == 1) {
+        if (y < M_HDR_H) {
+            // Тап по заголовку (стрелка назад)
+            if (x < 30) { _galLevel = 0; _galDrawGamesLevel(); return 0; }
+            return 0;
+        }
+        if (y >= M_DPAD_Y) return 0;
+        if (x >= M_PANEL_X) {
+            // Тап по правой панели → полный экран
+            if (_galShotCnt > 0) { _galLevel = 2; _galDrawFullscreen(); } return 0;
+        }
+        int slot = (y - M_HDR_H) / GAL_ROW_H;
+        int idx  = _galShotOff + slot;
+        if (idx >= _galShotCnt) return 0;
+        if (idx == _galShotSel) {
+            _galLevel = 2; _galDrawFullscreen(); return 0;
+        }
+        int oldSel = _galShotSel; _galShotSel = idx;
+        if (_galShotSel < _galShotOff) _galShotOff = _galShotSel;
+        if (_galShotSel >= _galShotOff + GAL_ROWS) _galShotOff = _galShotSel - GAL_ROWS + 1;
+        char lbl[24];
+        auto shotLabel = [](int i, char *b, int bs) {
+            const char *fn = strrchr(_galShots[i], '/'); fn = fn ? fn + 1 : _galShots[i];
+            int fnl = strlen(fn);
+            if (fnl >= 7) snprintf(b, bs, "Shot %c%c%c", fn[fnl-7], fn[fnl-6], fn[fnl-5]);
+            else          snprintf(b, bs, "Shot ???");
+        };
+        int olds = oldSel - _galShotOff;
+        int news = _galShotSel - _galShotOff;
+        if (olds >= 0 && olds < GAL_ROWS) { shotLabel(oldSel, lbl, sizeof(lbl)); _galDrawRow(olds, false, lbl, nullptr); }
+        if (news >= 0 && news < GAL_ROWS) { shotLabel(_galShotSel, lbl, sizeof(lbl)); _galDrawRow(news, true, lbl, nullptr); }
+        _galUpdatePanel();
+        return 0;
+    }
+    // Уровень 0
+    if (y < M_HDR_H || y >= M_DPAD_Y) return 0;
+    if (x >= M_PANEL_X) return 0;
+    int slot = (y - M_HDR_H) / GAL_ROW_H;
+    int idx  = _galGameOff + slot;
+    if (idx >= _galGameCnt) return 0;
+    if (idx == _galGameSel) {
+        // Двойной тап = открыть список скриншотов
+        _galShotSel = 0; _galShotOff = 0;
+        _galScanShots(_galGames[_galGameSel]);
+        _galLevel = 1; _galDrawShotsLevel(); return 0;
+    }
+    int oldSel = _galGameSel; _galGameSel = idx;
+    if (_galGameSel < _galGameOff) _galGameOff = _galGameSel;
+    if (_galGameSel >= _galGameOff + GAL_ROWS) _galGameOff = _galGameSel - GAL_ROWS + 1;
+    int olds = oldSel - _galGameOff, news = _galGameSel - _galGameOff;
+    if (olds >= 0 && olds < GAL_ROWS) _galDrawRow(olds, false, _galGames[oldSel], nullptr);
+    if (news >= 0 && news < GAL_ROWS) _galDrawRow(news, true,  _galGames[_galGameSel], nullptr);
+    _galUpdatePanel();
     return 0;
 }

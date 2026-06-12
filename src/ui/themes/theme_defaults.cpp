@@ -58,25 +58,39 @@ static void def_drawMenuBar() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// СТРОКА ROM
+// СТРОКА ROM  (compact layout v14.72: M_ROW_H=24, M_LIST_W=196)
 // ════════════════════════════════════════════════════════════════════
 static void def_drawRomRow(int romIdx, int slot, bool sel) {
     const Theme565& t = getTheme();
-    int y  = HDR_H + slot * ROW_H;
-    int cy = y + ROW_H / 2;
+    int y  = M_HDR_H + slot * M_ROW_H;
+    int cy = y + M_ROW_H / 2;
     uint16_t stc = t.selText ? t.selText : TH_WHITE;
-    String name  = th_trimName(sdMgr.get(romIdx).name, sel ? 24 : 26);
+
+    bool isFav  = GameStats::favCheck(sdMgr.get(romIdx).path.c_str());
+    uint16_t sc = isFav ? TH_GOLD : (uint16_t)0x2965u;  // золото : тёмно-серый
+
+    // Максимальная длина имени: оставляем 18px для звезды
+    int maxLen = sel ? 16 : 18;
+    String name = th_trimName(sdMgr.get(romIdx).name, maxLen);
 
     if (sel) {
-        lcd.fillRoundRect(3, y + 2, SCREEN_W - 6, ROW_H - 4, 6, t.selected);
-        lcd.fillTriangle(14, cy - 6, 14, cy + 6, 23, cy, TH_GOLD);
-        th_fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(stc);
-        lcd.drawString(name.c_str(), 28, cy);
+        lcd.fillRoundRect(1, y + 1, M_LIST_W - 18, M_ROW_H - 2, 4, t.selected);
+        // Треугольник-плей
+        lcd.fillTriangle(7, cy - 5, 7, cy + 5, 15, cy, TH_GOLD);
+        th_fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(stc);
+        lcd.drawString(name.c_str(), 19, cy);
     } else {
-        if (slot > 0) lcd.drawFastHLine(10, y, SCREEN_W - 20, TH_SEP);
-        th_fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
-        lcd.drawString(name.c_str(), 12, cy);
+        if (slot > 0) lcd.drawFastHLine(4, y, M_LIST_W - 22, TH_SEP);
+        th_fsm(); lcd.setTextColor(t.textPri); lcd.setTextDatum(ML_DATUM);
+        lcd.drawString(name.c_str(), 5, cy);
     }
+
+    // Звёздочка (6-конечная: два треугольника) — правый край строки
+    int sx = M_LIST_W - 11;
+    // Верхний треугольник ▲
+    lcd.fillTriangle(sx, cy - 4, sx - 3, cy + 2, sx + 3, cy + 2, sc);
+    // Нижний треугольник ▼
+    lcd.fillTriangle(sx, cy + 3, sx - 3, cy - 2, sx + 3, cy - 2, sc);
 }
 
 // ════════════════════════════════════════════════════════════════════

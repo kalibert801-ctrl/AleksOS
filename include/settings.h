@@ -54,6 +54,16 @@ typedef struct {
     char          wifiSSID[64]; // сохранённая точка доступа
     char          wifiPass[64]; // пароль
     unsigned char wifiEnabled;  // авто-подключение при старте
+    // ── Эмулятор ─────────────────────────────────────────────
+    unsigned char turboEnabled; // 0=off, 1=on — турбо режим кнопок
+    unsigned char turboMask;    // битовая маска турбо-кнопок (BTN_SEL=0x04=A, BTN_STA=0x08=B)
+    unsigned char nesPalette;   // 0=Default, 1=Nestopia, 2=FCEUX, 3=Virtual
+    // ── Game Genie ───────────────────────────────────────────
+    // Коды применяются к ROM при запуске через патч CPU памяти.
+    // 6-символьный код → адрес+значение; 8-символьный → адрес+значение+сравнение.
+    // Максимум 8 кодов, хранятся как 8-байтные строки (7 символов + \0).
+    char          ggCodes[8][8];  // 8 слотов по 7 символов кода Game Genie
+    unsigned char ggEnabled;      // 1 = применять коды при запуске
 } Settings;
 
 /* ── Цвета темы RGB565 ──────────────────────────────────────────── */
@@ -105,6 +115,11 @@ inline void settingsDefault(Settings &s) {
     s.wifiSSID[0]   = '\0';
     s.wifiPass[0]   = '\0';
     s.wifiEnabled   = 0;
+    s.turboEnabled  = 0;
+    s.turboMask     = 0x04;    // по умолчанию турбо только на кнопке A
+    s.nesPalette    = 0;       // палитра по умолчанию (nofrendo)
+    s.ggEnabled     = 0;
+    memset(s.ggCodes, 0, sizeof(s.ggCodes));
 }
 
 #endif /* __cplusplus */
