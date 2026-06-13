@@ -77,7 +77,7 @@ void GameStats::load() {
     if (!f) return;
 
     // Файл может быть большим из-за времени игры — используем Dynamic doc
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(8192);  // 4096 могло молча усекать при большом числе ROM
     if (deserializeJson(doc, f)) { f.close(); return; }
     f.close();
 
@@ -98,7 +98,7 @@ void GameStats::load() {
 }
 
 void GameStats::save() {
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(8192);  // 4096 могло молча усекать при большом числе ROM
 
     JsonArray ra = doc.createNestedArray("recent");
     for (const auto &r : _recent) ra.add(r);

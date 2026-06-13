@@ -12,7 +12,7 @@ static void iconChip(int cx,int cy,uint16_t c);
 static void iconSave(int cx,int cy,uint16_t c);
 static void iconClock2(int cx,int cy,uint16_t c);
 // Вспомогательные из showRomInfo-секции (нужны в новом меню)
-static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint);
+static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint = true);
 static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh);
 static void _uiRomName(const char *path, char *out, size_t maxLen);
 static String _fmtPlaytime(uint32_t secs);
@@ -332,6 +332,7 @@ static void _menuBuildFavList() {
 }
 static void _menuBuildSortedList() {
     int n = sdMgr.count();
+    if (n > 256) n = 256;   // guard: _sortIdx is [256]
     _sortCount = n;
     for (int i = 0; i < n; i++) _sortIdx[i] = i;
     if (_sortMode == 0) return;
@@ -627,7 +628,7 @@ static uint8_t _menuDotMenu() {
             int tx = 0, ty = 0;
             touch.getXY(tx, ty);
             if (tx >= PX && tx < PX + PW && ty >= PY && ty < PY + PH)
-                choice = (ty - PY - 1) / RH;
+                choice = min((ty - PY - 1) / RH, 3);  // clamp: max valid index = 3
             else
                 choice = -2;  // тап вне меню = закрыть
         }
@@ -3651,7 +3652,9 @@ static void _galScanGames() {
                         if (strcmp(_galGames[i], game.c_str()) == 0) { found = true; break; }
                     }
                     if (!found && _galGameCnt < GAL_MAX_GAMES) {
-                        strncpy(_galGames[_galGameCnt++], game.c_str(), 47);
+                        strncpy(_galGames[_galGameCnt], game.c_str(), 47);
+                        _galGames[_galGameCnt][47] = '\0';  // guarantee null-termination
+                        _galGameCnt++;
                     }
                 }
             }
