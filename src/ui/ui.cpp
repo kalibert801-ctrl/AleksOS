@@ -973,7 +973,7 @@ static String _fmtPlaytime(uint32_t secs) {
 // Пиксели в файле pre-inverted (~rgb565). Делаем un-invert через pushImage().
 // noArtHint — показывать подсказку если файл не найден.
 static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
-                         bool noArtHint = true) {
+                         bool noArtHint) {
     lcd.fillRect(dx, dy, dw, dh, 0x18C3);
     lcd.drawRect(dx, dy, dw, dh, 0x4208);
 
