@@ -805,6 +805,7 @@ void menuTimeTick() {
     if (ms - _batLastMs >= 5000u || _batLastMs == 0) {
         _batLastMs = ms;
         batteryUpdate();
+        batteryStatsAddTime(5);  // +5 сек к session + total (0 если идёт зарядка)
     }
 
     if (m == _menuLastMin) return;  // время не изменилось — перерисовывать не надо
@@ -1407,7 +1408,8 @@ void showRomInfo(int idx) {
 
 static const char *_catName[] = {
     "Display", "Audio", "Appearance", "System", "Controls", "Info",
-    "Debug"   // cat=6: виртуальная — только для sub-экрана из System
+    "Debug",   // cat=6: виртуальная — открывается из System через gi=25
+    "Battery"  // cat=7: виртуальная — открывается из System через gi=33
 };
 
 // ── _catItems[][8]: максимум 8 пунктов на категорию ─────────────────────
@@ -1416,15 +1418,16 @@ static const char *_catName[] = {
 // gi=25 → открыть sub-экран Debug (cat=6 внутри)
 // gi=26 → OTA check (сигнал 0xA0 в main.cpp)
 static const int _catItems[][8] = {
-    { 0, 4, 7, -1, -1, -1, -1, -1 },          // Display
-    { 1, 14, 8, 9, -1, -1, -1, -1 },           // Audio
-    { 2, 3, 29, -1, -1, -1, -1, -1 },          // Appearance  (gi=29=NES Palette)
-    { 5, 6, 17, 18, 19, 24, 25, 26 },          // System
-    { 12, 13, 15, 16, 30, 31, 32, 28 },         // Controls  (gi=30=Turbo, gi=31=TurboMode, gi=32=GameGenie, gi=28=Pico)
-    { 10, 11, -1, -1, -1, -1, -1, -1 },        // Info
-    { 20, 21, 22, 23, -1, -1, -1, -1 },        // Debug (virtual sub-screen)
+    { 0, 4, 7, -1, -1, -1, -1, -1 },          // 0: Display
+    { 1, 14, 8, 9, -1, -1, -1, -1 },           // 1: Audio
+    { 2, 3, 29, -1, -1, -1, -1, -1 },          // 2: Appearance  (gi=29=NES Palette)
+    { 6, 17, 18, 19, 24, 25, 26, 33 },         // 3: System      (gi=33=Battery screen)
+    { 12, 13, 15, 16, 30, 31, 32, 28 },        // 4: Controls    (gi=30=Turbo, gi=31=TurboMode, gi=32=GG)
+    { 10, 11, -1, -1, -1, -1, -1, -1 },        // 5: Info
+    { 5, 20, 21, 22, 23, -1, -1, -1 },         // 6: Debug (virtual sub-screen; gi=5=showFPS moved here)
+    { -1, -1, -1, -1, -1, -1, -1, -1 },        // 7: Battery (virtual info screen, через gi=33)
 };
-#define CAT_COUNT 6  // в сетке видны только 0..5; cat=6 — виртуальная
+#define CAT_COUNT 6  // в сетке видны только 0..5; cat=6,7 — виртуальные
 
 static int _prevCat = -1;   // для возврата из Debug sub-экрана в System
 
@@ -1528,6 +1531,13 @@ static String settingValue(int gi) {
             for (int i = 0; i < 8; i++) if (settings.ggCodes[i][0]) n++;
             if (!settings.ggEnabled) return "Off";
             static char buf[16]; snprintf(buf, sizeof(buf), "On (%d)", n); return buf;
+        }
+        case 33: {  // Battery screen
+            int pct = batteryPercent();
+            if (pct < 0) return "N/A >";
+            static char buf[12];
+            snprintf(buf, sizeof(buf), "%d%% >", pct);
+            return buf;
         }
         case 31: {  // Turbo Mode
             if (settings.turboMask == 0x04) return "A";
@@ -1893,15 +1903,70 @@ static void drawInfoSectionIcon(int secIdx, int cx, int cy, uint16_t c) {
     }
 }
 
-static void drawInfoScreen() {
+// ── Battery info screen (cat=7) ─────────────────────────────────────────────
+// Заполняет _infoRows статистикой батареи (разделяет буфер с buildInfoRows).
+static void buildBatteryRows() {
+    _infoCount = 0; _infoScroll = 0;
+    auto d = [&](const char *t){ _infoRows[_infoCount++] = {t,"",0,true}; };
+    auto r = [&](const char *l, String v, uint16_t c=0){ _infoRows[_infoCount++]={l,v,c,false}; };
+
+    // ── Текущий заряд ─────────────────────────────────────────
+    d("CURRENT");
+    int   pct   = batteryPercent();
+    float vbat  = batteryVoltage();
+
+    // Процент
+    char pctBuf[12];
+    if (pct >= 0) snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
+    else          strncpy(pctBuf, "N/A", sizeof(pctBuf));
+    uint16_t pctCol = (pct < 0)   ? (uint16_t)0xAD55u :
+                      (pct <= 15) ? (uint16_t)0xF800u  :
+                      (pct <= 40) ? (uint16_t)0xFD20u  : (uint16_t)0x4EF0u;
+    r("Charge:", pctBuf, pctCol);
+
+    // Напряжение
+    char vBuf[12];
+    if (vbat > 0.1f) snprintf(vBuf, sizeof(vBuf), "%.2f V", vbat);
+    else             strncpy(vBuf, "N/A", sizeof(vBuf));
+    r("Voltage:", vBuf);
+
+    // Статус
+    const char *statusStr = batteryCharging()        ? "Charging"   :
+                            (pct < 0)                ? "No sensor"  :
+                            (pct <= 15)              ? "Low!"       : "OK";
+    uint16_t stCol = batteryCharging()               ? (uint16_t)0x07FFu  :
+                     (pct >= 0 && pct <= 15)         ? (uint16_t)0xF800u  :
+                                                       (uint16_t)0x4EF0u;
+    r("Status:", statusStr, stCol);
+
+    // ── Время работы ─────────────────────────────────────────
+    d("RUNTIME");
+    BattStats st = batteryStatsGet();
+
+    auto fmtTime = [](uint32_t sec) -> String {
+        if (sec < 60)    { char b[16]; snprintf(b,16,"%ds",sec);                    return b; }
+        if (sec < 3600)  { char b[16]; snprintf(b,16,"%dm %ds",sec/60,sec%60);      return b; }
+        if (sec < 86400) { char b[16]; snprintf(b,16,"%dh %dm",sec/3600,(sec%3600)/60); return b; }
+        char b[16]; snprintf(b,16,"%dd %dh",sec/86400,(sec%86400)/3600); return b;
+    };
+
+    r("Since charge:", fmtTime(st.sessionSec));
+    r("Total runtime:", fmtTime(st.totalSec));
+
+    // ── История зарядок ───────────────────────────────────────
+    d("HISTORY");
+    r("Charge cycles:", String(st.cycles), st.cycles > 0 ? (uint16_t)0x4EF0u : (uint16_t)0xAD55u);
+}
+
+static void drawInfoScreen(const char *title = "INFO") {
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
 
-    // ── Заголовок (золотой, как в других категориях) ──────────
+    // ── Заголовок ─────────────────────────────────────────────
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
     flg(); lcd.setTextDatum(MC_DATUM);
     lcd.setTextColor((uint16_t)COL_GOLD);
-    lcd.drawString("INFO", SCREEN_W/2, HDR_H/2);
+    lcd.drawString(title, SCREEN_W/2, HDR_H/2);
     lcd.drawFastHLine(0, HDR_H,   SCREEN_W, t.accent);
     lcd.drawFastHLine(0, HDR_H+1, SCREEN_W, t.accent);
 
@@ -2158,6 +2223,15 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
         case 28:            iconChip(cx,cy,c); break;    // Pico version (read-only)
         case 29:                iconDiamond(cx,cy,c); break; // NES Palette
         case 30: case 31: case 32: iconGamepad(cx,cy,c); break; // Turbo / Game Genie
+        case 33: {  // Battery — мини-иконка батареи
+            lcd.drawRect(cx-7, cy-3, 13, 7, c);
+            lcd.fillRect(cx+6, cy-1, 2, 3, c);
+            int pct = batteryPercent();
+            int fw = (pct > 0) ? (pct * 10 + 50) / 100 : 0;
+            if (fw > 10) fw = 10;
+            if (fw > 0) lcd.fillRect(cx-6, cy-2, fw, 5, c);
+            break;
+        }
         default:            iconInfo(cx,cy,c); break;
     }
 }
@@ -2185,11 +2259,13 @@ static const char* getLabelForGi(int gi) {
         case 30: return "Turbo Buttons";
         case 31: return "Turbo Mode";
         case 32: return "Game Genie";
+        case 33: return "Battery";
     }
     return "";
 }
 static void drawCategoryDetail() {
-    if (_settingsCat == 5) { buildInfoRows(); drawInfoScreen(); return; }
+    if (_settingsCat == 5) { buildInfoRows();   drawInfoScreen("INFO");    return; }
+    if (_settingsCat == 7) { buildBatteryRows(); drawInfoScreen("BATTERY"); return; }
 
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
@@ -2323,8 +2399,8 @@ static uint8_t handleCategoryDetail(int x, int y) {
     if (y >= DPAD_Y) {
         if (x < 80) {
             // BACK
-            if (_settingsCat == 6) {
-                // Debug sub-экран → возврат в родительскую категорию (System)
+            if (_settingsCat == 6 || _settingsCat == 7) {
+                // Debug/Battery sub-экран → возврат в родительскую категорию (System)
                 _settingsCat = (_prevCat >= 0) ? _prevCat : -1;
                 _prevCat = -1;
                 _detailOffset = 0;  // drawCategoryDetail auto-scrolls to _catItemIdx
@@ -2337,8 +2413,8 @@ static uint8_t handleCategoryDetail(int x, int y) {
             }
             return 0;
         }
-        // Info: скролл в правой половине
-        if (_settingsCat == 5) {
+        // Info / Battery: скролл в правой половине
+        if (_settingsCat == 5 || _settingsCat == 7) {
             if (x < SCREEN_W/2) infoScrollBy(-INFO_ROW_H * 2);
             else                 infoScrollBy( INFO_ROW_H * 2);
         }
@@ -2348,11 +2424,10 @@ static uint8_t handleCategoryDetail(int x, int y) {
     if (y < HDR_H) return 0;
 
     // ── Дебаунс: игнорируем тач 200 мс после открытия категории ──────────
-    // Предотвращает «утечку» тапа с сетки в детальный экран
     if (millis() - _detailOpenedMs < 200) return 0;
 
-    // Info — скролл тапом по содержимому
-    if (_settingsCat == 5) {
+    // Info / Battery — скролл тапом по содержимому
+    if (_settingsCat == 5 || _settingsCat == 7) {
         infoScrollBy(y < (HDR_H + DPAD_Y)/2 ? -INFO_ROW_H*2 : INFO_ROW_H*2);
         return 0;
     }
@@ -2380,10 +2455,10 @@ static uint8_t handleCategoryDetail(int x, int y) {
         if (gi == 24) return 0x80;   // WiFi → открыть WiFi менеджер
         if (gi == 26) return 0xA0;   // Check Update → OTA screen
         if (gi == 32) return 0xB0;   // Game Genie → открыть GG экран
-        if (gi == 25) {
-            // Debug sub-экран — открываем кат=6 (виртуальный)
+        if (gi == 25 || gi == 33) {
+            // Debug (gi=25→cat=6) / Battery (gi=33→cat=7) — виртуальные sub-экраны
             _prevCat = _settingsCat;
-            _settingsCat = 6;
+            _settingsCat = (gi == 33) ? 7 : 6;
             _catItemIdx  = 0;
             _detailOffset = 0;
             _detailOpenedMs = millis();
@@ -2528,9 +2603,20 @@ uint8_t settingsNavBtn(uint8_t btn) {
         }
         if (btn & BTN_SEL) { _gridSelected = -1; return BTN_B; }  // SELECT = назад
     } else if (_settingsCat == 5) {
+        // Info — только прокрутка, BACK → сетка
         if (btn & BTN_UP)   infoScrollBy(-INFO_ROW_H * 3);
         if (btn & BTN_DOWN) infoScrollBy( INFO_ROW_H * 3);
         if (btn & BTN_SEL) { _settingsCat = -1; _gridSelected = -1; drawCategoryGrid(); }
+    } else if (_settingsCat == 7) {
+        // Battery info — только прокрутка, BACK → parent (System)
+        if (btn & BTN_UP)   infoScrollBy(-INFO_ROW_H * 3);
+        if (btn & BTN_DOWN) infoScrollBy( INFO_ROW_H * 3);
+        if (btn & BTN_SEL) {
+            _settingsCat = (_prevCat >= 0) ? _prevCat : -1;
+            _prevCat = -1;
+            if (_settingsCat >= 0) drawCategoryDetail();
+            else { _gridSelected = -1; drawCategoryGrid(); }
+        }
     } else if (_settingsCat == 6) {
         // Debug virtual sub-экран
         int n = catItemCount(6);
@@ -2560,8 +2646,9 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 24) return 0x80;  // open WiFi
             if (gi == 26) return 0xA0;  // OTA check
             if (gi == 32) return 0xB0;  // open Game Genie codes screen
-            if (gi == 25) {
-                _prevCat = _settingsCat; _settingsCat = 6;
+            if (gi == 25 || gi == 33) {
+                _prevCat = _settingsCat;
+                _settingsCat = (gi == 33) ? 7 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -2573,8 +2660,9 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 24) return 0x80;  // open WiFi
             if (gi == 26) return 0xA0;  // OTA check
             if (gi == 32) return 0xB0;  // open Game Genie
-            if (gi == 25) {
-                _prevCat = _settingsCat; _settingsCat = 6;
+            if (gi == 25 || gi == 33) {
+                _prevCat = _settingsCat;
+                _settingsCat = (gi == 33) ? 7 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -2587,8 +2675,9 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 24) return 0x80;
             if (gi == 26) return 0xA0;
             if (gi == 32) return 0xB0;  // open Game Genie
-            if (gi == 25) {
-                _prevCat = _settingsCat; _settingsCat = 6;
+            if (gi == 25 || gi == 33) {
+                _prevCat = _settingsCat;
+                _settingsCat = (gi == 33) ? 7 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }

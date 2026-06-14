@@ -172,7 +172,8 @@ void setup() {
     // ── Периферия ─────────────────────────────────────────────
     bootProgress(88, "Init audio...");
     audioInit();
-    batteryInit();   // ADC1 GPIO35, делитель 100k+100k (safe с WiFi)
+    batteryInit();       // ADC1 GPIO35, делитель 470k+470k (safe с WiFi)
+    batteryStatsLoad();  // загрузить session/total/cycles из /battery_stats.json
 
     bootProgress(93, "Init touch...");
     touch.init();
