@@ -153,6 +153,15 @@ void setup() {
         char buf[32];
         snprintf(buf, sizeof(buf), "Found %d ROMs", sdMgr.count());
         bootProgress(75, buf);
+
+        // ── Предгенерация thumbnail для обложек игр ───────────────────────
+        // При первом запуске генерирует .thm (27KB) для каждого .raw (150KB).
+        // На последующих загрузках — мгновенный возврат (все .thm уже есть).
+        uiPreCacheThumbnails([](int cur, int total) {
+            char msg[36];
+            snprintf(msg, sizeof(msg), "Cover art %d / %d", cur + 1, total);
+            bootProgress((uint8_t)(76 + (cur * 11) / (total > 0 ? total : 1)), msg);
+        });
     } else {
         ledSet(LED_RED);
         bootProgress(20, "SD error! No card?");

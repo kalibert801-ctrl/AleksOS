@@ -96,6 +96,13 @@ uint8_t fileMgrHandleTouch(int x, int y);
 uint8_t fileMgrNavBtn(uint8_t btn);
 int     fileMgrSelected();
 
+// -- Cover art thumbnail pre-cache ------------------------------------
+// Вызывать при загрузке (после sdMgr.init).
+// Для каждого ROM с .raw-обложкой без .thm-thumbnail — генерирует thumbnail.
+// onProgress(cur, total) вызывается перед каждой генерацией (0-based cur).
+// Если все thumbnail уже есть — возвращается мгновенно.
+void uiPreCacheThumbnails(void (*onProgress)(int cur, int total) = nullptr);
+
 // -- Game Genie codes screen -------------------------------------------
 // Access: gi=32 in Settings → Controls.
 // ggScreenNavBtn returns:

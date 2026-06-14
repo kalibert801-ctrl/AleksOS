@@ -1085,6 +1085,73 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
     heap_caps_free(dstBuf);
 }
 
+// ── Генерация thumbnail без отрисовки (для предзагрузки при буте) ─────────────
+// Читает .raw, масштабирует до tw×th, записывает .thm. Не трогает LCD.
+static void _generateThumbnail(const char *rawPath, const char *thmPath, int tw, int th) {
+    File f = SD.open(rawPath, FILE_READ);
+    if (!f) return;
+    uint8_t hdr[4] = {};
+    f.read(hdr, 4);
+    uint16_t srcW = (uint16_t)(hdr[0] | (hdr[1] << 8));
+    uint16_t srcH = (uint16_t)(hdr[2] | (hdr[3] << 8));
+    if (!srcW || !srcH || srcW > 400 || srcH > 300) { f.close(); return; }
+    uint32_t totalPx = (uint32_t)srcW * srcH;
+    uint16_t *buf = (uint16_t *)heap_caps_malloc(totalPx * 2, MALLOC_CAP_SPIRAM);
+    if (!buf || f.read((uint8_t *)buf, totalPx * 2) != (int)(totalPx * 2)) {
+        heap_caps_free(buf); f.close(); return;
+    }
+    f.close();
+    uint16_t *row = (uint16_t *)heap_caps_malloc(tw * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!row) { heap_caps_free(buf); return; }
+    SD.remove(thmPath);
+    File out = SD.open(thmPath, FILE_WRITE);
+    if (out) {
+        uint8_t ohdr[4] = { (uint8_t)tw, (uint8_t)(tw >> 8),
+                             (uint8_t)th, (uint8_t)(th >> 8) };
+        out.write(ohdr, 4);
+        for (int dy = 0; dy < th; dy++) {
+            int sy = (dy * (int)srcH) / th;
+            const uint16_t *sr = buf + sy * srcW;
+            for (int x = 0; x < tw; x++)
+                row[x] = sr[(x * (int)srcW) / tw];
+            out.write((uint8_t *)row, tw * 2);
+        }
+        out.flush(); out.close();
+    }
+    heap_caps_free(buf);
+    heap_caps_free(row);
+}
+
+// ── Публичная функция предзагрузки thumbnail при буте ─────────────────────────
+void uiPreCacheThumbnails(void (*onProgress)(int cur, int total)) {
+    int n = sdMgr.count();
+    if (n == 0) return;
+
+    // Быстрая проверка: есть ли вообще что генерировать
+    int needsGen = 0;
+    for (int i = 0; i < n; i++) {
+        char romName[64], thmPath[96], rawPath[96];
+        _uiRomName(sdMgr.get(i).path.c_str(), romName, sizeof(romName));
+        snprintf(rawPath, sizeof(rawPath), "/Screenshots/%s.raw", romName);
+        snprintf(thmPath, sizeof(thmPath), "/Screenshots/%s.thm", romName);
+        if (SD.exists(rawPath) && !SD.exists(thmPath)) needsGen++;
+    }
+    if (needsGen == 0) return;  // все thumbnail уже есть — мгновенный возврат
+
+    int done = 0;
+    for (int i = 0; i < n; i++) {
+        char romName[64], thmPath[96], rawPath[96];
+        _uiRomName(sdMgr.get(i).path.c_str(), romName, sizeof(romName));
+        snprintf(rawPath, sizeof(rawPath), "/Screenshots/%s.raw", romName);
+        snprintf(thmPath, sizeof(thmPath), "/Screenshots/%s.thm", romName);
+        if (!SD.exists(rawPath)) continue;   // нет обложки — пропуск
+        if ( SD.exists(thmPath)) continue;   // thumbnail уже есть — пропуск
+        if (onProgress) onProgress(done, needsGen);
+        _generateThumbnail(rawPath, thmPath, M_PANEL_W, M_COVER_H);
+        done++;
+    }
+}
+
 // ── Обёртка для обложки игры (по имени ROM) ───────────────────────────────────
 // Первый показ: грузит полный .raw (150KB) и сохраняет .thm (27KB) для следующего раза.
 // Последующие показы: грузит .thm (27KB) — в ~5 раз быстрее.
