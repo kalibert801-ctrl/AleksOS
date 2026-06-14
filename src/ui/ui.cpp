@@ -423,18 +423,15 @@ static void _menuDrawFooter() {
     fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor((uint16_t)COL_WHITE);
     lcd.drawString("PLAY", 27, cy);
 
-    // Батарея (x=97..117) — слева, рядом с кнопкой PLAY
-    _mBattery(97, cy);
-
-    // WiFi иконка (x=113..133)
+    // WiFi иконка (x=103..117)
     bool wConn = wifiMgr.isConnected();
-    _mWifi(113, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
+    _mWifi(110, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
 
     // Время (x=155..212)
     flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_CYAN);
     lcd.drawString(timeGetString().c_str(), 181, cy);
 
-    // Дата (x=220..318)
+    // Дата (x=221..277)
     time_t now = time(nullptr);
     struct tm *ti = localtime(&now);
     char dt[12];
@@ -442,6 +439,9 @@ static void _menuDrawFooter() {
              ti->tm_mday, ti->tm_mon + 1, ti->tm_year % 100);
     fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
     lcd.drawString(dt, 221, cy);
+
+    // Батарея (x=287..303) — справа от даты, у правого края
+    _mBattery(295, cy);
 }
 
 // ── Правая панель (обложка + инфо) ─────────────────────────────
