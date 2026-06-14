@@ -12,7 +12,7 @@ static void iconChip(int cx,int cy,uint16_t c);
 static void iconSave(int cx,int cy,uint16_t c);
 static void iconClock2(int cx,int cy,uint16_t c);
 // Вспомогательные из showRomInfo-секции (нужны в новом меню)
-static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint = true);
+static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint = true, const char *saveThmAs = nullptr);
 static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh);
 static void _uiRomName(const char *path, char *out, size_t maxLen);
 static String _fmtPlaytime(uint32_t secs);
@@ -977,7 +977,7 @@ static String _fmtPlaytime(uint32_t secs) {
 // Пиксели в файле pre-inverted (~rgb565). Делаем un-invert через pushImage().
 // noArtHint — показывать подсказку если файл не найден.
 static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
-                         bool noArtHint) {
+                         bool noArtHint, const char *saveThmAs) {
     lcd.fillRect(dx, dy, dw, dh, 0x18C3);
     lcd.drawRect(dx, dy, dw, dh, 0x4208);
 
@@ -1003,55 +1003,103 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
         f.close(); return;
     }
 
-    uint16_t *dstBuf = (uint16_t *)heap_caps_malloc(dw * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!dstBuf) { f.close(); return; }
-
-    // Быстрый путь: читаем весь файл за один раз в PSRAM
+    // Быстрый путь: весь файл в PSRAM одним чтением
     uint32_t totalPx  = (uint32_t)srcW * srcH;
     uint16_t *fullBuf = (uint16_t *)heap_caps_malloc(totalPx * 2, MALLOC_CAP_SPIRAM);
-    if (fullBuf && f.read((uint8_t *)fullBuf, totalPx * 2) == (int)(totalPx * 2)) {
-        f.close();
+    if (!fullBuf || f.read((uint8_t *)fullBuf, totalPx * 2) != (int)(totalPx * 2)) {
+        // Запасной путь: построчное чтение
+        heap_caps_free(fullBuf); fullBuf = nullptr;
+        if (f.seek(4) == false) { f.close(); return; }  // перемотка после хедера
+    }
+    f.close();
+
+    // Открываем файл thumbnail для записи (если нужно)
+    File thmFile;
+    if (saveThmAs && fullBuf) {
+        SD.remove(saveThmAs);
+        thmFile = SD.open(saveThmAs, FILE_WRITE);
+        if (thmFile) {
+            uint8_t ohdr[4] = { (uint8_t)dw, (uint8_t)(dw >> 8),
+                                 (uint8_t)dh, (uint8_t)(dh >> 8) };
+            thmFile.write(ohdr, 4);
+        }
+    }
+
+    uint16_t *dstBuf = (uint16_t *)heap_caps_malloc(dw * sizeof(uint16_t),
+                                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (fullBuf) {
+        // Быстрый путь: данные в PSRAM, один setAddrWindow на весь блок
         lcd.startWrite();
+        lcd.setAddrWindow(dx, dy, dw, dh);
         for (int dstY = 0; dstY < dh; dstY++) {
             int srcY = (dstY * (int)srcH) / dh;
             const uint16_t *srcRow = fullBuf + srcY * srcW;
-            for (int x = 0; x < dw; x++)
-                dstBuf[x] = srcRow[(x * (int)srcW) / dw];
-            lcd.setAddrWindow(dx, dy + dstY, dw, 1);
-            lcd.writePixels(dstBuf, dw, true);
+            if ((int)srcW == dw) {
+                // Thumbnail 1:1 — прямая передача без копирования
+                lcd.writePixels(srcRow, dw, true);
+                if (thmFile) thmFile.write((const uint8_t *)srcRow, dw * 2);
+            } else {
+                if (dstBuf) {
+                    for (int x = 0; x < dw; x++)
+                        dstBuf[x] = srcRow[(x * (int)srcW) / dw];
+                    lcd.writePixels(dstBuf, dw, true);
+                    if (thmFile) thmFile.write((uint8_t *)dstBuf, dw * 2);
+                }
+            }
         }
         lcd.endWrite();
         heap_caps_free(fullBuf);
     } else {
-        // Запасной путь: построчное чтение (если PSRAM не хватило)
-        heap_caps_free(fullBuf);
-        uint16_t *srcBuf = (uint16_t *)heap_caps_malloc(srcW * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (!srcBuf) { heap_caps_free(dstBuf); f.close(); return; }
-        for (int srcY = 0; srcY < (int)srcH; srcY++) {
-            if (f.read((uint8_t *)srcBuf, srcW * 2) != (int)(srcW * 2)) break;
+        // Запасной путь: построчное чтение (PSRAM не хватило)
+        File f2 = SD.open(path, FILE_READ);
+        uint16_t *srcBuf = dstBuf ? (uint16_t *)heap_caps_malloc(srcW * 2,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) : nullptr;
+        if (f2 && srcBuf) {
+            f2.seek(4);
+            lcd.startWrite();
+            lcd.setAddrWindow(dx, dy, dw, dh);
+            // Нам нужно итерировать по srcY и писать только нужные dstY
+            int lastSrcY = -1;
             for (int dstY = 0; dstY < dh; dstY++) {
-                if ((dstY * (int)srcH) / dh != srcY) continue;
+                int srcY = (dstY * (int)srcH) / dh;
+                if (srcY != lastSrcY) {
+                    // пропускаем строки SD до нужной
+                    while (lastSrcY < srcY - 1) {
+                        f2.seek(f2.position() + srcW * 2);
+                        lastSrcY++;
+                    }
+                    f2.read((uint8_t *)srcBuf, srcW * 2);
+                    lastSrcY = srcY;
+                }
                 for (int x = 0; x < dw; x++)
                     dstBuf[x] = srcBuf[(x * (int)srcW) / dw];
-                lcd.startWrite();
-                lcd.setAddrWindow(dx, dy + dstY, dw, 1);
                 lcd.writePixels(dstBuf, dw, true);
-                lcd.endWrite();
             }
+            lcd.endWrite();
         }
-        heap_caps_free(srcBuf);
-        f.close();
+        if (srcBuf) heap_caps_free(srcBuf);
+        if (f2) f2.close();
     }
 
+    if (thmFile) { thmFile.flush(); thmFile.close(); }
     heap_caps_free(dstBuf);
 }
 
 // ── Обёртка для обложки игры (по имени ROM) ───────────────────────────────────
+// Первый показ: грузит полный .raw (150KB) и сохраняет .thm (27KB) для следующего раза.
+// Последующие показы: грузит .thm (27KB) — в ~5 раз быстрее.
 static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh) {
-    char path[96];
-    snprintf(path, sizeof(path), "/Screenshots/%s.raw", romName);
-    printf("[UI] Cover: %s\n", path);
-    _drawRawFile(path, dx, dy, dw, dh, /*noArtHint=*/true);
+    char rawPath[96], thmPath[96];
+    snprintf(rawPath, sizeof(rawPath), "/Screenshots/%s.raw", romName);
+    snprintf(thmPath, sizeof(thmPath), "/Screenshots/%s.thm", romName);
+
+    if (SD.exists(thmPath)) {
+        // Thumbnail уже есть — грузим маленький файл
+        _drawRawFile(thmPath, dx, dy, dw, dh, /*noArtHint=*/true);
+    } else {
+        // Первый раз: грузим полный и попутно сохраняем thumbnail
+        _drawRawFile(rawPath, dx, dy, dw, dh, /*noArtHint=*/true, thmPath);
+    }
 }
 
 // ── Main ROM info popup ────────────────────────────────────────────────────────
