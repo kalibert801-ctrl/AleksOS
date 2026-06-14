@@ -423,12 +423,12 @@ static void _menuDrawFooter() {
     fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor((uint16_t)COL_WHITE);
     lcd.drawString("PLAY", 27, cy);
 
-    // WiFi иконка (x=100..120)
-    bool wConn = wifiMgr.isConnected();
-    _mWifi(110, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
+    // Батарея (x=97..117) — слева, рядом с кнопкой PLAY
+    _mBattery(97, cy);
 
-    // Батарея (x=124..144)
-    _mBattery(133, cy);
+    // WiFi иконка (x=113..133)
+    bool wConn = wifiMgr.isConnected();
+    _mWifi(113, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
 
     // Время (x=155..212)
     flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_CYAN);
@@ -616,12 +616,16 @@ static uint8_t _menuDotMenu() {
     lcd.drawRoundRect(PX, PY, PW, PH, 6, t.accent);
     for (int i = 0; i < 4; i++) drawItem(i, false);
 
-    delay(200);
+    // Ждём отпускания пальца от тапа открытия, иначе он сразу же закроет меню
+    delay(120);
+    while (touch.isTouched()) delay(10);
+    delay(60);
+
     uint32_t until = millis() + 6000;
     int choice = -1;
     int hiSel  = -1;   // -1 = кнопки ещё не нажимались, подсветка не показана
 
-    while (millis() < until && choice < 0) {
+    while (millis() < until && choice == -1) {
         // ── Обработка касания ──────────────────────────────────────────
         if (touch.isTouched()) {
             delay(40);
@@ -630,7 +634,7 @@ static uint8_t _menuDotMenu() {
             if (tx >= PX && tx < PX + PW && ty >= PY && ty < PY + PH)
                 choice = min((ty - PY - 1) / RH, 3);  // clamp: max valid index = 3
             else
-                choice = -2;  // тап вне меню = закрыть
+                { choice = -2; break; }  // тап вне меню (в т.ч. повторный тап ⋮) = закрыть
         }
 
         // ── Управление кнопками ────────────────────────────────────────
@@ -999,28 +1003,47 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
         f.close(); return;
     }
 
-    uint16_t *srcBuf = (uint16_t *)heap_caps_malloc(srcW * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    uint16_t *dstBuf = (uint16_t *)heap_caps_malloc(dw   * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!srcBuf || !dstBuf) {
-        heap_caps_free(srcBuf); heap_caps_free(dstBuf); f.close(); return;
-    }
+    uint16_t *dstBuf = (uint16_t *)heap_caps_malloc(dw * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!dstBuf) { f.close(); return; }
 
-    for (int srcY = 0; srcY < (int)srcH; srcY++) {
-        if (f.read((uint8_t *)srcBuf, srcW * 2) != (int)(srcW * 2)) break;
+    // Быстрый путь: читаем весь файл за один раз в PSRAM
+    uint32_t totalPx  = (uint32_t)srcW * srcH;
+    uint16_t *fullBuf = (uint16_t *)heap_caps_malloc(totalPx * 2, MALLOC_CAP_SPIRAM);
+    if (fullBuf && f.read((uint8_t *)fullBuf, totalPx * 2) == (int)(totalPx * 2)) {
+        f.close();
+        lcd.startWrite();
         for (int dstY = 0; dstY < dh; dstY++) {
-            if ((dstY * (int)srcH) / dh != srcY) continue;
+            int srcY = (dstY * (int)srcH) / dh;
+            const uint16_t *srcRow = fullBuf + srcY * srcW;
             for (int x = 0; x < dw; x++)
-                dstBuf[x] = srcBuf[(x * (int)srcW) / dw];
-            lcd.startWrite();
+                dstBuf[x] = srcRow[(x * (int)srcW) / dw];
             lcd.setAddrWindow(dx, dy + dstY, dw, 1);
             lcd.writePixels(dstBuf, dw, true);
-            lcd.endWrite();
         }
+        lcd.endWrite();
+        heap_caps_free(fullBuf);
+    } else {
+        // Запасной путь: построчное чтение (если PSRAM не хватило)
+        heap_caps_free(fullBuf);
+        uint16_t *srcBuf = (uint16_t *)heap_caps_malloc(srcW * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!srcBuf) { heap_caps_free(dstBuf); f.close(); return; }
+        for (int srcY = 0; srcY < (int)srcH; srcY++) {
+            if (f.read((uint8_t *)srcBuf, srcW * 2) != (int)(srcW * 2)) break;
+            for (int dstY = 0; dstY < dh; dstY++) {
+                if ((dstY * (int)srcH) / dh != srcY) continue;
+                for (int x = 0; x < dw; x++)
+                    dstBuf[x] = srcBuf[(x * (int)srcW) / dw];
+                lcd.startWrite();
+                lcd.setAddrWindow(dx, dy + dstY, dw, 1);
+                lcd.writePixels(dstBuf, dw, true);
+                lcd.endWrite();
+            }
+        }
+        heap_caps_free(srcBuf);
+        f.close();
     }
 
-    heap_caps_free(srcBuf);
     heap_caps_free(dstBuf);
-    f.close();
 }
 
 // ── Обёртка для обложки игры (по имени ROM) ───────────────────────────────────
@@ -3736,13 +3759,26 @@ static bool _galConfirmCover(const char *gameName) {
     String gn = String(gameName); if (gn.length() > 26) gn = gn.substring(0, 24) + "..";
     fsm(); lcd.setTextColor(t.textPri);
     lcd.drawString(gn.c_str(), SCREEN_W / 2, PY + 38);
-    lcd.fillRoundRect(PX + 8,           BY, BW, BH, 6, t.ok);
-    lcd.fillRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, t.selected);
-    fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("YES - Set cover", PX + 8 + BW / 2,        BY + BH / 2);
-    lcd.setTextColor(t.textSec);
-    lcd.drawString("NO - Cancel",     PX + PW - 8 - BW / 2,  BY + BH / 2);
+    // sel: 0=YES выбран, 1=NO выбран
+    int sel = 0;
+    auto drawBtns = [&]() {
+        // YES — подсветка если sel==0
+        uint16_t yBg = (sel == 0) ? t.accent : t.ok;
+        lcd.fillRoundRect(PX + 8,           BY, BW, BH, 6, yBg);
+        // NO — подсветка если sel==1
+        uint16_t nBg = (sel == 1) ? t.accent : t.selected;
+        lcd.fillRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, nBg);
+        fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("YES - Set cover", PX + 8 + BW / 2,       BY + BH / 2);
+        lcd.setTextColor(sel == 1 ? (uint16_t)COL_WHITE : t.textSec);
+        lcd.drawString("NO - Cancel",     PX + PW - 8 - BW / 2,  BY + BH / 2);
+        // Рамка вокруг активной кнопки
+        if (sel == 0) lcd.drawRoundRect(PX + 8,           BY, BW, BH, 6, (uint16_t)COL_WHITE);
+        else          lcd.drawRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, (uint16_t)COL_WHITE);
+    };
+    drawBtns();
     delay(300);
+    while (touch.isTouched()) delay(10);  // ждём отпускания START
     uint32_t until = millis() + 8000;
     while (millis() < until) {
         if (touch.isTouched()) {
@@ -3755,8 +3791,11 @@ static bool _galConfirmCover(const char *gameName) {
         }
         buttons.update();
         uint8_t btn = buttons.applyBtnMap(buttons.readNew());
-        if (btn & BTN_A)             return true;
-        if (btn & (BTN_B | BTN_SEL)) return false;
+        if (btn & (BTN_LEFT | BTN_UP))  { sel = 0; drawBtns(); until = millis() + 8000; }
+        if (btn & (BTN_RIGHT | BTN_DOWN)){ sel = 1; drawBtns(); until = millis() + 8000; }
+        if (btn & (BTN_A | BTN_STA))    return (sel == 0);
+        if (btn & BTN_B)                return false;
+        if (btn & BTN_SEL)              return false;
         delay(20);
     }
     return false;

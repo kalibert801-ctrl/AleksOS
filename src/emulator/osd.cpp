@@ -734,6 +734,37 @@ static void _ingameMenu(void) {
 
         if (cancel) { sel = 0; confirm = true; }         // B → Continue
 
+        // ── Значок-уведомление под меню (вместо невидимого текста) ─────────────
+        // ok=true → зелёный круг, ok=false → красный; shape: 0=дискета, 1=камера, 2=X
+        auto showIcon = [&](bool ok, int shape) {
+            const int icx = SCREEN_W / 2;
+            const int icy = MY + MH + 24;   // ниже меню (190+24=214)
+            uint16_t col  = ok ? (uint16_t)0x07E0 : (uint16_t)0xF800;
+            lcd.fillCircle(icx, icy, 16, 0x0000);   // чёрное кольцо
+            lcd.fillCircle(icx, icy, 14, col);        // цветная заливка
+            if (shape == 0) {
+                // Дискета (белый прямоугольник с окошком и шторкой)
+                lcd.fillRect(icx - 6, icy - 6, 12, 12, 0xFFFF);
+                lcd.fillRect(icx - 4, icy - 6, 8,  5, 0x39C7);  // верхний ярлык (серый)
+                lcd.fillRect(icx - 1, icy + 0, 4,  5, 0x39C7);  // нижняя шторка
+            } else if (shape == 1) {
+                // Камера (тело + видоискатель + объектив)
+                lcd.fillRoundRect(icx - 7, icy - 2, 14, 9, 1, 0xFFFF);  // корпус
+                lcd.fillRect(icx - 3, icy - 5, 6, 4, 0xFFFF);            // видоискатель
+                lcd.fillCircle(icx, icy + 2, 3, col);   // отверстие объектива
+                lcd.fillCircle(icx, icy + 2, 1, 0xFFFF); // блик
+            } else {
+                // X (ошибка)
+                lcd.drawLine(icx-5, icy-5, icx+5, icy+5, 0xFFFF);
+                lcd.drawLine(icx-5, icy+5, icx+5, icy-5, 0xFFFF);
+                lcd.drawLine(icx-4, icy-5, icx+5, icy+4, 0xFFFF);
+                lcd.drawLine(icx-5, icy-4, icx+4, icy+5, 0xFFFF);
+                lcd.drawLine(icx-4, icy+5, icx+5, icy-4, 0xFFFF);
+                lcd.drawLine(icx-5, icy+4, icx+4, icy-5, 0xFFFF);
+            }
+            delay(900);
+        };
+
         if (confirm) {
             switch (sel) {
                 case 0:  // Continue
@@ -743,11 +774,7 @@ static void _ingameMenu(void) {
                     printf("[SS] Saving to: %s.ss0\n", nes_getcontextptr()->rominfo->filename);
                     {
                         int r = state_save();
-                        lcd.setFont(&lgfx::fonts::DejaVu9);
-                        lcd.setTextDatum(MC_DATUM);
-                        lcd.setTextColor(r == 0 ? (uint16_t)0x07E0 : (uint16_t)0xF800);
-                        lcd.drawString(r == 0 ? "State saved!" : "Save failed!", SCREEN_W / 2, MY + MH + 6);
-                        delay(900);
+                        showIcon(r == 0, r == 0 ? 0 : 2);  // дискета или X
                     }
                     break;
                 case 2:  // Load State
@@ -755,24 +782,12 @@ static void _ingameMenu(void) {
                     printf("[SS] Loading from: %s.ss0\n", nes_getcontextptr()->rominfo->filename);
                     {
                         int r = state_load();
-                        lcd.setFont(&lgfx::fonts::DejaVu9);
-                        lcd.setTextDatum(MC_DATUM);
-                        lcd.setTextColor(r == 0 ? (uint16_t)0x07E0 : (uint16_t)0xF800);
-                        lcd.drawString(r == 0 ? "State loaded!" : "No save found!", SCREEN_W / 2, MY + MH + 6);
-                        delay(900);
+                        showIcon(r == 0, r == 0 ? 0 : 2);  // дискета или X
                     }
                     break;
                 case 3:  // Screenshot
                     _takeScreenshot();
-                    {
-                        lcd.setFont(&lgfx::fonts::DejaVu9);
-                        lcd.setTextDatum(MC_DATUM);
-                        lcd.setTextColor(0x07E0);
-                        lcd.drawString("Screenshot saved!", SCREEN_W / 2, MY + MH + 6);
-                        lcd.setTextColor(0xC618);
-                        lcd.drawString("See Gallery in menu", SCREEN_W / 2, MY + MH + 18);
-                        delay(900);
-                    }
+                    showIcon(true, 1);  // камера
                     break;
                 case 4:  // Exit to Menu
                     _emuExitReq = true;
