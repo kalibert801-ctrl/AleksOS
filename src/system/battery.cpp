@@ -76,13 +76,15 @@ void batteryInit() {
 
 void batteryUpdate() {
 #if BAT_ADC_PIN >= 0
-    // 32 замера с паузой 500 мкс = 16 мс суммарно, снижаем шум ADC
+    // 16 замеров с паузой 2 мс = 32 мс суммарно.
+    // Пауза 2 мс нужна при 470кОм делителе — даёт время зарядить
+    // конденсатор sample-and-hold АЦП (~100 pF) через 235кОм источника.
     int32_t sum = 0;
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 16; i++) {
         sum += analogRead(BAT_ADC_PIN);
-        delayMicroseconds(500);
+        delay(2);
     }
-    _batV   = _rawToVbat(sum >> 5);   // sum / 32
+    _batV   = _rawToVbat(sum >> 4);   // sum / 16
     _batPct = _voltToPct(_batV);
 #endif
 }
