@@ -20,6 +20,7 @@ void menuDraw();
 void menuScrollUp();
 void menuScrollDown();
 void menuTimeTick();          // call in loop() -- updates clock in bottom bar
+void menuBatteryAnimTick();   // call in loop() -- charging animation (600ms steps)
 int  menuSelected();
 void showRomInfo(int idx);
 

@@ -372,38 +372,57 @@ static void _mWifi(int cx, int cy, uint16_t c) {
     lcd.drawLine(cx+4, cy+2, cx, cy-2, c);
     lcd.fillCircle(cx, cy+4, 2, c);
 }
-// Батарея: динамическая иконка по реальному проценту заряда.
-// Корпус: drawRect(cx-8, cy-4, 16, 8) — ширина 16px, высота 8px.
-// Нуб: fillRect(cx+8, cy-2, 2, 4).
-// Внутри: 13px × 6px → заливка пропорционально проценту (0..12px).
-// Цвет: зелёный ≥50%, жёлтый ≥20%, красный <20%, золотой если нет данных (-1).
+// Фаза анимации зарядки (0-3), обновляется в menuBatteryAnimTick()
+static uint8_t _batAnimPhase = 0;
+
+// Батарея: динамическая иконка.
+// При зарядке — синяя анимация "заполнения" от текущего уровня к 100%.
+// В норме — зелёный/оранжевый/красный по уровню заряда.
+// Корпус 16×8 px, нуб 2×4 px, внутри 13×6 px (0..12 px заливки).
 static void _mBattery(int cx, int cy) {
     int pct = batteryPercent();
+    const Theme565& t = getTheme();
 
-    // Выбор цвета по уровню заряда
+    if (batteryCharging()) {
+        // ── Режим зарядки: синяя анимированная заливка ──────────────────────
+        constexpr uint16_t COL_CHARGE = 0x07FFu;  // cyan
+
+        lcd.drawRect(cx - 8, cy - 4, 16, 8, COL_CHARGE);
+        lcd.fillRect(cx + 8, cy - 2,  2, 4, COL_CHARGE);
+        lcd.fillRect(cx - 7, cy - 3, 13, 6, t.header);  // очистить внутри
+
+        // Анимация: заливка "бежит" от текущего уровня к 100%.
+        // _batAnimPhase = 0..3 → анимированный дополнительный процент:
+        //   phase 0: +0%, phase 1: +25% от остатка, phase 2: +50%, phase 3: +75%
+        int base    = (pct >= 0) ? pct : 0;
+        int extra   = (100 - base) * (int)_batAnimPhase / 4;
+        int animPct = base + extra;
+        int fillW   = (animPct * 12 + 50) / 100;
+        if (fillW > 12) fillW = 12;
+        if (fillW > 0)
+            lcd.fillRect(cx - 7, cy - 3, fillW, 6, COL_CHARGE);
+        return;
+    }
+
+    // ── Обычный режим: цвет по уровню заряда ────────────────────────────────
     uint16_t fc;
     if      (pct < 0)   fc = 0xAD55u;  // нет данных — золотой
     else if (pct <= 15) fc = 0xF800u;  // критический — красный
     else if (pct <= 40) fc = 0xFD20u;  // низкий — оранжевый
     else                fc = 0x4EF0u;  // норма — зелёный
 
-    // Корпус и нуб
     lcd.drawRect(cx - 8, cy - 4, 16, 8, fc);
-    lcd.fillRect(cx + 8, cy - 2, 2,  4, fc);
-
-    // Очистить внутреннее пространство (13×6 px)
-    const Theme565& t = getTheme();
+    lcd.fillRect(cx + 8, cy - 2,  2, 4, fc);
     lcd.fillRect(cx - 7, cy - 3, 13, 6, t.header);
 
     if (pct < 0) {
-        // Нет данных — показываем знак «?» (две горизонтальные полоски)
+        // Нет данных — знак «?» двумя полосками
         lcd.fillRect(cx - 4, cy - 2, 7, 1, 0xAD55u);
         lcd.fillRect(cx - 4, cy + 1, 7, 1, 0xAD55u);
         return;
     }
 
-    // Пропорциональная заливка: 0% → 0px, 100% → 12px
-    int fillW = (pct * 12 + 50) / 100;  // round
+    int fillW = (pct * 12 + 50) / 100;
     if (fillW > 12) fillW = 12;
     if (fillW > 0)
         lcd.fillRect(cx - 7, cy - 3, fillW, 6, fc);
@@ -780,8 +799,10 @@ void menuTimeTick() {
     uint8_t m   = timeGetM();
     uint32_t ms = millis();
 
-    // Батарея: обновляем показания каждые 30 секунд
-    if (ms - _batLastMs >= 30000u || _batLastMs == 0) {
+    // Батарея: обновляем показания каждые 5 секунд
+    // (быстрое определение зарядки: при подключении TP4056 напряжение
+    //  резко растёт, детектируем за 1 цикл = 5 с вместо 30 с)
+    if (ms - _batLastMs >= 5000u || _batLastMs == 0) {
         _batLastMs = ms;
         batteryUpdate();
     }
@@ -810,6 +831,30 @@ void menuTimeTick() {
     lcd.drawString(dt, 221, cy);
 
     // Батарея — правый край (x=287..303), после даты
+    _mBattery(295, cy);
+}
+
+// ── Анимация зарядки батареи (вызывать из loop() каждый кадр) ────────────────
+// Работает только когда batteryCharging() == true.
+// Обновляет иконку каждые 600 мс, продвигая фазу 0→1→2→3→0...
+// Перерисовывает только зону батареи (x=278..319) — без мерцания всего футера.
+void menuBatteryAnimTick() {
+    if (!batteryCharging()) {
+        _batAnimPhase = 0;
+        return;
+    }
+
+    static uint32_t _lastAnim = 0;
+    uint32_t ms = millis();
+    if (ms - _lastAnim < 600u) return;
+    _lastAnim = ms;
+
+    _batAnimPhase = (_batAnimPhase + 1) & 3;  // 0..3
+
+    // Перерисовать только зону батареи в правой части футера
+    const Theme565& t = getTheme();
+    int by = M_DPAD_Y, cy = M_DPAD_CY;
+    lcd.fillRect(278, by + 1, SCREEN_W - 278, M_BAR_H - 2, t.header);
     _mBattery(295, cy);
 }
 

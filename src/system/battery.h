@@ -6,7 +6,8 @@
 // Если BAT_ADC_PIN = -1 (не подключён) — все функции возвращают -1 / 0.0f.
 // batteryPercent() = -1 означает «данные недоступны», UI показывает знак «?».
 
-void  batteryInit();        // вызывать в setup() после analogSetAttenuation
-void  batteryUpdate();      // вызывать раз в ~30 с (menuTimeTick уже делает это)
+void  batteryInit();        // вызывать в setup()
+void  batteryUpdate();      // вызывать раз в ~5 с (menuTimeTick делает это)
 int   batteryPercent();     // 0-100, или -1 если не подключён
-float batteryVoltage();     // напряжение батареи в вольтах (0.0 если нет данных)
+float batteryVoltage();     // напряжение батареи в вольтах
+bool  batteryCharging();    // true если TP4056 заряжает (по тренду напряжения)
