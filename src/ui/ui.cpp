@@ -20,6 +20,7 @@ static String _fmtPlaytime(uint32_t secs);
 #include "display/display_manager.h"
 #include "storage/sd_manager.h"
 #include "system/time_manager.h"
+#include "system/battery.h"
 #include "settings.h"
 #include "config.h"
 #include "lang.h"
@@ -371,15 +372,41 @@ static void _mWifi(int cx, int cy, uint16_t c) {
     lcd.drawLine(cx+4, cy+2, cx, cy-2, c);
     lcd.fillCircle(cx, cy+4, 2, c);
 }
-// Батарея (заглушка, заряд неизвестен — нет ADC)
+// Батарея: динамическая иконка по реальному проценту заряда.
+// Корпус: drawRect(cx-8, cy-4, 16, 8) — ширина 16px, высота 8px.
+// Нуб: fillRect(cx+8, cy-2, 2, 4).
+// Внутри: 13px × 6px → заливка пропорционально проценту (0..12px).
+// Цвет: зелёный ≥50%, жёлтый ≥20%, красный <20%, золотой если нет данных (-1).
 static void _mBattery(int cx, int cy) {
-    uint16_t fc = 0xAD55u;
-    lcd.drawRect(cx-8, cy-4, 14, 8, fc);
-    lcd.fillRect(cx+6, cy-2, 3, 4, fc);
-    // 3 зелёных деления (условные 75%)
-    lcd.fillRect(cx-7, cy-3, 3, 6, 0x4EF0u);
-    lcd.fillRect(cx-3, cy-3, 3, 6, 0x4EF0u);
-    lcd.fillRect(cx+1, cy-3, 3, 6, 0x4EF0u);
+    int pct = batteryPercent();
+
+    // Выбор цвета по уровню заряда
+    uint16_t fc;
+    if      (pct < 0)   fc = 0xAD55u;  // нет данных — золотой
+    else if (pct <= 15) fc = 0xF800u;  // критический — красный
+    else if (pct <= 40) fc = 0xFD20u;  // низкий — оранжевый
+    else                fc = 0x4EF0u;  // норма — зелёный
+
+    // Корпус и нуб
+    lcd.drawRect(cx - 8, cy - 4, 16, 8, fc);
+    lcd.fillRect(cx + 8, cy - 2, 2,  4, fc);
+
+    // Очистить внутреннее пространство (13×6 px)
+    const Theme565& t = getTheme();
+    lcd.fillRect(cx - 7, cy - 3, 13, 6, t.header);
+
+    if (pct < 0) {
+        // Нет данных — показываем знак «?» (две горизонтальные полоски)
+        lcd.fillRect(cx - 4, cy - 2, 7, 1, 0xAD55u);
+        lcd.fillRect(cx - 4, cy + 1, 7, 1, 0xAD55u);
+        return;
+    }
+
+    // Пропорциональная заливка: 0% → 0px, 100% → 12px
+    int fillW = (pct * 12 + 50) / 100;  // round
+    if (fillW > 12) fillW = 12;
+    if (fillW > 0)
+        lcd.fillRect(cx - 7, cy - 3, fillW, 6, fc);
 }
 
 // ── Шапка нового меню ──────────────────────────────────────────
@@ -745,22 +772,31 @@ void menuDraw() {
     _menuDrawFooter();
 }
 
-// ── Обновление времени раз в минуту (inline, без делегации плагину) ─
-static uint8_t _menuLastMin = 0xFF;
+// ── Обновление времени раз в минуту + батарея раз в 30 с ────────────────────
+static uint8_t  _menuLastMin = 0xFF;
+static uint32_t _batLastMs   = 0;
+
 void menuTimeTick() {
-    uint8_t m = timeGetM();
-    if (m == _menuLastMin) return;
+    uint8_t m   = timeGetM();
+    uint32_t ms = millis();
+
+    // Батарея: обновляем показания каждые 30 секунд
+    if (ms - _batLastMs >= 30000u || _batLastMs == 0) {
+        _batLastMs = ms;
+        batteryUpdate();
+    }
+
+    if (m == _menuLastMin) return;  // время не изменилось — перерисовывать не надо
     _menuLastMin = m;
 
     const Theme565& t = getTheme();
     int by = M_DPAD_Y, cy = M_DPAD_CY;
 
-    // Обновляем зону WiFi + батарея + время + дата
+    // Перерисовываем зону: WiFi + время + дата + батарея (x=96..319)
     lcd.fillRect(96, by + 1, SCREEN_W - 96, M_BAR_H - 2, t.header);
 
     bool wConn = wifiMgr.isConnected();
     _mWifi(110, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
-    _mBattery(133, cy);
 
     flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_CYAN);
     lcd.drawString(timeGetString().c_str(), 181, cy);
@@ -772,6 +808,9 @@ void menuTimeTick() {
              ti->tm_mday, ti->tm_mon + 1, ti->tm_year % 100);
     fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
     lcd.drawString(dt, 221, cy);
+
+    // Батарея — правый край (x=287..303), после даты
+    _mBattery(295, cy);
 }
 
 void menuScrollUp() {

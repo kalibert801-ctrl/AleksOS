@@ -12,6 +12,7 @@
 #include "input/button_handler.h"
 #include "input/audio.h"
 #include "system/time_manager.h"
+#include "system/battery.h"
 #include "ui/ui.h"
 #include "emulator/emu_runner.h"
 #include "network/wifi_manager.h"
@@ -171,6 +172,7 @@ void setup() {
     // ── Периферия ─────────────────────────────────────────────
     bootProgress(88, "Init audio...");
     audioInit();
+    batteryInit();   // ADC1 GPIO35, делитель 100k+100k (safe с WiFi)
 
     bootProgress(93, "Init touch...");
     touch.init();
