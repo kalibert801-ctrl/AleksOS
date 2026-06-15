@@ -23,9 +23,15 @@ static constexpr int kCurveN = (int)(sizeof(kCurve) / sizeof(kCurve[0]));
 // ── Состояние ─────────────────────────────────────────────────────────────────
 static int      _batPct       = -1;
 static float    _batV         = 0.0f;
-static float    _batVPrev     = 0.0f;
 static bool     _charging     = false;
 static bool     _prevCharging = false;
+
+// Детектирование зарядки: сравниваем каждые 30 секунд.
+// Порог 100 мВ за 30 с — уверенно выше шума АЦП (~30 мВ).
+// При первом подключении TP4056 напряжение скачет на 100-300 мВ мгновенно.
+static float    _batVFor30s   = 0.0f;  // снимок напряжения 30 секунд назад
+static uint32_t _chargeChkMs  = 0;     // момент последней проверки
+static int8_t   _chargeConfirm = 0;    // счётчик подтверждений (+ зарядка, - разрядка)
 
 static BattStats _stats       = { 0, 0, 0 };
 static uint32_t  _lastSaveMs  = 0;   // для авто-сохранения каждые 5 мин
@@ -68,28 +74,54 @@ void batteryInit() {
 
 void batteryUpdate() {
 #if BAT_ADC_PIN >= 0
-    // 16 замеров × 2 мс = 32 мс. Пауза для зарядки S/H конденсатора (470кОм делитель).
+    // 16 замеров × 2 мс = 32 мс.
+    // ТРЕБУЕТСЯ: конденсатор 100нФ между GPIO35 и GND для стабилизации напряжения.
+    // Без него S/H АЦП (~100пФ) не успевает зарядиться через 50кОм источника (RC≈5мкс).
+    delay(5);   // пре-settle: даём конденсатору зарядиться перед первым замером
     int32_t sum = 0;
-    for (int i = 0; i < 16; i++) { sum += analogRead(BAT_ADC_PIN); delay(2); }
+    for (int i = 0; i < 16; i++) {
+        sum += analogRead(BAT_ADC_PIN);
+        delay(1);
+    }
     float newV = _rawToVbat(sum >> 4);
 
-    // Определение зарядки: +20мВ за интервал → charging; -10мВ → not charging
-    if (_batVPrev > 0.5f) {
-        float delta = newV - _batVPrev;
-        if      (delta >  0.020f) _charging = true;
-        else if (delta < -0.010f) _charging = false;
+    // ── Детектирование зарядки ────────────────────────────────────────────────
+    // Сравниваем напряжение каждые 30 секунд (не 5 с — слишком шумно).
+    // Порог 100 мВ за 30 с >> ADC-шум (~30 мВ), но детектирует начало зарядки
+    // (первое подключение: скачок 100-300 мВ в первые 30 с).
+    uint32_t ms = millis();
+    if (_batVFor30s < 0.1f || _chargeChkMs == 0) {
+        // Первый замер — инициализируем
+        _batVFor30s  = newV;
+        _chargeChkMs = ms;
+    } else if (ms - _chargeChkMs >= 30000u) {
+        float delta = newV - _batVFor30s;
+        _batVFor30s  = newV;
+        _chargeChkMs = ms;
+
+        if (delta > 0.100f) {
+            // Напряжение выросло на >100мВ за 30с → зарядка
+            _chargeConfirm = min((int8_t)2, (int8_t)(_chargeConfirm + 1));
+        } else if (delta < -0.040f) {
+            // Напряжение упало на >40мВ за 30с → разрядка
+            _chargeConfirm = max((int8_t)-2, (int8_t)(_chargeConfirm - 1));
+        }
+        // иначе (±40..100мВ): стабильно — сохраняем предыдущее состояние
+
+        // Требуем 2 подтверждения подряд (60 с суммарно) — устойчивость к шуму
+        if      (_chargeConfirm >=  2) _charging = true;
+        else if (_chargeConfirm <= -2) _charging = false;
     }
 
     // Детектируем момент подключения зарядки (false → true)
     if (_charging && !_prevCharging) {
         _stats.cycles++;
-        _stats.sessionSec = 0;   // сессия сбрасывается при подключении
+        _stats.sessionSec = 0;   // сбрасываем счётчик сессии
         batteryStatsSave();
     }
     _prevCharging = _charging;
-    _batVPrev = newV;
-    _batV     = newV;
-    _batPct   = _voltToPct(_batV);
+    _batV   = newV;
+    _batPct = _voltToPct(_batV);
 #endif
 }
 
