@@ -65,7 +65,8 @@ void cfgLoad() {
     settings.nesPalette   = doc["nes_pal"]    | 0;
 
     // ── Game Genie ──────────────────────────────────────────────────────────
-    settings.ggEnabled = doc["gg_en"] | 0;
+    settings.ggEnabled   = doc["gg_en"]       | 0;
+    settings.screenFlip  = doc["screen_flip"] | 0;
     memset(settings.ggCodes, 0, sizeof(settings.ggCodes));
     if (doc.containsKey("gg")) {
         JsonArray ggArr = doc["gg"].as<JsonArray>();
@@ -141,7 +142,8 @@ void cfgSave() {
     doc["nes_pal"]    = settings.nesPalette;
 
     // ── Game Genie ─────────────────────────────────────────────────────────
-    doc["gg_en"] = settings.ggEnabled;
+    doc["gg_en"]      = settings.ggEnabled;
+    doc["screen_flip"] = settings.screenFlip;
     JsonArray ggArr = doc.createNestedArray("gg");
     for (int i = 0; i < 8; i++) ggArr.add(settings.ggCodes[i]);
 

@@ -43,5 +43,6 @@ public:
 
 extern LGFX lcd;
 void initDisplay();
+void applyScreenRotation();
 void setBrightness(uint8_t pct);
 void updateAutoBrightness();

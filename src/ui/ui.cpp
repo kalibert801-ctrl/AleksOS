@@ -1418,7 +1418,7 @@ static const char *_catName[] = {
 // gi=25 → открыть sub-экран Debug (cat=6 внутри)
 // gi=26 → OTA check (сигнал 0xA0 в main.cpp)
 static const int _catItems[][8] = {
-    { 0, 4, 7, -1, -1, -1, -1, -1 },          // 0: Display
+    { 0, 4, 7, 34, -1, -1, -1, -1 },           // 0: Display  (gi=34=Rotation)
     { 1, 14, 8, 9, -1, -1, -1, -1 },           // 1: Audio
     { 2, 3, 29, -1, -1, -1, -1, -1 },          // 2: Appearance  (gi=29=NES Palette)
     { 6, 17, 18, 19, 24, 25, 26, 33 },         // 3: System      (gi=33=Battery screen)
@@ -1539,6 +1539,7 @@ static String settingValue(int gi) {
             snprintf(buf, sizeof(buf), "%d%% >", pct);
             return buf;
         }
+        case 34: return settings.screenFlip ? "Flipped" : "Normal";  // Rotation
         case 31: {  // Turbo Mode
             if (settings.turboMask == 0x04) return "A";
             if (settings.turboMask == 0x08) return "B";
@@ -1580,6 +1581,7 @@ static void settingInc(int gi) {
         case 29: settings.nesPalette = (settings.nesPalette + 1) % 4; break;  // NES Palette
         case 30: settings.turboEnabled = !settings.turboEnabled; break;         // Turbo toggle
         case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
+        case 34: settings.screenFlip = !settings.screenFlip; applyScreenRotation(); break; // Rotation
         case 31: {  // Turbo mode cycle: Off→A→B→A+B
             static const uint8_t masks[] = {0x00, 0x04, 0x08, 0x0C};
             int cur = 0;
@@ -1621,6 +1623,7 @@ static void settingDec(int gi) {
         case 29: settings.nesPalette = (settings.nesPalette + 3) % 4; break;  // NES Palette (back)
         case 30: settings.turboEnabled = !settings.turboEnabled; break;
         case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
+        case 34: settings.screenFlip = !settings.screenFlip; applyScreenRotation(); break; // Rotation
         case 31: {  // Turbo mode cycle backward
             static const uint8_t masks[] = {0x00, 0x04, 0x08, 0x0C};
             int cur = 0;
@@ -2260,6 +2263,7 @@ static const char* getLabelForGi(int gi) {
         case 31: return "Turbo Mode";
         case 32: return "Game Genie";
         case 33: return "Battery";
+        case 34: return "Rotation";
     }
     return "";
 }
