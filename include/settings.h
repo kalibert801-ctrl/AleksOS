@@ -64,10 +64,11 @@ typedef struct {
     // Максимум 8 кодов, хранятся как 8-байтные строки (7 символов + \0).
     char          ggCodes[8][8];  // 8 слотов по 7 символов кода Game Genie
     unsigned char ggEnabled;      // 1 = применять коды при запуске
-    // ── Ротация экрана ───────────────────────────────────────
-    // 0 = Normal (SCREEN_ROT из config.h)
-    // 1 = Flipped 180° (SCREEN_ROT ^ 2)
+    // ── Ротация экрана и кнопок ─────────────────────────────
+    // screenFlip: 0=Normal, 1=Flipped 180° (экран + тач вместе)
+    // btnFlip:    0=Normal, 1=Flipped   (D-pad независимо)
     unsigned char screenFlip;
+    unsigned char btnFlip;
 } Settings;
 
 /* ── Цвета темы RGB565 ──────────────────────────────────────────── */
@@ -125,6 +126,7 @@ inline void settingsDefault(Settings &s) {
     s.ggEnabled     = 0;
     memset(s.ggCodes, 0, sizeof(s.ggCodes));
     s.screenFlip    = 0;
+    s.btnFlip       = 0;
 }
 
 #endif /* __cplusplus */
