@@ -29,12 +29,8 @@ bool TouchHandler::isTouched() {
     if (now && !_pressed) {
         TS_Point p = ts.getPoint();
         if (p.x < 100 || p.x > 3950 || p.y < 100 || p.y > 3950) return false;
-        _px = constrain(map(p.x, 3800, 200, 0, SCREEN_W-1), 0, SCREEN_W-1);
-        _py = constrain(map(p.y, 3800, 200, 0, SCREEN_H-1), 0, SCREEN_H-1);
-        if (settings.screenFlip) {
-            _px = (SCREEN_W - 1) - _px;
-            _py = (SCREEN_H - 1) - _py;
-        }
+        _px = constrain(map(p.x, 200, 3800, 0, SCREEN_W-1), 0, SCREEN_W-1);
+        _py = constrain(map(p.y, 200, 3800, 0, SCREEN_H-1), 0, SCREEN_H-1);
         if (settings.diagTouch)
             Serial.printf("Touch: raw(%d,%d)->(%d,%d)\n", p.x,p.y,_px,_py);
         _pressed = true; _pressTime = millis();
@@ -52,12 +48,8 @@ bool TouchHandler::rawTouched() {
     if (!ts.touched()) return false;
     TS_Point p = ts.getPoint();
     if (p.x < 100 || p.x > 3950 || p.y < 100 || p.y > 3950) return false;
-    _px = constrain(map(p.x, 3800, 200, 0, SCREEN_W-1), 0, SCREEN_W-1);
-    _py = constrain(map(p.y, 3800, 200, 0, SCREEN_H-1), 0, SCREEN_H-1);
-    if (settings.screenFlip) {
-        _px = (SCREEN_W - 1) - _px;
-        _py = (SCREEN_H - 1) - _py;
-    }
+    _px = constrain(map(p.x, 200, 3800, 0, SCREEN_W-1), 0, SCREEN_W-1);
+    _py = constrain(map(p.y, 200, 3800, 0, SCREEN_H-1), 0, SCREEN_H-1);
     return true;
 }
 

@@ -4,13 +4,9 @@
 
 LGFX lcd;
 
-void applyScreenRotation() {
-    lcd.setRotation(settings.screenFlip ? (SCREEN_ROT ^ 2) : SCREEN_ROT);
-}
-
 void initDisplay() {
     lcd.init();
-    applyScreenRotation();
+    lcd.setRotation(SCREEN_ROT);
     lcd.fillScreen(TFT_BLACK);
     lcd.setTextSize(1);
     lcd.setTextDatum(MC_DATUM);

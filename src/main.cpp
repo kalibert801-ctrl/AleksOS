@@ -145,7 +145,6 @@ void setup() {
         Serial.printf("[CFG] identity=%s  (A=01 B=02 SEL=04 STA=08 UP=10 DN=20 LT=40 RT=80)\n",
             (settings.btnMap[0]==0x01 && settings.btnMap[1]==0x02 &&
              settings.btnMap[2]==0x04 && settings.btnMap[3]==0x08) ? "YES" : "NO ← MISMATCH!");
-        applyScreenRotation();
         setBrightness(settings.brightness);
         ledSet(LED_GREEN);
 

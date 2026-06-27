@@ -79,7 +79,7 @@
 // ── Дисплей ───────────────────────────────────────────────
 #define SCREEN_W    320
 #define SCREEN_H    240
-#define SCREEN_ROT    3
+#define SCREEN_ROT    1
 
 // ── UI (settings screens — оригинальные размеры, не менять) ──
 #define HDR_H        40

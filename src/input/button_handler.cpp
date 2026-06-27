@@ -95,15 +95,6 @@ uint8_t ButtonHandler::applyBtnMap(uint8_t raw) const {
     uint8_t out = 0;
     for (int i = 0; i < 8; i++)
         if (raw & (1 << i)) out |= settings.btnMap[i];
-    // При btnFlip инвертируем направления D-pad (независимо от ротации экрана)
-    if (settings.btnFlip) {
-        uint8_t dpad = out & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
-        out &= ~(BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
-        if (dpad & BTN_UP)    out |= BTN_DOWN;
-        if (dpad & BTN_DOWN)  out |= BTN_UP;
-        if (dpad & BTN_LEFT)  out |= BTN_RIGHT;
-        if (dpad & BTN_RIGHT) out |= BTN_LEFT;
-    }
     return out;
 }
 
