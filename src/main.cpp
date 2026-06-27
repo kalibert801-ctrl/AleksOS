@@ -15,6 +15,7 @@
 #include "system/battery.h"
 #include "ui/ui.h"
 #include "emulator/emu_runner.h"
+#include "emulator/gb_runner.h"
 #include "network/wifi_manager.h"
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
@@ -663,6 +664,11 @@ static void runEmulator(int idx) {
                       path, (unsigned)(rom.size/1024),
                       (unsigned)(ESP.getFreeHeap()/1024));
 
+    // Определяем тип ROM по расширению
+    String pathStr = String(path);
+    String pathLow = pathStr; pathLow.toLowerCase();
+    bool isGB = pathLow.endsWith(".gb") || pathLow.endsWith(".gbc");
+
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
@@ -670,10 +676,14 @@ static void runEmulator(int idx) {
     lcd.setFont(&lgfx::fonts::DejaVu12);
     lcd.setTextColor(t.textPri);
     lcd.drawString("Loading...", SCREEN_W/2, HDR_H/2);
-    lcd.fillCircle(SCREEN_W/2, 110, 46, t.accent);
+
+    // Иконка: зелёная для NES, красная для GB
+    uint16_t logoCol = isGB ? (uint16_t)0xF800 : t.accent;
+    lcd.fillCircle(SCREEN_W/2, 110, 46, logoCol);
     lcd.setTextColor(t.bg);
     lcd.setFont(&lgfx::fonts::DejaVu18);
-    lcd.drawString("NES", SCREEN_W/2, 110);
+    lcd.drawString(isGB ? "GB" : "NES", SCREEN_W/2, 110);
+
     lcd.setFont(&lgfx::fonts::DejaVu12);
     lcd.setTextColor(t.textPri);
     String name = rom.name;
@@ -690,13 +700,18 @@ static void runEmulator(int idx) {
                    SCREEN_W/2, 207);
     delay(400);
 
-    if (settings.diagEmu) Serial.printf("[SYS] Starting nofrendo NES emulator\n");
     uint32_t _playStart = millis();
-    // Записываем в недавние перед запуском (даже если сразу вылетит)
     GameStats::recentAdd(path);
     GameStats::save();
 
-    int result = emu_run(path);
+    int result = 0;
+    if (isGB) {
+        if (settings.diagEmu) Serial.printf("[SYS] Starting GB emulator\n");
+        gb_run(path);
+    } else {
+        if (settings.diagEmu) Serial.printf("[SYS] Starting nofrendo NES emulator\n");
+        result = emu_run(path);
+    }
 
     // Записываем время игры (в секундах)
     uint32_t _playSecs = (millis() - _playStart) / 1000;

@@ -31,12 +31,11 @@ static void scanDir(std::vector<ROMInfo> &roms, const char *dir) {
         if (!f.isDirectory()) {
             String n = String(f.name());
             String nl = n; nl.toLowerCase();
-            if (nl.endsWith(".nes")) {
+            if (nl.endsWith(".nes") || nl.endsWith(".gb") || nl.endsWith(".gbc")) {
                 ROMInfo info;
-                // Убираем расширение и пробелы
-                info.name = n.substring(0, n.length() - 4);
+                int dotPos = n.lastIndexOf('.');
+                info.name = n.substring(0, dotPos);
                 info.name.trim();
-                // Строим путь
                 info.path = String(dir) + "/" + n;
                 info.size = f.size();
                 roms.push_back(info);
@@ -94,8 +93,10 @@ bool SDManager::renameROM(int idx, const char *newName) {
     // Build new path: same directory, new name + .nes
     String oldPath = _roms[idx].path;
     int slash = oldPath.lastIndexOf('/');
+    int dot   = oldPath.lastIndexOf('.');
     String dir = (slash >= 0) ? oldPath.substring(0, slash + 1) : "/";
-    String newPath = dir + String(newName) + ".nes";
+    String ext = (dot > slash) ? oldPath.substring(dot) : ".nes";
+    String newPath = dir + String(newName) + ext;
     if (!SD.rename(oldPath.c_str(), newPath.c_str())) {
         Serial.printf("SD: rename FAILED '%s' -> '%s'\n",
                       oldPath.c_str(), newPath.c_str());
