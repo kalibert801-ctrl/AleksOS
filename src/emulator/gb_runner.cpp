@@ -31,18 +31,23 @@ static uint8_t *_ramBuf  = nullptr;
 static size_t   _ramSize = 0;
 
 // ── Рендер ───────────────────────────────────────────────────────────────────
+// Стратегия: во время gb_run_frame() пишем в PSRAM-framebuffer (быстро).
+// После кадра — один lcd.pushImage(0,0,320,240) = один DMA-burst (15ms).
+// Раньше было 240 отдельных pushImage(320×1) с накладными SPI-расходами.
+//
 // Масштабирование 160×144 → 320×240:
-//   X: 2× (320/160 = 2 — целое, просто дублируем пиксели)
-//   Y: 5/3 (240/144 = 5/3) — Bresenham: каждые 3 строки GB → 5 строк экрана
-static uint16_t _lineBuf[320];
-static int      _scaleErr = 0;
-static int      _screenY  = 0;
+//   X: ×2 (дублируем каждый пиксель)
+//   Y: Bresenham 5:3 (144 строки → 240 строк, каждые 3 → 5)
 
-// DMG-палитра (4 оттенка: 0=белый … 3=чёрный)
-// Используем классический зеленоватый стиль оригинального Game Boy
+static uint16_t *_frameBuf = nullptr;  // 320×240×2 = 150 KB в PSRAM
+static uint16_t  _rowBuf[320];         // временный буфер одной строки (internal RAM)
+static int       _scaleErr = 0;
+static int       _screenY  = 0;
+
+// DMG-палитра: классический зеленоватый стиль оригинального Game Boy
 static const uint16_t _gbPal[4] = {
-    0x9F20,  // светлый   (#9BBC0F region — зелёный белый GB)
-    0x6B20,  // светло-серый
+    0x9F20,  // светлый  (светло-зелёный)
+    0x6B20,  // средний
     0x2980,  // тёмный
     0x0000,  // чёрный
 };
@@ -51,18 +56,18 @@ static void gb_lcd_draw_line_cb(struct gb_s *gb, const uint8_t pixels[160], uint
     (void)gb;
     if (line == 0) { _screenY = 0; _scaleErr = 0; }
 
-    // Строим растянутую строку: 160 → 320 (×2 по X, дублирование)
+    // Строим строку 320px в internal-RAM (быстро, без PSRAM latency)
     for (int x = 0; x < 160; x++) {
         uint16_t col = _gbPal[pixels[x] & 3];
-        _lineBuf[x * 2]     = col;
-        _lineBuf[x * 2 + 1] = col;
+        _rowBuf[x * 2]     = col;
+        _rowBuf[x * 2 + 1] = col;
     }
 
-    // Bresenham по Y: 144 строки GB → 240 строк экрана (5:3 = 1 или 2 повтора)
+    // Bresenham по Y: каждые 3 строки GB → 5 строк экрана
     _scaleErr += 240;
     while (_scaleErr >= 144) {
-        if (_screenY < SCREEN_H)
-            lcd.pushImage(0, _screenY, 320, 1, _lineBuf);
+        if (_screenY < SCREEN_H && _frameBuf)
+            memcpy(_frameBuf + _screenY * 320, _rowBuf, 320 * sizeof(uint16_t));
         _screenY++;
         _scaleErr -= 144;
     }
@@ -300,8 +305,19 @@ void gb_run(const char *romPath) {
         if (_ramBuf) { memset(_ramBuf, 0xFF, _ramSize); gbLoadRAM(); }
     }
 
-    Serial.printf("[GB] RAM %u KB  heap=%u KB\n",
-                  (unsigned)(_ramSize/1024), (unsigned)(ESP.getFreeHeap()/1024));
+    // Framebuffer 320×240 в PSRAM — заполняется в колбэке, пушится одним DMA
+    _frameBuf = (uint16_t*)heap_caps_malloc(320 * 240 * sizeof(uint16_t),
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!_frameBuf) {
+        Serial.println("[GB] framebuf alloc failed");
+        // Продолжаем без framebuffer — будет медленнее, но работоспособно
+    }
+    memset(_frameBuf ? (void*)_frameBuf : (void*)_rowBuf, 0,
+           _frameBuf ? 320*240*2 : 0);
+
+    Serial.printf("[GB] RAM %u KB  fb=%s  heap=%u KB\n",
+                  (unsigned)(_ramSize/1024), _frameBuf ? "ok" : "FAIL",
+                  (unsigned)(ESP.getFreeHeap()/1024));
 
     // ── Главный цикл ─────────────────────────────────────────────────────────
     uint8_t homeFrames = 0;
@@ -343,7 +359,13 @@ void gb_run(const char *romPath) {
         else homeFrames = 0;
         homePrev = homeNow;
 
-        if (!_gbExitReq) gb_run_frame(gb);
+        if (!_gbExitReq) {
+            gb_run_frame(gb);  // заполняет _frameBuf через колбэк
+
+            // Один DMA push всего кадра (vs 240 отдельных)
+            if (_frameBuf)
+                lcd.pushImage(0, 0, SCREEN_W, SCREEN_H, _frameBuf);
+        }
 
         // Выдерживаем 60 fps
         uint32_t elapsed = micros() - t0;
@@ -352,7 +374,8 @@ void gb_run(const char *romPath) {
 
     // Сохраняем battery RAM и освобождаем память
     gbSaveRAM();
-    if (_ramBuf) { heap_caps_free(_ramBuf); _ramBuf = nullptr; }
+    if (_frameBuf) { heap_caps_free(_frameBuf); _frameBuf = nullptr; }
+    if (_ramBuf)   { heap_caps_free(_ramBuf);   _ramBuf   = nullptr; }
     _ramSize = 0;
     heap_caps_free(gb);
     heap_caps_free(_romBuf); _romBuf = nullptr;
