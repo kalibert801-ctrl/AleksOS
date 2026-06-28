@@ -31,22 +31,22 @@ static uint8_t *_ramBuf  = nullptr;
 static size_t   _ramSize = 0;
 
 // ── Рендер ───────────────────────────────────────────────────────────────────
-// Стратегия: во время gb_run_frame() пишем в PSRAM-framebuffer (быстро).
-// После кадра — один lcd.pushImage(0,0,320,240) = один DMA-burst (15ms).
-// Раньше было 240 отдельных pushImage(320×1) с накладными SPI-расходами.
-//
-// Масштабирование 160×144 → 320×240:
-//   X: ×2 (дублируем каждый пиксель)
-//   Y: Bresenham 5:3 (144 строки → 240 строк, каждые 3 → 5)
+// Формат вывода: 320×144 (2× по X, 1× по Y), центрировано на 320×240.
+//   Чёрные полосы сверху/снизу по 48px рисуются один раз при старте.
+//   Framebuffer: 320×144×2 = 92 KB в PSRAM.
+//   LCD transfer: 92 KB vs 150 KB при 320×240 — на 39% меньше (~9ms vs ~15ms).
+//   Это самый быстрый вариант с 2× горизонтальным масштабом без артефактов.
 
-static uint16_t *_frameBuf = nullptr;  // 320×240×2 = 150 KB в PSRAM
-static uint16_t  _rowBuf[320];         // временный буфер одной строки (internal RAM)
-static int       _scaleErr = 0;
-static int       _screenY  = 0;
+#define GB_SCREEN_W  320         // выход по X (160 GB → 320 экрана, ×2)
+#define GB_SCREEN_H  144         // выход по Y (1:1, без вертикального масштаба)
+#define GB_OFFSET_Y  ((SCREEN_H - GB_SCREEN_H) / 2)   // 48px — отступ сверху
 
-// DMG-палитра: классический зеленоватый стиль оригинального Game Boy
+static uint16_t *_frameBuf = nullptr;  // GB_SCREEN_W × GB_SCREEN_H × 2 = 92 KB
+static uint16_t  _rowBuf[GB_SCREEN_W]; // строка в internal RAM (без PSRAM latency)
+
+// DMG-палитра: классический зеленоватый Game Boy
 static const uint16_t _gbPal[4] = {
-    0x9F20,  // светлый  (светло-зелёный)
+    0x9F20,  // светлый (светло-зелёный)
     0x6B20,  // средний
     0x2980,  // тёмный
     0x0000,  // чёрный
@@ -54,23 +54,16 @@ static const uint16_t _gbPal[4] = {
 
 static void gb_lcd_draw_line_cb(struct gb_s *gb, const uint8_t pixels[160], uint_fast8_t line) {
     (void)gb;
-    if (line == 0) { _screenY = 0; _scaleErr = 0; }
+    if (line >= GB_SCREEN_H || !_frameBuf) return;
 
-    // Строим строку 320px в internal-RAM (быстро, без PSRAM latency)
+    // 160 GB пикселей → 320 экранных (×2 по X, дублирование)
     for (int x = 0; x < 160; x++) {
         uint16_t col = _gbPal[pixels[x] & 3];
         _rowBuf[x * 2]     = col;
         _rowBuf[x * 2 + 1] = col;
     }
-
-    // Bresenham по Y: каждые 3 строки GB → 5 строк экрана
-    _scaleErr += 240;
-    while (_scaleErr >= 144) {
-        if (_screenY < SCREEN_H && _frameBuf)
-            memcpy(_frameBuf + _screenY * 320, _rowBuf, 320 * sizeof(uint16_t));
-        _screenY++;
-        _scaleErr -= 144;
-    }
+    memcpy(_frameBuf + (uint32_t)line * GB_SCREEN_W, _rowBuf,
+           GB_SCREEN_W * sizeof(uint16_t));
 }
 
 // ── Peanut-GB callbacks ──────────────────────────────────────────────────────
@@ -305,15 +298,13 @@ void gb_run(const char *romPath) {
         if (_ramBuf) { memset(_ramBuf, 0xFF, _ramSize); gbLoadRAM(); }
     }
 
-    // Framebuffer 320×240 в PSRAM — заполняется в колбэке, пушится одним DMA
-    _frameBuf = (uint16_t*)heap_caps_malloc(320 * 240 * sizeof(uint16_t),
+    // Framebuffer 320×144 в PSRAM (92 KB — вдвое меньше чем 320×240)
+    _frameBuf = (uint16_t*)heap_caps_malloc(GB_SCREEN_W * GB_SCREEN_H * sizeof(uint16_t),
                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!_frameBuf) {
-        Serial.println("[GB] framebuf alloc failed");
-        // Продолжаем без framebuffer — будет медленнее, но работоспособно
-    }
-    memset(_frameBuf ? (void*)_frameBuf : (void*)_rowBuf, 0,
-           _frameBuf ? 320*240*2 : 0);
+    if (_frameBuf) memset(_frameBuf, 0, GB_SCREEN_W * GB_SCREEN_H * sizeof(uint16_t));
+
+    // Чёрные полосы сверху и снизу — рисуем один раз, потом не трогаем
+    lcd.fillScreen(0x0000);
 
     Serial.printf("[GB] RAM %u KB  fb=%s  heap=%u KB\n",
                   (unsigned)(_ramSize/1024), _frameBuf ? "ok" : "FAIL",
@@ -336,10 +327,12 @@ void gb_run(const char *romPath) {
         uint8_t curPad = buttons.applyBtnMap(buttons.readCurrent());
 
         // Кормим GB джойпад (0=нажата, 1=отпущена)
-        gb->direct.joypad_bits.a      = !(curPad & BTN_A);
-        gb->direct.joypad_bits.b      = !(curPad & BTN_B);
-        gb->direct.joypad_bits.select = !(curPad & BTN_SEL);
-        gb->direct.joypad_bits.start  = !(curPad & BTN_STA);
+        // START физ → GB A,  A физ → GB START (по запросу)
+        // SELECT физ → GB B, B физ → GB SELECT (по запросу)
+        gb->direct.joypad_bits.a      = !(curPad & BTN_STA);  // физ START → GB A
+        gb->direct.joypad_bits.b      = !(curPad & BTN_SEL);  // физ SELECT → GB B
+        gb->direct.joypad_bits.select = !(curPad & BTN_B);    // физ B → GB SELECT
+        gb->direct.joypad_bits.start  = !(curPad & BTN_A);    // физ A → GB START
         gb->direct.joypad_bits.up     = !(curPad & BTN_UP);
         gb->direct.joypad_bits.down   = !(curPad & BTN_DOWN);
         gb->direct.joypad_bits.left   = !(curPad & BTN_LEFT);
@@ -362,9 +355,9 @@ void gb_run(const char *romPath) {
         if (!_gbExitReq) {
             gb_run_frame(gb);  // заполняет _frameBuf через колбэк
 
-            // Один DMA push всего кадра (vs 240 отдельных)
+            // Пушим 320×144 в центр экрана (один DMA burst, 92 KB вместо 150 KB)
             if (_frameBuf)
-                lcd.pushImage(0, 0, SCREEN_W, SCREEN_H, _frameBuf);
+                lcd.pushImage(0, GB_OFFSET_Y, GB_SCREEN_W, GB_SCREEN_H, _frameBuf);
         }
 
         // Выдерживаем 60 fps
