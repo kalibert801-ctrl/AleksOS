@@ -311,12 +311,16 @@ void gb_run(const char *romPath) {
                   (unsigned)(ESP.getFreeHeap()/1024));
 
     // ── Главный цикл ─────────────────────────────────────────────────────────
-    uint8_t homeFrames = 0;
-    bool    homePrev   = false;
+    uint8_t  homeFrames  = 0;
+    bool     homePrev    = false;
     const uint32_t FRAME_US = 16742;  // ~59.73 fps
 
     // Комбо выхода: SELECT+START удерживать ~3 с
     uint32_t exitComboMs = 0;
+
+    // FPS диагностика (как в NES: каждые 3 с в Serial, если diagFPS включён)
+    uint32_t _fpsFrames = 0;
+    uint32_t _fpsLastMs = 0;
 
     while (!_gbExitReq) {
         uint32_t t0 = micros();
@@ -358,6 +362,20 @@ void gb_run(const char *romPath) {
             // Пушим 320×144 в центр экрана (один DMA burst, 92 KB вместо 150 KB)
             if (_frameBuf)
                 lcd.pushImage(0, GB_OFFSET_Y, GB_SCREEN_W, GB_SCREEN_H, _frameBuf);
+
+            // FPS в Serial (только если diagFPS включён, каждые 3 с)
+            if (settings.diagFPS) {
+                _fpsFrames++;
+                uint32_t now = millis();
+                if (_fpsLastMs == 0) { _fpsLastMs = now; }
+                else if (now - _fpsLastMs >= 3000) {
+                    float fps = _fpsFrames * 1000.0f / (now - _fpsLastMs);
+                    Serial.printf("[GB]  FPS=%.1f  heap=%u KB  psram=%u KB\n",
+                                  fps, ESP.getFreeHeap()/1024, ESP.getFreePsram()/1024);
+                    _fpsFrames = 0;
+                    _fpsLastMs = now;
+                }
+            }
         }
 
         // Выдерживаем 60 fps
