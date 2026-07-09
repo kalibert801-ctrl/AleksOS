@@ -83,6 +83,7 @@ void wifiKeyboardReset();
 // -- OTA screens -------------------------------------------------------
 void otaScreen();
 void picoOtaScreen(const char *picoUrl);
+void sdOtaScreen();   // обновление из /update/*.bin на SD карте
 
 // -- Popup -------------------------------------------------------------
 void popupShow(const char *title, const char *msg, uint32_t timeoutMs = 3000);
@@ -96,6 +97,13 @@ void    fileMgrDraw();
 uint8_t fileMgrHandleTouch(int x, int y);
 uint8_t fileMgrNavBtn(uint8_t btn);
 int     fileMgrSelected();
+
+// -- Music player ------------------------------------------------------
+void    musicPlayerOpen();
+void    musicPlayerDraw();
+void    musicPlayerTick();            // вызывать в loop() — refresh по окончании трека
+uint8_t musicPlayerHandleTouch(int x, int y);
+uint8_t musicPlayerNavBtn(uint8_t btn);
 
 // -- Cover art thumbnail pre-cache ------------------------------------
 // Вызывать при загрузке (после sdMgr.init).
@@ -116,3 +124,13 @@ uint8_t ggScreenHandleTouch(int x, int y);
 void    ggScreenSetSlot(int slot);
 int     ggScreenGetSlot();
 void    ggCodeSaveToSlot(const char *code);  // save code to current _ggSel slot
+
+// -- Game Shark codes screen -------------------------------------------
+// Access: gi=36 in Settings → Controls.
+// Returns same codes as ggScreen: BTN_B=back, 0xC1..0xC8=edit slot N.
+void    gsScreenDraw();
+uint8_t gsScreenNavBtn(uint8_t btn);
+uint8_t gsScreenHandleTouch(int x, int y);
+void    gsScreenSetSlot(int slot);
+int     gsScreenGetSlot();
+void    gsCodeSaveToSlot(const char *code);  // save code to current _gsSel slot

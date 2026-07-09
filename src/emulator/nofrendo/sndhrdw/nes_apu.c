@@ -865,11 +865,8 @@ uint8 apu_read(uint32 address)
 
 #define CLIP_OUTPUT16(out) \
 { \
-   /*out <<= 1;*/ \
-   if (out > 0x7FFF) \
-      out = 0x7FFF; \
-   else if (out < -0x8000) \
-      out = -0x8000; \
+   if ((out) > 0x7FFF)  (out) = 0x7FFF; \
+   else if ((out) < -0x8000) (out) = -0x8000; \
 }
 
 void apu_process(void *buffer, int num_samples)

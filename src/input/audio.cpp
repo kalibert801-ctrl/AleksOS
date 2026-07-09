@@ -20,12 +20,18 @@
 #include "driver/rtc_io.h"
 #include <math.h>
 
+// minimp3 — single-header MP3 decoder (https://github.com/lieff/minimp3)
+// Добавить в platformio.ini: https://github.com/lieff/minimp3.git
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#include <minimp3.h>
+
 static inline void restoreTouch() { rtc_gpio_deinit(GPIO_NUM_25); }
 
 #define AUDIO_SR      22050      // sample rate для тонов
 #define WAV_I2S       I2S_NUM_0
-#define WAV_DMA_BUFS  4
-#define WAV_DMA_LEN   256
+#define WAV_DMA_BUFS  8
+#define WAV_DMA_LEN   512
 
 // ── Синус-таблица (256 точек, unsigned 8-bit) ──────────────────
 // Вычисляется один раз при старте. sinf дает чистую синусоиду без гармоник.
@@ -46,52 +52,48 @@ enum AudioReqType { AUDIO_NONE, AUDIO_WAV, AUDIO_TONE };
 
 struct AudioReq {
     AudioReqType type;
-    char  path[52];     // для AUDIO_WAV
+    char  path[128];    // для AUDIO_WAV (до 120 символов пути)
     Note  notes[8];     // для AUDIO_TONE
     int   noteCount;
 };
 
 static AudioReq      _req;
-static volatile bool _busy  = false;
-static TaskHandle_t  _task  = nullptr;
+static volatile bool _busy    = false;
+static volatile bool _stopReq = false;
+static TaskHandle_t  _task    = nullptr;
 static bool          _sdSounds = false;
 
-// ── TPDF дизеринг для WAV ─────────────────────────────────────
-static uint32_t _wav_lfsr = 0xCAFEBABEu;
-static inline int32_t wav_tpdf() {
-    _wav_lfsr ^= _wav_lfsr << 13;
-    _wav_lfsr ^= _wav_lfsr >> 17;
-    _wav_lfsr ^= _wav_lfsr << 5;
-    int32_t r1 = (int32_t)(_wav_lfsr & 0xFF);
-    _wav_lfsr ^= _wav_lfsr << 13;
-    _wav_lfsr ^= _wav_lfsr >> 17;
-    _wav_lfsr ^= _wav_lfsr << 5;
-    int32_t r2 = (int32_t)(_wav_lfsr & 0xFF);
-    return r1 - r2;
-}
 
-// ── DMA буфер (статический — не занимает стек задачи) ─────────
-static uint16_t _i2sBuf[WAV_DMA_LEN * 2];
+// ── DMA буфер (моно, статический — не занимает стек задачи) ───
+static uint16_t _i2sBuf[WAV_DMA_LEN];
+static bool     _i2sInstalled = false;  // отслеживаем состояние драйвера
+
+// ── MP3 статические буферы (в DRAM, не на стеке задачи) ───────
+// mp3dec_t ≈ 4 KB; inBuf 4 KB; pcmBuf 4.5 KB — итого ~12.5 KB DRAM
+static mp3dec_t  _mp3dec;
+static uint8_t   _mp3In[4096];
+static mp3d_sample_t _mp3Pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];  // 2304 × int16
 
 // ── I2S старт/стоп (общий для WAV и тонов) ────────────────────
 static bool i2sStart(uint32_t sr) {
     ledcDetachPin(AUDIO_PIN);
     pinMode(AUDIO_PIN, INPUT);
-    i2s_driver_uninstall(WAV_I2S);
+    if (_i2sInstalled) { i2s_driver_uninstall(WAV_I2S); _i2sInstalled = false; }
     restoreTouch();
 
     i2s_config_t cfg = {};
     cfg.mode             = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN);
     cfg.sample_rate      = sr;
     cfg.bits_per_sample  = I2S_BITS_PER_SAMPLE_16BIT;
-    cfg.channel_format   = I2S_CHANNEL_FMT_RIGHT_LEFT;
+    cfg.channel_format   = I2S_CHANNEL_FMT_ONLY_LEFT;   // GPIO26 = DAC2 = LEFT
     cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
     cfg.dma_buf_count    = WAV_DMA_BUFS;
     cfg.dma_buf_len      = WAV_DMA_LEN;
-    cfg.use_apll         = false;  // UI звуки — WiFi может быть активен
+    cfg.use_apll         = true;   // точный clock для аудио (APLL)
     cfg.intr_alloc_flags = 0;
 
     if (i2s_driver_install(WAV_I2S, &cfg, 0, nullptr) != ESP_OK) return false;
+    _i2sInstalled = true;
     i2s_set_pin(WAV_I2S, nullptr);
     i2s_set_dac_mode(I2S_DAC_CHANNEL_LEFT_EN);
     i2s_zero_dma_buffer(WAV_I2S);
@@ -99,12 +101,14 @@ static bool i2sStart(uint32_t sr) {
 }
 
 static void i2sStop() {
+    if (!_i2sInstalled) return;
     // Заполняем буферы тишиной (центр DAC = 0x8000) и ждём дренажа DMA
-    for (int i = 0; i < WAV_DMA_LEN * 2; i++) _i2sBuf[i] = 0x8000;
+    for (int i = 0; i < WAV_DMA_LEN; i++) _i2sBuf[i] = 0x8000;
     size_t w;
-    i2s_write(WAV_I2S, _i2sBuf, WAV_DMA_LEN * 4, &w, pdMS_TO_TICKS(100));
+    i2s_write(WAV_I2S, _i2sBuf, WAV_DMA_LEN * 2, &w, pdMS_TO_TICKS(100));
     vTaskDelay(pdMS_TO_TICKS(80));
     i2s_driver_uninstall(WAV_I2S);
+    _i2sInstalled = false;
     restoreTouch();
     pinMode(AUDIO_PIN, INPUT_PULLDOWN);
 }
@@ -146,15 +150,14 @@ static void playWavFile(const char *path) {
     if (!found || audioFmt != 1 || channels < 1 || channels > 2
                || bitsPerSample > 16 || sampleRate == 0) { f.close(); return; }
 
-    if (!i2sStart(sampleRate)) { f.close(); return; }
+    if (!i2sStart(sampleRate * 10 / 17)) { f.close(); return; }
 
     const int frameBytes = ((bitsPerSample == 8) ? 1 : 2) * (int)channels;
     uint8_t readBuf[512];
     uint32_t pos = 0;
-    uint8_t vol = settings.volume > 100 ? 100 : settings.volume;
     bool ok = true;
 
-    while (ok && pos < dataSize && f.available()) {
+    while (ok && pos < dataSize && f.available() && !_stopReq) {
         int toRead = (int)min((uint32_t)sizeof(readBuf), dataSize - pos);
         toRead = (toRead / frameBytes) * frameBytes;
         if (toRead <= 0) break;
@@ -162,29 +165,20 @@ static void playWavFile(const char *path) {
         if (got <= 0) break;
 
         int samples = got / frameBytes;
-        // _i2sBuf = WAV_DMA_LEN*2 = 512 uint16_t → индексы 0..511.
-        // Запись _i2sBuf[i*2+1] при samples=512 → индекс 1023 → выход за границу.
-        // Кап = WAV_DMA_LEN: цикл просто выполнится ещё раз при следующей читке SD.
         if (samples > WAV_DMA_LEN) samples = WAV_DMA_LEN;
         for (int i = 0; i < samples; i++) {
-            // Читаем в 16-битном пространстве — сохраняем точность до самого конца
-            int32_t s32;
+            uint16_t dacWord;
             if (bitsPerSample == 8) {
-                s32 = ((int32_t)readBuf[i * frameBytes] - 128) << 8;
+                dacWord = (uint16_t)readBuf[i * frameBytes] << 8;
             } else {
-                s32 = (int32_t)(int16_t)(readBuf[i * frameBytes] |
-                                        (readBuf[i * frameBytes + 1] << 8));
+                int16_t s = (int16_t)(readBuf[i * frameBytes] |
+                                     (readBuf[i * frameBytes + 1] << 8));
+                dacWord = (uint16_t)((uint8_t)((s + 32768) >> 8)) << 8;
             }
-            s32 = (s32 * (int32_t)vol) / 100;
-            s32 += wav_tpdf();                          // TPDF дизеринг ДО квантования
-            if (s32 >  32767) s32 =  32767;
-            if (s32 < -32768) s32 = -32768;
-            uint16_t dacWord = (uint16_t)((uint8_t)((s32 + 32768) >> 8)) << 8;
-            _i2sBuf[i * 2]     = dacWord;
-            _i2sBuf[i * 2 + 1] = dacWord;
+            _i2sBuf[i] = dacWord;
         }
         size_t written;
-        esp_err_t err = i2s_write(WAV_I2S, _i2sBuf, (size_t)(samples * 4),
+        esp_err_t err = i2s_write(WAV_I2S, _i2sBuf, (size_t)(samples * 2),
                                   &written, pdMS_TO_TICKS(200));
         if (err != ESP_OK) ok = false;
         pos += got;
@@ -194,25 +188,88 @@ static void playWavFile(const char *path) {
     i2sStop();
 }
 
+// ── Воспроизведение MP3 файла (minimp3) ──────────────────────────────────────
+// Декодирует фрейм за фреймом (1152 сэмпла/фрейм), стерео → моно для DAC.
+static void playMp3File(const char *path) {
+    File f = SD.open(path, FILE_READ);
+    if (!f) return;
+
+    mp3dec_init(&_mp3dec);
+
+    int inLen = 0;
+    uint32_t curSr = 0;
+    bool i2sOk = false;
+
+    while (!_stopReq) {
+        // Дозаполняем входной буфер из SD
+        if (inLen < (int)sizeof(_mp3In) && f.available()) {
+            int got = f.read(_mp3In + inLen, sizeof(_mp3In) - inLen);
+            if (got > 0) inLen += got;
+        }
+        if (inLen == 0) break;
+
+        mp3dec_frame_info_t fi;
+        int samples = mp3dec_decode_frame(&_mp3dec, _mp3In, inLen, _mp3Pcm, &fi);
+
+        // Сдвигаем буфер на обработанный фрейм
+        if (fi.frame_bytes > 0) {
+            if (fi.frame_bytes < inLen)
+                memmove(_mp3In, _mp3In + fi.frame_bytes, inLen - fi.frame_bytes);
+            inLen -= fi.frame_bytes;
+        } else if (samples == 0) {
+            // Недостаточно данных и файл закончился — выходим
+            if (!f.available()) break;
+            continue;
+        }
+        if (samples <= 0) continue;
+
+        // Перезапускаем I2S если sample rate изменился (редко, но бывает)
+        if (!i2sOk || fi.hz != curSr) {
+            if (i2sOk) i2sStop();
+            if (!i2sStart(fi.hz * 10 / 17)) break;
+            i2sOk = true; curSr = fi.hz;
+        }
+
+        // Количество фреймов (mono = samples, stereo = samples/2)
+        int frames = (fi.channels > 1) ? samples / 2 : samples;
+
+        // Пишем в I2S чанками WAV_DMA_LEN
+        int out = 0;
+        while (out < frames && !_stopReq) {
+            int chunk = min(frames - out, (int)WAV_DMA_LEN);
+            for (int i = 0; i < chunk; i++) {
+                int16_t s;
+                if (fi.channels > 1) {
+                    s = (int16_t)(((int32_t)_mp3Pcm[(out + i) * 2] +
+                                   (int32_t)_mp3Pcm[(out + i) * 2 + 1]) / 2);
+                } else {
+                    s = _mp3Pcm[out + i];
+                }
+                _i2sBuf[i] = (uint16_t)((uint8_t)((s + 32768) >> 8)) << 8;
+            }
+            size_t w;
+            i2s_write(WAV_I2S, _i2sBuf, (size_t)(chunk * 2), &w, pdMS_TO_TICKS(200));
+            out += chunk;
+        }
+    }
+
+    f.close();
+    if (i2sOk) i2sStop();
+}
+
 // ── Синтез синус-волны (I2S DAC) ──────────────────────────────
 // Вместо LEDC меандра: фазовый аккумулятор → синус-таблица → I2S DAC.
 // Результат: чистый тон без гармонических искажений.
 static void playSineSeq(const Note *notes, int count) {
     if (!i2sStart(AUDIO_SR)) return;
 
-    // Громкость: 1..100% → амплитуда 15..110 из 127 (не полная шкала, запас)
-    uint8_t vol = (settings.soundEnabled && settings.volume > 0)
-                  ? (uint8_t)map((long)settings.volume, 1L, 100L, 15L, 110L)
-                  : 0;
-
     bool ok = true;
-    for (int ni = 0; ni < count && ok; ni++) {
+    for (int ni = 0; ni < count && ok && !_stopReq; ni++) {
         const Note &note = notes[ni];
         if (note.ms == 0) break;
 
         uint32_t totalSamples = (uint32_t)AUDIO_SR * note.ms / 1000;
         float phase = 0.0f;
-        // Шаг фазы: сколько позиций таблицы (0..255) за один сэмпл
         float step = (note.freq > 0)
                      ? (256.0f * (float)note.freq / (float)AUDIO_SR)
                      : 0.0f;
@@ -220,25 +277,15 @@ static void playSineSeq(const Note *notes, int count) {
         for (uint32_t pos = 0; pos < totalSamples && ok; ) {
             uint32_t chunk = min((uint32_t)128, totalSamples - pos);
             for (uint32_t i = 0; i < chunk; i++) {
-                uint8_t dacVal;
-                if (note.freq == 0 || vol == 0) {
-                    dacVal = 128;  // тишина (центр DAC)
-                } else {
-                    int32_t s = (int32_t)_sineTable[(int)phase & 0xFF] - 128;
-                    s = (s * vol) / 127;
-                    // clamp
-                    if (s >  127) s =  127;
-                    if (s < -128) s = -128;
-                    dacVal = (uint8_t)(s + 128);
-                }
-                uint16_t dacWord = (uint16_t)dacVal << 8;
-                _i2sBuf[i * 2]     = dacWord;
-                _i2sBuf[i * 2 + 1] = dacWord;
+                uint8_t dacVal = (note.freq == 0)
+                    ? 128
+                    : _sineTable[(int)phase & 0xFF];
+                _i2sBuf[i] = (uint16_t)dacVal << 8;
                 phase += step;
                 if (phase >= 256.0f) phase -= 256.0f;
             }
             size_t written;
-            esp_err_t err = i2s_write(WAV_I2S, _i2sBuf, chunk * 4,
+            esp_err_t err = i2s_write(WAV_I2S, _i2sBuf, chunk * 2,
                                       &written, pdMS_TO_TICKS(100));
             if (err != ESP_OK) ok = false;
             pos += chunk;
@@ -255,8 +302,14 @@ static void audioTask(void*) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (!settings.soundEnabled) { _busy = false; continue; }
 
-        if      (_req.type == AUDIO_WAV)  playWavFile(_req.path);
-        else if (_req.type == AUDIO_TONE) playSineSeq(_req.notes, _req.noteCount);
+        if (_req.type == AUDIO_WAV) {
+            const char *dot = strrchr(_req.path, '.');
+            bool isMp3 = dot && (dot[1]=='m'||dot[1]=='M') && (dot[2]=='p'||dot[2]=='P') && dot[3]=='3' && dot[4]=='\0';
+            if (isMp3) playMp3File(_req.path);
+            else                                       playWavFile(_req.path);
+        } else if (_req.type == AUDIO_TONE) {
+            playSineSeq(_req.notes, _req.noteCount);
+        }
 
         _busy = false;
     }
@@ -296,7 +349,7 @@ void audioInit() {
         Serial.println("[AUD] No /sounds — I2S sine tones (clean sine, no LEDC buzz)");
     }
 
-    xTaskCreatePinnedToCore(audioTask, "aud", 4096, nullptr, 1, &_task, 1);
+    xTaskCreatePinnedToCore(audioTask, "aud", 32768, nullptr, 5, &_task, 1);
 }
 
 void audioUpdate() {
@@ -331,4 +384,24 @@ void soundOK() {
     if (_sdSounds) { triggerWav("ok"); return; }
     static const Note n[] = {{523,55},{659,55},{784,55},{1047,55},{2093,110},{0,0}};
     triggerTone(n, 6);
+}
+
+bool audioIsBusy() { return _busy; }
+
+void soundStop() {
+    if (!_busy) return;
+    _stopReq = true;
+    uint32_t t0 = millis();
+    while (_busy && (millis() - t0 < 1000)) vTaskDelay(1);
+    _stopReq = false;
+}
+
+void soundPlayPath(const char *path) {
+    if (!_task || _busy) return;
+    strncpy(_req.path, path, sizeof(_req.path) - 1);
+    _req.path[sizeof(_req.path) - 1] = '\0';
+    _req.type = AUDIO_WAV;
+    _busy = true;
+    _stopReq = false;
+    xTaskNotifyGive(_task);
 }

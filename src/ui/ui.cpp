@@ -5,6 +5,8 @@
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
+#include <Update.h>
+#include <SD.h>
 
 // ── Forward declarations для иконок и меню (используются до определения) ────
 static void iconTag(int cx,int cy,uint16_t c);
@@ -628,30 +630,29 @@ static bool _menuConfirmDelete(const char *name) {
 }
 
 // ── Три-точечное контекстное меню ──────────────────────────────
-// Возвращает true если нужно перейти в Settings.
-// Возвращает: 0=ничего, 1=Settings, 2=Gallery
+// Возвращает: 0=ничего, 1=Settings, 2=Gallery, 3=Music Player
 static uint8_t _menuDotMenu() {
     const Theme565& t = getTheme();
     static const char* sortLabels[] = {
         "Sort A-Z", "Sort Z-A", "Sort Size", "Sort Default"
     };
-    const char* items[4] = {
-        sortLabels[_sortMode % 4],   // следующий режим сортировки
+    const int N = 6;
+    const char* items[N] = {
+        sortLabels[_sortMode % 4],
         "Delete ROM",
         "Gallery",
+        "Music Player",
+        "Web Upload",
         "Settings"
     };
-    const int PX = 182, PY = M_HDR_H + 1, PW = 136, PH = 124, RH = 30;
+    const int PX = 172, PY = M_HDR_H + 1, PW = 146, PH = 184, RH = 30;
 
-    // ── Вспомогательная функция: рисует один пункт меню (с подсветкой или без) ──
     auto drawItem = [&](int idx, bool hi) {
         int iy = PY + 1 + idx * RH;
         uint16_t bg = hi ? t.accent : t.header;
         lcd.fillRect(PX + 1, iy, PW - 2, RH, bg);
-        // Разделитель над пунктом
-        if (idx > 0) lcd.drawFastHLine(PX + 4, iy, PW - 8, (uint16_t)COL_SEP);
-        // Разделитель под пунктом (= начало следующего)
-        if (idx < 3) lcd.drawFastHLine(PX + 4, iy + RH, PW - 8, (uint16_t)COL_SEP);
+        if (idx > 0)     lcd.drawFastHLine(PX + 4, iy,      PW - 8, (uint16_t)COL_SEP);
+        if (idx < N - 1) lcd.drawFastHLine(PX + 4, iy + RH, PW - 8, (uint16_t)COL_SEP);
         uint16_t ic = (idx == 1) ? (hi ? (uint16_t)COL_WHITE : t.danger)
                                  : (hi ? (uint16_t)COL_WHITE : t.textPri);
         fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(ic);
@@ -660,45 +661,42 @@ static uint8_t _menuDotMenu() {
 
     lcd.fillRoundRect(PX, PY, PW, PH, 6, t.header);
     lcd.drawRoundRect(PX, PY, PW, PH, 6, t.accent);
-    for (int i = 0; i < 4; i++) drawItem(i, false);
+    for (int i = 0; i < N; i++) drawItem(i, false);
 
-    // Ждём отпускания пальца от тапа открытия, иначе он сразу же закроет меню
     delay(120);
     while (touch.isTouched()) delay(10);
     delay(60);
 
     uint32_t until = millis() + 6000;
     int choice = -1;
-    int hiSel  = -1;   // -1 = кнопки ещё не нажимались, подсветка не показана
+    int hiSel  = -1;
 
     while (millis() < until && choice == -1) {
-        // ── Обработка касания ──────────────────────────────────────────
         if (touch.isTouched()) {
             delay(40);
             int tx = 0, ty = 0;
             touch.getXY(tx, ty);
             if (tx >= PX && tx < PX + PW && ty >= PY && ty < PY + PH)
-                choice = min((ty - PY - 1) / RH, 3);  // clamp: max valid index = 3
+                choice = min((ty - PY - 1) / RH, N - 1);
             else
-                { choice = -2; break; }  // тап вне меню (в т.ч. повторный тап ⋮) = закрыть
+                { choice = -2; break; }
         }
 
-        // ── Управление кнопками ────────────────────────────────────────
         buttons.update();
         uint8_t btn = buttons.applyBtnMap(buttons.readNew());
 
-        if (btn & (BTN_B | BTN_SEL)) { choice = -2; break; }   // отмена
+        if (btn & (BTN_B | BTN_SEL)) { choice = -2; break; }
 
         if (btn & BTN_UP) {
             int prev = hiSel;
-            hiSel = (hiSel <= 0) ? 3 : hiSel - 1;
+            hiSel = (hiSel <= 0) ? N - 1 : hiSel - 1;
             if (prev >= 0) drawItem(prev, false);
             drawItem(hiSel, true);
-            until = millis() + 6000;   // сбрасываем таймаут
+            until = millis() + 6000;
         }
         if (btn & BTN_DOWN) {
             int prev = hiSel;
-            hiSel = (hiSel < 0) ? 0 : (hiSel + 1) % 4;
+            hiSel = (hiSel < 0) ? 0 : (hiSel + 1) % N;
             if (prev >= 0) drawItem(prev, false);
             drawItem(hiSel, true);
             until = millis() + 6000;
@@ -734,10 +732,16 @@ static uint8_t _menuDotMenu() {
             menuDraw();
             break;
         }
-        case 2:  // Gallery → сигнализируем вызывающей стороне
+        case 2:  // Gallery
             menuDraw();
             return 2;
-        case 3:  // Settings
+        case 3:  // Music Player
+            menuDraw();
+            return 3;
+        case 4:  // Web Upload
+            menuDraw();
+            return 4;
+        case 5:  // Settings
             menuDraw();
             return 1;
         default:
@@ -911,6 +915,8 @@ uint8_t menuHandleTouch(int x, int y, int &romAction) {
             uint8_t r = _menuDotMenu();
             if (r == 1) return BTN_SEL;  // → Settings
             if (r == 2) return 0xD0;     // → Gallery
+            if (r == 3) return 0xD1;     // → Music Player
+            if (r == 4) return 0xD2;     // → Web Upload
             return 0;
         }
         return 0;
@@ -1248,10 +1254,11 @@ static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh) {
     if (SD.exists(thmPath)) {
         // Thumbnail уже есть — грузим маленький файл
         _drawRawFile(thmPath, dx, dy, dw, dh, /*noArtHint=*/true);
-    } else {
+    } else if (SD.exists(rawPath)) {
         // Первый раз: грузим полный и попутно сохраняем thumbnail
         _drawRawFile(rawPath, dx, dy, dw, dh, /*noArtHint=*/true, thmPath);
     }
+    // Иначе: обложки нет — рисуем ничего (без ошибок SD)
 }
 
 // ── Main ROM info popup ────────────────────────────────────────────────────────
@@ -1418,12 +1425,12 @@ static const char *_catName[] = {
 // gi=25 → открыть sub-экран Debug (cat=6 внутри)
 // gi=26 → OTA check (сигнал 0xA0 в main.cpp)
 static const int _catItems[][8] = {
-    { 0, 4, 7, -1, -1, -1, -1, -1 },           // 0: Display
+    { 0, 4, 7, 34, 35, -1, -1, -1 },           // 0: Display  (gi=34=Sleep, gi=35=Scanlines)
     { 1, 14, 8, 9, -1, -1, -1, -1 },           // 1: Audio
     { 2, 3, 29, -1, -1, -1, -1, -1 },          // 2: Appearance  (gi=29=NES Palette)
     { 6, 17, 18, 19, 24, 25, 26, 33 },         // 3: System      (gi=33=Battery screen)
-    { 12, 13, 15, 16, 30, 31, 32, 28 },        // 4: Controls    (gi=30=Turbo, gi=31=TurboMode, gi=32=GG)
-    { 10, 11, -1, -1, -1, -1, -1, -1 },        // 5: Info
+    { 12, 13, 15, 16, 30, 31, 32, 36 },        // 4: Controls    (gi=30=Turbo, gi=31=TurboMode, gi=32=GG, gi=36=GS)
+    { 10, 11, 28, -1, -1, -1, -1, -1 },        // 5: Info        (gi=28=Pico Controller перенесён сюда)
     { 5, 20, 21, 22, 23, -1, -1, -1 },         // 6: Debug (virtual sub-screen; gi=5=showFPS moved here)
     { -1, -1, -1, -1, -1, -1, -1, -1 },        // 7: Battery (virtual info screen, через gi=33)
 };
@@ -1545,6 +1552,19 @@ static String settingValue(int gi) {
             if (settings.turboMask == 0x0C) return "A+B";
             return "Off";
         }
+        case 34: {  // Sleep Timeout
+            static const char *labels[] = {"Off","1 min","2 min","5 min","10 min"};
+            static const uint8_t vals[] = {0,1,2,5,10};
+            for (int i = 0; i < 5; i++) if (settings.sleepTimeout == vals[i]) return labels[i];
+            return "Off";
+        }
+        case 35: return settings.scanlines ? "On" : "Off";  // Scanlines
+        case 36: {  // Game Shark
+            int n = 0;
+            for (int i = 0; i < 8; i++) if (settings.gsCodes[i][0]) n++;
+            if (!settings.gsEnabled) return "Off";
+            static char buf[16]; snprintf(buf, sizeof(buf), "On (%d)", n); return buf;
+        }
     }
     return "";
 }
@@ -1587,6 +1607,15 @@ static void settingInc(int gi) {
             settings.turboMask = masks[(cur + 1) % 4];
             break;
         }
+        case 34: {  // Sleep Timeout cycle forward
+            static const uint8_t vals[] = {0,1,2,5,10};
+            int cur = 0;
+            for (int i = 0; i < 5; i++) if (settings.sleepTimeout == vals[i]) { cur = i; break; }
+            settings.sleepTimeout = vals[(cur + 1) % 5];
+            break;
+        }
+        case 35: settings.scanlines = !settings.scanlines; break;  // Scanlines toggle
+        case 36: settings.gsEnabled = !settings.gsEnabled; break;  // Game Shark toggle
     }
 }
 
@@ -1628,6 +1657,15 @@ static void settingDec(int gi) {
             settings.turboMask = masks[(cur + 3) % 4];
             break;
         }
+        case 34: {  // Sleep Timeout cycle backward
+            static const uint8_t vals[] = {0,1,2,5,10};
+            int cur = 0;
+            for (int i = 0; i < 5; i++) if (settings.sleepTimeout == vals[i]) { cur = i; break; }
+            settings.sleepTimeout = vals[(cur + 4) % 5];
+            break;
+        }
+        case 35: settings.scanlines = !settings.scanlines; break;  // Scanlines toggle
+        case 36: settings.gsEnabled = !settings.gsEnabled; break;  // Game Shark toggle
     }
 }
 
@@ -2222,7 +2260,7 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
         case 26:            iconDownload(cx,cy,c); break; // OTA
         case 28:            iconChip(cx,cy,c); break;    // Pico version (read-only)
         case 29:                iconDiamond(cx,cy,c); break; // NES Palette
-        case 30: case 31: case 32: iconGamepad(cx,cy,c); break; // Turbo / Game Genie
+        case 30: case 31: case 32: case 36: iconGamepad(cx,cy,c); break; // Turbo / Game Genie / Game Shark
         case 33: {  // Battery — мини-иконка батареи
             lcd.drawRect(cx-7, cy-3, 13, 7, c);
             lcd.fillRect(cx+6, cy-1, 2, 3, c);
@@ -2230,6 +2268,19 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
             int fw = (pct > 0) ? (pct * 10 + 50) / 100 : 0;
             if (fw > 10) fw = 10;
             if (fw > 0) lcd.fillRect(cx-6, cy-2, fw, 5, c);
+            break;
+        }
+        case 34: {  // Sleep — moon icon
+            lcd.drawCircle(cx, cy, 6, c);
+            lcd.fillCircle(cx+3, cy-2, 5, 0x0000);
+            break;
+        }
+        case 35: {  // Scanlines — horizontal lines icon
+            lcd.drawFastHLine(cx-6, cy-4, 12, c);
+            lcd.drawFastHLine(cx-6, cy-2, 12, c);
+            lcd.drawFastHLine(cx-6, cy,   12, c);
+            lcd.drawFastHLine(cx-6, cy+2, 12, c);
+            lcd.drawFastHLine(cx-6, cy+4, 12, c);
             break;
         }
         default:            iconInfo(cx,cy,c); break;
@@ -2260,6 +2311,9 @@ static const char* getLabelForGi(int gi) {
         case 31: return "Turbo Mode";
         case 32: return "Game Genie";
         case 33: return "Battery";
+        case 34: return "Sleep";
+        case 35: return "Scanlines";
+        case 36: return "Game Shark";
     }
     return "";
 }
@@ -2455,6 +2509,7 @@ static uint8_t handleCategoryDetail(int x, int y) {
         if (gi == 24) return 0x80;   // WiFi → открыть WiFi менеджер
         if (gi == 26) return 0xA0;   // Check Update → OTA screen
         if (gi == 32) return 0xB0;   // Game Genie → открыть GG экран
+        if (gi == 36) return 0xD0;   // Game Shark → открыть GS экран
         if (gi == 25 || gi == 33) {
             // Debug (gi=25→cat=6) / Battery (gi=33→cat=7) — виртуальные sub-экраны
             _prevCat = _settingsCat;
@@ -2646,6 +2701,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 24) return 0x80;  // open WiFi
             if (gi == 26) return 0xA0;  // OTA check
             if (gi == 32) return 0xB0;  // open Game Genie codes screen
+            if (gi == 36) return 0xD0;  // open Game Shark codes screen
             if (gi == 25 || gi == 33) {
                 _prevCat = _settingsCat;
                 _settingsCat = (gi == 33) ? 7 : 6;
@@ -2660,6 +2716,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 24) return 0x80;  // open WiFi
             if (gi == 26) return 0xA0;  // OTA check
             if (gi == 32) return 0xB0;  // open Game Genie
+            if (gi == 36) return 0xD0;  // open Game Shark
             if (gi == 25 || gi == 33) {
                 _prevCat = _settingsCat;
                 _settingsCat = (gi == 33) ? 7 : 6;
@@ -2675,6 +2732,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 24) return 0x80;
             if (gi == 26) return 0xA0;
             if (gi == 32) return 0xB0;  // open Game Genie
+            if (gi == 36) return 0xD0;  // open Game Shark
             if (gi == 25 || gi == 33) {
                 _prevCat = _settingsCat;
                 _settingsCat = (gi == 33) ? 7 : 6;
@@ -3307,12 +3365,379 @@ static bool _otaAskUser(const char *cancelLabel, const char *actionLabel,
     return false;   // timeout → cancel
 }
 
+// ══════════════════════════════════════════════════════════════
+// SD-OTA: обновление прошивки из файла на SD карте
+// ══════════════════════════════════════════════════════════════
+
+// Сканируем /update/*.bin → макс 12 файлов
+struct _SdFwFile { char name[72]; size_t size; };
+static _SdFwFile _sdFwList[12];
+static int       _sdFwCount = 0;
+
+static void _sdFwScan() {
+    _sdFwCount = 0;
+    File dir = SD.open("/update");
+    if (!dir || !dir.isDirectory()) return;
+    while (_sdFwCount < 12) {
+        File f = dir.openNextFile();
+        if (!f) break;
+        if (f.isDirectory()) { f.close(); continue; }
+        const char *n = f.name();
+        int len = strlen(n);
+        if (len < 4) { f.close(); continue; }
+        // Проверяем расширение .bin
+        if (n[len-4]!='.' || (n[len-3]!='b'&&n[len-3]!='B')) { f.close(); continue; }
+        // basename
+        const char *sl = strrchr(n, '/');
+        const char *base = sl ? sl + 1 : n;
+        strncpy(_sdFwList[_sdFwCount].name, base, 71);
+        _sdFwList[_sdFwCount].name[71] = '\0';
+        _sdFwList[_sdFwCount].size = f.size();
+        _sdFwCount++;
+        f.close();
+    }
+    dir.close();
+}
+
+// Цифровая клавиатура — тач.  Возвращает true если введён правильный PIN.
+// Рисует поверх текущего экрана своё окно.
+static bool _sdNumpad(const char *correctPin) {
+    const Theme565 &t = getTheme();
+
+    // Сохраняем фон затемнением (просто заливаем центр)
+    const int WX = 20, WY = 28, WW = 280, WH = 210;
+    lcd.fillRoundRect(WX, WY, WW, WH, 10, t.bg);
+    lcd.drawRoundRect(WX, WY, WW, WH, 10, t.accent);
+
+    lcd.setTextDatum(MC_DATUM);
+    fmd(); lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("Enter Password", WX + WW/2, WY + 18);
+
+    // 4 ячейки для ввода
+    char entered[5] = {};
+    int  elen = 0;
+    const int CX = WX + WW/2;
+    const int CY = WY + 45;
+    const int CW = 42, CH = 32, CGap = 8;
+    const int cx0 = CX - (CW*4 + CGap*3)/2;
+
+    auto drawCells = [&]() {
+        for (int i = 0; i < 4; i++) {
+            int bx = cx0 + i*(CW+CGap);
+            lcd.fillRoundRect(bx, CY, CW, CH, 5, t.rowEven);
+            lcd.drawRoundRect(bx, CY, CW, CH, 5, i < elen ? t.accent : t.rowOdd);
+            lcd.setTextDatum(MC_DATUM);
+            fmd(); lcd.setTextColor(t.textPri);
+            if (i < elen) lcd.drawString("*", bx + CW/2, CY + CH/2);
+        }
+    };
+    drawCells();
+
+    // Кнопки 1-9, 0, ←, OK — 4 строки × 3 кол.
+    const char *keys[] = { "1","2","3","4","5","6","7","8","9","←","0","OK" };
+    const int KW = 74, KH = 34, KGX = 8, KGY = 6;
+    const int KX0 = WX + 12, KY0 = WY + 90;
+
+    auto drawKeys = [&]() {
+        for (int i = 0; i < 12; i++) {
+            int col = i % 3, row = i / 3;
+            int bx = KX0 + col*(KW+KGX);
+            int by = KY0 + row*(KH+KGY);
+            bool isOk  = (i == 11);
+            bool isDel = (i == 9);
+            uint16_t bg = isOk ? t.accent : (isDel ? t.danger : t.rowEven);
+            uint16_t fg = isOk ? t.bg : (isDel ? (uint16_t)0xFFFF : t.textPri);
+            lcd.fillRoundRect(bx, by, KW, KH, 6, bg);
+            lcd.drawRoundRect(bx, by, KW, KH, 6, t.rowOdd);
+            lcd.setTextDatum(MC_DATUM);
+            fmd(); lcd.setTextColor(fg);
+            lcd.drawString(keys[i], bx + KW/2, by + KH/2);
+        }
+    };
+    drawKeys();
+
+    // Цикл ввода
+    bool lastTouched = false;
+    while (true) {
+        bool nowTouched = touch.isTouched();
+        if (nowTouched && !lastTouched) {
+            int tx, ty; touch.getXY(tx, ty);
+            for (int i = 0; i < 12; i++) {
+                int col = i % 3, row = i / 3;
+                int bx = KX0 + col*(KW+KGX);
+                int by = KY0 + row*(KH+KGY);
+                if (tx >= bx && tx < bx+KW && ty >= by && ty < by+KH) {
+                    if (i == 9) { // ←
+                        if (elen > 0) { elen--; entered[elen] = '\0'; }
+                    } else if (i == 11) { // OK
+                        if (elen == (int)strlen(correctPin)) {
+                            return strncmp(entered, correctPin, 5) == 0;
+                        }
+                    } else {
+                        int digit = (i == 10) ? 0 : (i + 1);
+                        if (i >= 1 && i <= 8) digit = i + 1;
+                        if (i == 0) digit = 1;
+                        // Recalculate: keys[0]="1"..keys[8]="9", keys[10]="0"
+                        if (i <= 8) digit = i + 1;
+                        else digit = 0;
+                        if (elen < 4) { entered[elen] = '0' + digit; elen++; entered[elen] = '\0'; }
+                    }
+                    drawCells();
+                    break;
+                }
+            }
+        }
+        lastTouched = nowTouched;
+        delay(16);
+
+        // Физическая кнопка B = отмена
+        buttons.update();
+        if (buttons.readCurrent() & BTN_B) return false;
+    }
+}
+
+// Прошивка ESP32 из файла на SD карте
+static void _sdFlashFirmware(const char *filename) {
+    const Theme565 &t = getTheme();
+    char path[80];
+    snprintf(path, sizeof(path), "/update/%s", filename);
+
+    File f = SD.open(path);
+    if (!f) { popupShow("SD Update", "Cannot open file!", 3000); return; }
+    size_t fsize = f.size();
+    if (fsize < 1024) { f.close(); popupShow("SD Update", "File too small!", 3000); return; }
+
+    _otaDrawHeader("SD Update");
+    fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Flashing firmware...", SCREEN_W/2, 80);
+    fsm(); lcd.setTextColor(t.textSec);
+    lcd.drawString("Do NOT power off!", SCREEN_W/2, 100);
+    char buf[64]; snprintf(buf, sizeof(buf), "%s (%.0f KB)", filename, fsize/1024.0f);
+    lcd.drawString(buf, SCREEN_W/2, 116);
+
+    int barX = 20, barY = 140, barW = SCREEN_W-40, barH = 20;
+    lcd.drawRoundRect(barX, barY, barW, barH, 4, t.accent);
+
+    if (!Update.begin(fsize, U_FLASH)) {
+        f.close();
+        popupShow("SD Update", "Not enough OTA space!", 4000);
+        return;
+    }
+
+    uint8_t chunkBuf[512];
+    size_t written = 0;
+    while (written < fsize) {
+        int toRead = min((size_t)512, fsize - written);
+        int n = f.read(chunkBuf, toRead);
+        if (n <= 0) break;
+        Update.write(chunkBuf, n);
+        written += n;
+        int pct = (int)(written * 100 / fsize);
+        int filled = (barW - 2) * pct / 100;
+        lcd.fillRoundRect(barX+1, barY+1, filled > 1 ? filled : 1, barH-2, 3, t.accent);
+        char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+        lcd.fillRect(barX, barY+barH+4, barW, 16, t.bg);
+        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+        lcd.drawString(pctStr, SCREEN_W/2, barY+barH+12);
+    }
+    f.close();
+
+    if (Update.end(true) && !Update.hasError()) {
+        fmd(); lcd.setTextColor(t.ok); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("Done! Rebooting...", SCREEN_W/2, barY+barH+34);
+        delay(2000);
+        ESP.restart();
+    } else {
+        char errBuf[48]; snprintf(errBuf, sizeof(errBuf), "Error: %d", Update.getError());
+        popupShow("SD Update", errBuf, 5000);
+    }
+}
+
+// ── SD Update экран: выбор прошивки из /update/ ──────────────────────────────
+void sdOtaScreen() {
+    const Theme565 &t = getTheme();
+    _sdFwScan();
+
+    _otaDrawHeader("SD Update");
+    fsm(); lcd.setTextDatum(MC_DATUM);
+
+    if (_sdFwCount == 0) {
+        lcd.setTextColor(t.textSec);
+        lcd.drawString("No .bin files in /update/", SCREEN_W/2, 110);
+        fsm(); lcd.setTextColor(t.textSec);
+        lcd.drawString("Upload via Web Manager first", SCREEN_W/2, 130);
+        // footer
+        int by = DPAD_Y;
+        lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+        lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+        lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("B = Back", SCREEN_W/2, by + BTNBAR_H/2);
+        // ждём B
+        bool prev = false;
+        while (true) {
+            buttons.update();
+            bool now = (buttons.readCurrent() & BTN_B) != 0;
+            if (now && !prev) return;
+            prev = now; delay(20);
+        }
+    }
+
+    // Рисуем список файлов
+    const int ROW_H = 28;
+    const int ROWS  = (DPAD_Y - HDR_H) / ROW_H;
+    int sel = 0, off = 0;
+
+    auto drawList = [&]() {
+        lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
+        for (int i = 0; i < ROWS && (off + i) < _sdFwCount; i++) {
+            int idx = off + i;
+            int ry  = HDR_H + i * ROW_H;
+            bool s  = (idx == sel);
+            lcd.fillRect(0, ry, SCREEN_W, ROW_H - 1, s ? t.hilite : (i%2 ? t.rowOdd : t.rowEven));
+            if (s) lcd.drawFastHLine(0, ry, SCREEN_W, t.accent);
+            // имя
+            lcd.setTextDatum(ML_DATUM);
+            fsm(); lcd.setTextColor(s ? t.selText : t.textPri);
+            lcd.drawString(_sdFwList[idx].name, 8, ry + ROW_H/2);
+            // размер
+            char sz[16]; snprintf(sz, sizeof(sz), "%.0f KB", _sdFwList[idx].size/1024.0f);
+            lcd.setTextDatum(MR_DATUM);
+            fsm(); lcd.setTextColor(s ? t.selText : t.textSec);
+            lcd.drawString(sz, SCREEN_W - 6, ry + ROW_H/2);
+        }
+        // footer
+        int by = DPAD_Y;
+        lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+        lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+        lcd.setTextDatum(ML_DATUM); fsm(); lcd.setTextColor(t.textSec);
+        lcd.drawString("B=Back", 8, by + BTNBAR_H/2);
+        lcd.setTextDatum(MR_DATUM);
+        lcd.drawString("START=Flash", SCREEN_W - 8, by + BTNBAR_H/2);
+    };
+    drawList();
+
+    uint8_t prevPad = 0xFF;
+    while (true) {
+        buttons.update();
+        uint8_t cur    = buttons.readCurrent();
+        uint8_t newBtn = cur & ~prevPad;
+        prevPad        = cur;
+
+        if (newBtn & BTN_B) return;
+        if (newBtn & BTN_UP) {
+            if (sel > 0) { sel--; if (sel < off) off = sel; drawList(); }
+        }
+        if (newBtn & BTN_DOWN) {
+            if (sel < _sdFwCount - 1) { sel++; if (sel >= off + ROWS) off = sel - ROWS + 1; drawList(); }
+        }
+        if (newBtn & BTN_STA) {
+            // Подтверждение
+            _otaDrawHeader("SD Update");
+            fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
+            lcd.drawString("Flash firmware?", SCREEN_W/2, 78);
+            fsm(); lcd.setTextColor(t.textSec);
+            lcd.drawString(_sdFwList[sel].name, SCREEN_W/2, 100);
+            fmd(); lcd.setTextColor(t.danger);
+            lcd.drawString("ESP32 will reboot!", SCREEN_W/2, 125);
+            if (!_otaAskUser("Cancel", "Flash", 20000)) { drawList(); continue; }
+
+            // Пароль
+            _otaDrawHeader("SD Update");
+            if (!_sdNumpad("1234")) {
+                popupShow("SD Update", "Wrong password!", 2000);
+                _otaDrawHeader("SD Update");
+                drawList();
+                continue;
+            }
+
+            // Прошиваем
+            _sdFlashFirmware(_sdFwList[sel].name);
+            // Если сюда дошли — ошибка; перерисовываем список
+            _otaDrawHeader("SD Update");
+            drawList();
+        }
+        delay(16);
+    }
+}
+
+// ── Выбор источника обновления: GitHub (WEB) или SD карта (MANAGER) ──────────
+static bool _otaSourceChoice() {
+    const Theme565 &t = getTheme();
+    _otaDrawHeader("Check Update");
+
+    fmd(); lcd.setTextColor(t.textPri); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Update source:", SCREEN_W/2, 72);
+
+    // Кнопка WEB (левая)
+    lcd.fillRoundRect(16, 95, 130, 60, 10, t.rowEven);
+    lcd.drawRoundRect(16, 95, 130, 60, 10, t.accent);
+    fmd(); lcd.setTextColor(t.accent); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("WEB", 81, 118);
+    fsm(); lcd.setTextColor(t.textSec);
+    lcd.drawString("GitHub", 81, 138);
+
+    // Кнопка MANAGER (правая)
+    lcd.fillRoundRect(174, 95, 130, 60, 10, t.rowEven);
+    lcd.drawRoundRect(174, 95, 130, 60, 10, t.accent);
+    fmd(); lcd.setTextColor(t.accent); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("MANAGER", 239, 118);
+    fsm(); lcd.setTextColor(t.textSec);
+    lcd.drawString("SD card /update/", 239, 138);
+
+    // footer
+    int by = DPAD_Y;
+    lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
+    fsm(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("B = Cancel", SCREEN_W/2, by + BTNBAR_H/2);
+
+    bool lastTouch = false;
+    while (true) {
+        // B = отмена
+        buttons.update();
+        if (buttons.readCurrent() & BTN_B) return false;  // false = отмена
+
+        bool nowTouch = touch.isTouched();
+        if (nowTouch && !lastTouch) {
+            int tx, ty; touch.getXY(tx, ty);
+            if (ty >= 95 && ty <= 155) {
+                if (tx >= 16  && tx <= 146) return true;   // WEB
+                if (tx >= 174 && tx <= 304) {               // MANAGER
+                    sdOtaScreen();
+                    return false; // не идём в GitHub OTA
+                }
+            }
+        }
+        lastTouch = nowTouch;
+        delay(16);
+    }
+}
+
 void otaScreen() {
     const Theme565 &t = getTheme();
 
+    // ── Выбор: WEB или MANAGER ───────────────────────────────────────────────
+    // false = отмена или пользователь выбрал MANAGER (sdOtaScreen уже отработал)
+    // true  = пользователь выбрал WEB → продолжаем GitHub OTA ниже
+    if (!_otaSourceChoice()) return;
+
+    // Авто-подключение WiFi если выключен (WiFi выключается после NTP на старте)
+    bool _otaConnectedHere = false;
     if (!wifiMgr.isConnected()) {
-        popupShow("Update", "Connect WiFi first!", 3000);
-        return;
+        if (!settings.wifiEnabled || settings.wifiSSID[0] == '\0') {
+            popupShow("Update", "No WiFi configured!", 3000);
+            return;
+        }
+        _otaDrawHeader("Update");
+        fmd(); lcd.setTextColor(getTheme().textSec); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("Connecting to WiFi...", SCREEN_W/2, 120);
+        WiFi.mode(WIFI_STA);
+        if (!wifiMgr.connect(settings.wifiSSID, settings.wifiPass, 12000)) {
+            popupShow("Update", "WiFi connection failed!", 3000);
+            WiFi.mode(WIFI_OFF);
+            return;
+        }
+        _otaConnectedHere = true;
     }
 
     // ── Проверяем обновления ──────────────────────────────────────────────────
@@ -3420,6 +3845,12 @@ void otaScreen() {
         lcd.drawString(FIRMWARE_VERSION, SCREEN_W/2, 135);
         lcd.drawString("No Pico firmware in this release", SCREEN_W/2, 153);
         delay(3000);
+    }
+
+    // Выключаем WiFi если мы его включили здесь (OTA закончен, WiFi больше не нужен)
+    if (_otaConnectedHere) {
+        WiFi.mode(WIFI_OFF);
+        Serial.println("[WiFi] Off after OTA check.");
     }
 }
 
@@ -3910,6 +4341,126 @@ void ggCodeSaveToSlot(const char *code) {
     settings.ggCodes[_ggSel - 1][7] = '\0';
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// GAME SHARK CODES SCREEN
+// ══════════════════════════════════════════════════════════════════════════════
+// Коды пишутся как 6-символьный hex: "AAAAVV" (адрес 4 + значение 2).
+// Экран идентичен GG по структуре, но хранит settings.gsCodes / gsEnabled.
+// Отображаются как AAAA:VV для читаемости.
+
+#define GS_HDR_H    GG_HDR_H
+#define GS_TOG_Y    GG_TOG_Y
+#define GS_TOG_H    GG_TOG_H
+#define GS_SLOT_Y   GG_SLOT_Y
+#define GS_SLOT_H   GG_SLOT_H
+#define GS_HINT_Y   GG_HINT_Y
+
+static int _gsSel = 0;
+
+static void _gsDrawRow(int idx, bool selected) {
+    const Theme565 &t = getTheme();
+    int y = (idx == 0) ? GS_TOG_Y : GS_SLOT_Y + (idx - 1) * GS_SLOT_H;
+    int h = (idx == 0) ? GS_TOG_H : GS_SLOT_H;
+
+    uint16_t bg = selected ? t.selected : (idx % 2 ? t.rowOdd : t.rowEven);
+    uint16_t fg = selected ? t.selText  : t.textPri;
+    lcd.fillRect(0, y, SCREEN_W, h, bg);
+
+    lcd.setTextDatum(ML_DATUM);
+    lcd.setFont(&lgfx::fonts::DejaVu9);
+    lcd.setTextColor(fg);
+
+    char buf[64];
+    if (idx == 0) {
+        snprintf(buf, sizeof(buf), "Enabled: %s", settings.gsEnabled ? "ON" : "OFF");
+        lcd.drawString(buf, 8, y + h / 2);
+        lcd.fillCircle(SCREEN_W - 12, y + h / 2, 5,
+                       settings.gsEnabled ? t.ok : t.danger);
+    } else {
+        int slot = idx - 1;
+        const char *code = settings.gsCodes[slot];
+        if (code[0]) {
+            // Показываем как AAAA:VV
+            snprintf(buf, sizeof(buf), "%d: %c%c%c%c:%c%c",
+                     idx, code[0], code[1], code[2], code[3], code[4], code[5]);
+            lcd.setTextColor(fg);
+        } else {
+            snprintf(buf, sizeof(buf), "%d: ---", idx);
+            lcd.setTextColor(selected ? t.selText : t.textSec);
+        }
+        lcd.drawString(buf, 8, y + h / 2);
+    }
+}
+
+void gsScreenDraw() {
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+
+    lcd.fillRect(0, 0, SCREEN_W, GS_HDR_H, t.header);
+    lcd.setTextDatum(ML_DATUM);
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextColor(t.textPri);
+    lcd.drawString("Game Shark Codes", 10, GS_HDR_H / 2);
+    lcd.setTextDatum(MR_DATUM);
+    lcd.setTextColor(t.accent);
+    lcd.drawString("[B:Back]", SCREEN_W - 6, GS_HDR_H / 2);
+
+    for (int i = 0; i <= 8; i++) _gsDrawRow(i, i == _gsSel);
+
+    lcd.fillRect(0, GS_HINT_Y, SCREEN_W, SCREEN_H - GS_HINT_Y, t.header);
+    lcd.setFont(&lgfx::fonts::DejaVu9);
+    lcd.setTextColor(t.textSec);
+    lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("A:Edit  B:Clear  START:Enable/Disable", SCREEN_W / 2, GS_HINT_Y + 12);
+}
+
+uint8_t gsScreenNavBtn(uint8_t btn) {
+    if (btn & BTN_UP)   { if (_gsSel > 0) { _gsSel--; gsScreenDraw(); } return 0; }
+    if (btn & BTN_DOWN) { if (_gsSel < 8) { _gsSel++; gsScreenDraw(); } return 0; }
+    if (btn & BTN_SEL)  return BTN_B;
+    if (btn & BTN_STA) {
+        settings.gsEnabled = !settings.gsEnabled;
+        _gsDrawRow(0, _gsSel == 0);
+        return 0;
+    }
+    if (btn & (BTN_A | BTN_RIGHT)) {
+        if (_gsSel == 0) { settings.gsEnabled = !settings.gsEnabled; _gsDrawRow(0, true); return 0; }
+        return (uint8_t)(0xC0 + _gsSel);
+    }
+    if (btn & BTN_B) {
+        if (_gsSel == 0) return BTN_B;
+        settings.gsCodes[_gsSel - 1][0] = '\0';
+        _gsDrawRow(_gsSel, true);
+        return 0;
+    }
+    return 0;
+}
+
+uint8_t gsScreenHandleTouch(int x, int y) {
+    if (y < GS_HDR_H) return BTN_B;
+    if (y >= GS_TOG_Y && y < GS_TOG_Y + GS_TOG_H) {
+        _gsSel = 0;
+        settings.gsEnabled = !settings.gsEnabled;
+        gsScreenDraw();
+        return 0;
+    }
+    if (y >= GS_SLOT_Y && y < GS_SLOT_Y + GS_SLOT_H * 8) {
+        int slot = (y - GS_SLOT_Y) / GS_SLOT_H + 1;
+        if (slot != _gsSel) { _gsSel = slot; gsScreenDraw(); return 0; }
+        return (uint8_t)(0xC0 + slot);
+    }
+    return 0;
+}
+
+void gsScreenSetSlot(int slot) { if (slot >= 1 && slot <= 8) _gsSel = slot; }
+int  gsScreenGetSlot() { return _gsSel; }
+
+void gsCodeSaveToSlot(const char *code) {
+    if (_gsSel < 1 || _gsSel > 8) return;
+    strncpy(settings.gsCodes[_gsSel - 1], code, 6);
+    settings.gsCodes[_gsSel - 1][6] = '\0';
+}
+
 // ══════════════════════════════════════════════════════════════
 // ГАЛЕРЕЯ СКРИНШОТОВ
 // ══════════════════════════════════════════════════════════════
@@ -4287,6 +4838,219 @@ static void _galMoveSel(int delta) {
         if (news >= 0 && news < GAL_ROWS) { shotLabel(_galShotSel, lbl, sizeof(lbl)); _galDrawRow(news, true, lbl, nullptr); }
         _galUpdatePanel();
     }
+}
+
+// ══════════════════════════════════════════════════════════════
+// MUSIC PLAYER
+// Диагностический плеер для WAV-файлов из /Music на SD карте.
+// Цель: сравнить качество звука вне эмулятора и понять — проблема
+// в коде NES или в железе (R7/R8 резисторы, DAC).
+// ══════════════════════════════════════════════════════════════
+#include "input/audio.h"
+
+#define MP_MAX_FILES  32
+#define MP_HDR_H      30
+#define MP_BAR_H      40
+#define MP_ROW_H      26
+#define MP_ROWS       ((SCREEN_H - MP_HDR_H - MP_BAR_H) / MP_ROW_H)  // 6
+
+static char _mpFiles[MP_MAX_FILES][48];
+static int  _mpCount   = 0;
+static int  _mpSel     = 0;
+static int  _mpOffset  = 0;
+static int  _mpPlaying = -1;  // индекс воспроизводимого файла (-1 = нет)
+
+static void _mpScan() {
+    _mpCount = 0;
+    File dir = SD.open("/Music");
+    if (!dir || !dir.isDirectory()) return;
+    while (_mpCount < MP_MAX_FILES) {
+        File f = dir.openNextFile();
+        if (!f) break;
+        if (!f.isDirectory()) {
+            const char *raw = f.name();
+            // Берём только basename (некоторые версии SD lib возвращают полный путь)
+            const char *slash = strrchr(raw, '/');
+            const char *name = slash ? slash + 1 : raw;
+            int len = strlen(name);
+            if (len > 4) {
+                char ext[5];
+                for (int i = 0; i < 4; i++) ext[i] = tolower((unsigned char)name[len - 4 + i]);
+                ext[4] = '\0';
+                if (strcmp(ext, ".wav") == 0 || strcmp(ext, ".mp3") == 0) {
+                    strncpy(_mpFiles[_mpCount], name, 47);
+                    _mpFiles[_mpCount][47] = '\0';
+                    _mpCount++;
+                }
+            }
+        }
+        f.close();
+    }
+    dir.close();
+}
+
+static void _mpPlaySelected() {
+    if (_mpSel < 0 || _mpSel >= _mpCount) return;
+    if (audioIsBusy()) soundStop();
+    char path[64];
+    snprintf(path, sizeof(path), "/Music/%s", _mpFiles[_mpSel]);
+    soundPlayPath(path);
+    _mpPlaying = _mpSel;
+}
+
+static void _mpDrawList() {
+    const Theme565& t = getTheme();
+    int listH = SCREEN_H - MP_HDR_H - MP_BAR_H;
+    lcd.fillRect(0, MP_HDR_H, SCREEN_W, listH, t.bg);
+
+    if (_mpCount == 0) {
+        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+        lcd.drawString("No WAV files in /Music", SCREEN_W / 2, MP_HDR_H + listH / 2 - 10);
+        lcd.drawString("Put .wav files on SD", SCREEN_W / 2, MP_HDR_H + listH / 2 + 10);
+        return;
+    }
+
+    for (int r = 0; r < MP_ROWS; r++) {
+        int idx = _mpOffset + r;
+        if (idx >= _mpCount) break;
+        int ry = MP_HDR_H + r * MP_ROW_H;
+        bool isSel     = (idx == _mpSel);
+        bool isPlaying = (idx == _mpPlaying) && audioIsBusy();
+        uint16_t bg = isSel ? t.selected : (r % 2 ? t.rowOdd : t.rowEven);
+        uint16_t fg = isSel ? (t.selText ? t.selText : (uint16_t)COL_WHITE)
+                            : (isPlaying ? t.accent : t.textPri);
+        lcd.fillRect(0, ry, SCREEN_W, MP_ROW_H, bg);
+        lcd.drawFastHLine(0, ry + MP_ROW_H - 1, SCREEN_W, (uint16_t)COL_SEP);
+        // ▶ треугольник для играющего трека
+        if (isPlaying)
+            lcd.fillTriangle(7, ry + 7, 7, ry + MP_ROW_H - 7, 15, ry + MP_ROW_H / 2, fg);
+        fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(fg);
+        lcd.drawString(_mpFiles[idx], 22, ry + MP_ROW_H / 2);
+    }
+}
+
+static void _mpDrawFull() {
+    const Theme565& t = getTheme();
+    lcd.fillScreen(t.bg);
+
+    // Шапка
+    lcd.fillRect(0, 0, SCREEN_W, MP_HDR_H, t.header);
+    lcd.drawFastHLine(0, MP_HDR_H - 1, SCREEN_W, t.accent);
+    // Нотка (ручная иконка 12×12)
+    int mx = 18, my = MP_HDR_H / 2;
+    lcd.fillRect(mx, my - 5, 2, 9, t.accent);
+    lcd.fillRect(mx + 5, my - 7, 2, 8, t.accent);
+    lcd.fillRect(mx, my - 5, 7, 2, t.accent);
+    lcd.fillCircle(mx - 1, my + 4, 3, t.accent);
+    lcd.fillCircle(mx + 4, my + 1, 3, t.accent);
+    flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_GOLD);
+    lcd.drawString("MUSIC", SCREEN_W / 2, MP_HDR_H / 2);
+    // Счётчик
+    if (_mpCount > 0) {
+        char cnt[8]; snprintf(cnt, sizeof(cnt), "%d", _mpCount);
+        fsm(); lcd.setTextDatum(MR_DATUM); lcd.setTextColor(t.textSec);
+        lcd.drawString(cnt, SCREEN_W - 6, MP_HDR_H / 2);
+    }
+
+    _mpDrawList();
+
+    // Подвал
+    int fy = SCREEN_H - MP_BAR_H;
+    lcd.fillRect(0, fy, SCREEN_W, MP_BAR_H, t.header);
+    lcd.drawFastHLine(0, fy, SCREEN_W, t.accent);
+    fsm(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(t.textPri);
+    lcd.drawString("BACK", SCREEN_W / 4, fy + MP_BAR_H / 2);
+    lcd.setTextColor(audioIsBusy() ? t.danger : t.accent);
+    lcd.drawString(audioIsBusy() ? "STOP" : "PLAY", SCREEN_W * 3 / 4, fy + MP_BAR_H / 2);
+    // Вертикальный разделитель подвала
+    lcd.drawFastVLine(SCREEN_W / 2, fy + 4, MP_BAR_H - 8, t.accent);
+}
+
+void musicPlayerOpen() {
+    _mpCount = 0; _mpSel = 0; _mpOffset = 0; _mpPlaying = -1;
+    _mpScan();
+    _mpDrawFull();
+}
+
+void musicPlayerDraw() {
+    _mpDrawFull();
+}
+
+void musicPlayerTick() {
+    // Обновляем UI когда трек закончился естественным образом
+    if (_mpPlaying >= 0 && !audioIsBusy()) {
+        _mpPlaying = -1;
+        _mpDrawList();
+        // Перерисовываем кнопку PLAY/STOP в подвале
+        const Theme565& t = getTheme();
+        int fy = SCREEN_H - MP_BAR_H;
+        lcd.fillRect(SCREEN_W / 2 + 1, fy + 1, SCREEN_W / 2 - 1, MP_BAR_H - 2, t.header);
+        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.accent);
+        lcd.drawString("PLAY", SCREEN_W * 3 / 4, fy + MP_BAR_H / 2);
+    }
+}
+
+uint8_t musicPlayerHandleTouch(int x, int y) {
+    int fy = SCREEN_H - MP_BAR_H;
+    // Подвал: BACK | PLAY/STOP
+    if (y >= fy) {
+        if (x < SCREEN_W / 2) {
+            soundStop(); _mpPlaying = -1;
+            return BTN_B;
+        } else {
+            if (audioIsBusy()) {
+                soundStop(); _mpPlaying = -1;
+            } else {
+                _mpPlaySelected();
+            }
+            _mpDrawFull();
+        }
+        return 0;
+    }
+    // Список файлов
+    if (y >= MP_HDR_H && y < fy) {
+        int row = (y - MP_HDR_H) / MP_ROW_H;
+        int idx = _mpOffset + row;
+        if (idx >= 0 && idx < _mpCount) {
+            _mpSel = idx;
+            _mpPlaySelected();
+            _mpDrawFull();
+        }
+    }
+    return 0;
+}
+
+uint8_t musicPlayerNavBtn(uint8_t btn) {
+    if (btn & BTN_B) {
+        soundStop(); _mpPlaying = -1;
+        return BTN_B;
+    }
+    if (btn & BTN_UP) {
+        if (_mpSel > 0) {
+            _mpSel--;
+            if (_mpSel < _mpOffset) _mpOffset = _mpSel;
+            _mpDrawList();
+        }
+        return 0;
+    }
+    if (btn & BTN_DOWN) {
+        if (_mpSel < _mpCount - 1) {
+            _mpSel++;
+            if (_mpSel >= _mpOffset + MP_ROWS) _mpOffset = _mpSel - MP_ROWS + 1;
+            _mpDrawList();
+        }
+        return 0;
+    }
+    if (btn & BTN_A) {
+        if (audioIsBusy()) {
+            soundStop(); _mpPlaying = -1; _mpDrawFull();
+        } else {
+            _mpPlaySelected(); _mpDrawFull();
+        }
+        return 0;
+    }
+    return 0;
 }
 
 // ══════════════════════════════════════════════════════════════

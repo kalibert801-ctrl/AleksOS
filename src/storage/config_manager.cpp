@@ -65,7 +65,21 @@ void cfgLoad() {
     settings.nesPalette   = doc["nes_pal"]    | 0;
 
     // ── Game Genie ──────────────────────────────────────────────────────────
-    settings.ggEnabled   = doc["gg_en"]       | 0;
+    settings.ggEnabled    = doc["gg_en"]       | 0;
+    settings.sleepTimeout = doc["sleep_to"]    | 0;
+    settings.scanlines    = doc["scanlines"]   | 0;
+    settings.gsEnabled    = doc["gs_en"]       | 0;
+    memset(settings.gsCodes, 0, sizeof(settings.gsCodes));
+    if (doc.containsKey("gs")) {
+        JsonArray gsArr = doc["gs"].as<JsonArray>();
+        int slot = 0;
+        for (JsonVariant v : gsArr) {
+            if (slot >= 8) break;
+            const char *s = v.as<const char*>();
+            if (s) { strncpy(settings.gsCodes[slot], s, 6); settings.gsCodes[slot][6] = '\0'; }
+            slot++;
+        }
+    }
     memset(settings.ggCodes, 0, sizeof(settings.ggCodes));
     if (doc.containsKey("gg")) {
         JsonArray ggArr = doc["gg"].as<JsonArray>();
@@ -142,6 +156,11 @@ void cfgSave() {
 
     // ── Game Genie ─────────────────────────────────────────────────────────
     doc["gg_en"]      = settings.ggEnabled;
+    doc["sleep_to"]   = settings.sleepTimeout;
+    doc["scanlines"]  = settings.scanlines;
+    doc["gs_en"]      = settings.gsEnabled;
+    JsonArray gsArr = doc.createNestedArray("gs");
+    for (int i = 0; i < 8; i++) gsArr.add(settings.gsCodes[i]);
     JsonArray ggArr = doc.createNestedArray("gg");
     for (int i = 0; i < 8; i++) ggArr.add(settings.ggCodes[i]);
 

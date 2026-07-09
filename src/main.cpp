@@ -15,13 +15,14 @@
 #include "system/battery.h"
 #include "ui/ui.h"
 #include "emulator/emu_runner.h"
-#include "emulator/gb_runner.h"
 #include "network/wifi_manager.h"
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
+#include "network/web_manager.h"
 #include "storage/game_stats.h"
 #include "emulator/game_genie.h"
+#include "emulator/game_shark.h"
 
 Settings settings;
 
@@ -30,7 +31,8 @@ Settings settings;
 // ─────────────────────────────────────────────────────────────
 
 enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
-             S_FILEMGR, S_FILEMGR_KB, S_GG, S_GG_KB, S_SEARCH_KB, S_GALLERY };
+             S_FILEMGR, S_FILEMGR_KB, S_GG, S_GG_KB, S_GS, S_GS_KB,
+             S_SEARCH_KB, S_GALLERY, S_MUSIC, S_WEBMGR };
 static State state = S_MENU;
 
 // ── Screen-transition helpers ─────────────────────────────────────────────
@@ -56,12 +58,77 @@ static void fadeIn() {
     lcd.setBrightness((uint8_t)map(target, 0, 100, 0, 255));
 }
 
-static void toMenu()     { fadeOut(); state = S_MENU;     menuDraw();        fadeIn(); }
-static void toSettings() { fadeOut(); state = S_SETTINGS; settingsDraw();    fadeIn(); }
-static void toRemap()    { fadeOut(); state = S_REMAP;    btnMapDraw();      fadeIn(); }
-static void toWifi()     { fadeOut(); state = S_WIFI;     wifiManagerDraw(); fadeIn(); }
-static void toFileMgr()  { fadeOut(); state = S_FILEMGR;  fileMgrDraw();     fadeIn(); }
-static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();   fadeIn(); }
+static void toMenu()     { fadeOut(); state = S_MENU;     menuDraw();          fadeIn(); }
+static void toSettings() { fadeOut(); state = S_SETTINGS; settingsDraw();      fadeIn(); }
+static void toRemap()    { fadeOut(); state = S_REMAP;    btnMapDraw();        fadeIn(); }
+static void toWifi()     { fadeOut(); state = S_WIFI;     wifiManagerDraw();   fadeIn(); }
+static void toFileMgr()  { fadeOut(); state = S_FILEMGR;  fileMgrDraw();       fadeIn(); }
+static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();     fadeIn(); }
+static void toGS()       { fadeOut(); state = S_GS;        gsScreenDraw();     fadeIn(); }
+static void toMusic()    { fadeOut(); state = S_MUSIC;     musicPlayerOpen();  fadeIn(); }
+
+// Web Upload screen — рисуется inline при переходе
+static void drawWebScreen() {
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+    lcd.fillRect(0, 0, SCREEN_W, 34, t.header);
+    lcd.setFont(&lgfx::fonts::DejaVu18);
+    lcd.setTextDatum(MC_DATUM); lcd.setTextColor(0xFD20u);
+    lcd.drawString("WEB UPLOAD", SCREEN_W / 2, 17);
+
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("Open in browser:", SCREEN_W / 2, 60);
+
+    lcd.setFont(&lgfx::fonts::DejaVu18);
+    lcd.setTextColor(0x07FFu);
+    lcd.drawString((String("http://") + webMgrIP()).c_str(), SCREEN_W / 2, 90);
+
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextColor(t.textSec);
+    lcd.drawString("Upload ROMs, Music, Sounds", SCREEN_W / 2, 130);
+    lcd.drawString("Both devices on same WiFi", SCREEN_W / 2, 150);
+    lcd.drawString("SD card changes take effect", SCREEN_W / 2, 170);
+    lcd.drawString("after returning to menu", SCREEN_W / 2, 185);
+
+    // Кнопка STOP SERVER
+    int by = SCREEN_H - 44;
+    lcd.fillRect(0, by, SCREEN_W, 44, t.header);
+    lcd.drawFastHLine(0, by, SCREEN_W, t.accent);
+    lcd.setTextColor(t.danger); lcd.setTextDatum(MC_DATUM);
+    lcd.drawString("B = Stop server & back", SCREEN_W / 2, by + 22);
+}
+
+static void toWebMgr() {
+    if (!WiFi.isConnected()) {
+        if (!settings.wifiEnabled || settings.wifiSSID[0] == '\0') {
+            popupShow("Web Upload", "No WiFi configured!\nSet up WiFi in Settings first.", 3000);
+            return;
+        }
+        // Показываем экран подключения
+        const Theme565 &t = getTheme();
+        lcd.fillScreen(t.bg);
+        lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+        lcd.setFont(&lgfx::fonts::DejaVu18);
+        lcd.setTextDatum(MC_DATUM); lcd.setTextColor(0xFD20u);
+        lcd.drawString("WEB UPLOAD", SCREEN_W / 2, HDR_H / 2);
+        lcd.setFont(&lgfx::fonts::DejaVu12);
+        lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+        lcd.drawString("Connecting to WiFi...", SCREEN_W / 2, 120);
+
+        WiFi.mode(WIFI_STA);
+        if (!wifiMgr.connect(settings.wifiSSID, settings.wifiPass, 12000)) {
+            popupShow("Web Upload", "WiFi connection failed!", 3000);
+            WiFi.mode(WIFI_OFF);
+            return;
+        }
+    }
+    fadeOut();
+    state = S_WEBMGR;
+    webMgrStart();
+    drawWebScreen();
+    fadeIn();
+}
 
 // WiFi manager keyboard helper — opens password keyboard for selected network
 static void openWifiKeyboard() {
@@ -190,12 +257,16 @@ void setup() {
     // ── Время (читает settings.timeH/timeM после cfgLoad) ─────
     timeInit();
 
-    // ── WiFi ─────────────────────────────────────────────────
+    // ── WiFi (только для NTP синхронизации, потом выключается) ───
     bootProgress(97, "Init WiFi...");
     wifiMgr.init();
     if (wifiMgr.isConnected()) {
         bootProgress(99, "NTP sync...");
         ntpSync();
+        // Выключаем WiFi — он нужен только для NTP и OTA.
+        // При обновлениях reconnect происходит автоматически в otaScreen().
+        WiFi.mode(WIFI_OFF);
+        Serial.println("[WiFi] Off after NTP sync.");
     }
 
     // ── Готово ────────────────────────────────────────────────
@@ -249,6 +320,36 @@ void loop() {
         buttons.vibrateBoth(30);  // тач — оба мотора 30мс
     }
     if (settings.diagTouch && tapped) Serial.printf("[TOUCH] x=%d y=%d\n", x, y);
+
+    // ── Sleep режим ───────────────────────────────────────────────────────
+    // Отслеживаем активность; при таймауте гасим экран.
+    // Любое нажатие/тап во время сна просыпает устройство (ввод поглощается).
+    {
+        static uint32_t _lastActivityMs = 0;
+        static bool     _sleeping       = false;
+        bool anyInput = (btnPhys != 0) || tapped;
+
+        if (anyInput) {
+            if (_sleeping) {
+                // Просыпаемся: восстанавливаем яркость, поглощаем ввод
+                _sleeping = false;
+                setBrightness(settings.brightness);
+                menuDraw();
+                _lastActivityMs = millis();
+                return;   // не обрабатываем нажатие — оно только для пробуждения
+            }
+            _lastActivityMs = millis();
+        }
+
+        if (!_sleeping && settings.sleepTimeout > 0) {
+            uint32_t limitMs = (uint32_t)settings.sleepTimeout * 60000UL;
+            if (millis() - _lastActivityMs >= limitMs) {
+                _sleeping = true;
+                lcd.setBrightness(0);
+            }
+        }
+        if (_sleeping) return;  // не рисуем ничего пока спим
+    }
 
     // ── Drag scroll для главного меню ─────────────────────────────────────
     // rawTouched() = true пока палец удерживается (не edge-triggered)
@@ -356,6 +457,14 @@ void loop() {
             soundClick();
             state = S_GALLERY;
             galleryOpen();
+        } else if (action == 0xD1) {
+            // ♪ Музыкальный плеер
+            soundClick();
+            toMusic();
+        } else if (action == 0xD2) {
+            // 🌐 Веб-загрузчик файлов
+            soundClick();
+            toWebMgr();
         } else if (action & BTN_A) {
             if (romAction == 2) {
                 soundClick(); buttons.vibrate1(40); showRomInfo(menuSelected()); menuDraw();
@@ -390,6 +499,7 @@ void loop() {
             if (r == 0x80) { soundClick(); cfgSave(); toWifi(); break; }
             if (r == 0xA0) { soundClick(); otaScreen(); settingsDraw(); break; }
             if (r == 0xB0) { soundClick(); cfgSave(); toGG(); break; }
+            if (r == 0xD0) { soundClick(); cfgSave(); toGS(); break; }
             soundClick(); break;
         }
         if (!tapped) break;
@@ -399,6 +509,7 @@ void loop() {
         else if (action == 0x80)  { soundClick(); cfgSave(); toWifi(); }
         else if (action == 0xA0)  { soundClick(); otaScreen(); settingsDraw(); }
         else if (action == 0xB0)  { soundClick(); cfgSave(); toGG(); }
+        else if (action == 0xD0)  { soundClick(); cfgSave(); toGS(); }
         else if (action)            soundClick();
         break;
     }
@@ -551,6 +662,73 @@ void loop() {
         break;
     }
 
+    case S_GS: {
+        // ── Экран Game Shark кодов ────────────────────────────────────────
+        auto openGSKeyboard = [&](int slot) {
+            wifiKeyboardReset();
+            wifiKeyboardSetLabel("Code (hex AAAAVV):");
+            wifiKeyboardSetMask(false);
+            const char *existing = settings.gsCodes[slot - 1];
+            if (existing[0]) wifiKeyboardSetInitial(existing);
+            gsScreenSetSlot(slot);
+            state = S_GS_KB;
+            wifiKeyboardDraw("Game Shark");
+        };
+        if (shellBtn) {
+            uint8_t r = gsScreenNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); buttons.vibrate1(40); cfgSave(); toSettings(); break; }
+            if (r >= 0xC1 && r <= 0xC8) { soundClick(); openGSKeyboard(r - 0xC0); break; }
+            if (r) soundClick();
+            break;
+        }
+        if (!tapped) break;
+        {
+            uint8_t a = gsScreenHandleTouch(x, y);
+            if (a == BTN_B) { soundBack(); cfgSave(); toSettings(); }
+            else if (a >= 0xC1 && a <= 0xC8) { soundClick(); openGSKeyboard(a - 0xC0); }
+            else if (a) soundClick();
+        }
+        break;
+    }
+
+    case S_GS_KB: {
+        // ── Ввод Game Shark кода через клавиатуру ─────────────────────────
+        auto doSaveGSCode = [&]() {
+            const char *raw = wifiKeyboardGetPassword();
+            if (!raw || raw[0] == '\0') { toGS(); return; }
+
+            // Приводим к верхнему регистру
+            char upper[7]; int i;
+            for (i = 0; i < 6 && raw[i]; i++) upper[i] = (char)toupper((unsigned char)raw[i]);
+            upper[i] = '\0';
+
+            uint16_t addr; uint8_t val;
+            if (!gs_decode(upper, &addr, &val)) {
+                popupShow("Game Shark", "Invalid! Enter exactly 6 hex digits (AAAAVV).", 3000);
+                toGS(); return;
+            }
+
+            gsCodeSaveToSlot(upper);
+            cfgSave();
+            char msg[32]; snprintf(msg, sizeof(msg), "Saved: %c%c%c%c:%c%c",
+                upper[0], upper[1], upper[2], upper[3], upper[4], upper[5]);
+            popupShow("Game Shark", msg, 1500);
+            toGS();
+        };
+
+        if (shellBtn) {
+            uint8_t r = wifiKeyboardNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); toGS(); break; }
+            if (r == BTN_A) { soundClick(); doSaveGSCode(); break; }
+            soundClick(); break;
+        }
+        if (!tapped) break;
+        uint8_t action = wifiKeyboardHandleTouch(x, y);
+        if (action == BTN_B) { soundBack(); toGS(); }
+        else if (action == BTN_A) { soundClick(); doSaveGSCode(); }
+        break;
+    }
+
     case S_SEARCH_KB: {
         // ── Ввод поискового запроса ───────────────────────────────────────
         if (shellBtn) {
@@ -591,6 +769,39 @@ void loop() {
         if (!tapped) break;
         {
             uint8_t r = galleryHandleTouch(x, y);
+            if (r == BTN_B) { soundBack(); toMenu(); }
+        }
+        break;
+    }
+
+    case S_WEBMGR: {
+        webMgrHandle();   // обрабатываем HTTP запросы
+        if ((shellBtn & BTN_B) || tapped) {
+            // Любой тап или B = выход
+            bool exitNow = (shellBtn & BTN_B) != 0;
+            if (!exitNow && tapped) {
+                int by = SCREEN_H - 44;
+                exitNow = (y >= by);
+            }
+            if (exitNow) {
+                soundBack();
+                webMgrStop();
+                toMenu();
+            }
+        }
+        break;
+    }
+
+    case S_MUSIC: {
+        musicPlayerTick();   // refresh UI когда трек закончился
+        if (shellBtn) {
+            uint8_t r = musicPlayerNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); toMenu(); }
+            break;
+        }
+        if (!tapped) break;
+        {
+            uint8_t r = musicPlayerHandleTouch(x, y);
             if (r == BTN_B) { soundBack(); toMenu(); }
         }
         break;
@@ -664,11 +875,6 @@ static void runEmulator(int idx) {
                       path, (unsigned)(rom.size/1024),
                       (unsigned)(ESP.getFreeHeap()/1024));
 
-    // Определяем тип ROM по расширению
-    String pathStr = String(path);
-    String pathLow = pathStr; pathLow.toLowerCase();
-    bool isGB = pathLow.endsWith(".gb") || pathLow.endsWith(".gbc");
-
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
@@ -677,12 +883,10 @@ static void runEmulator(int idx) {
     lcd.setTextColor(t.textPri);
     lcd.drawString("Loading...", SCREEN_W/2, HDR_H/2);
 
-    // Иконка: зелёная для NES, красная для GB
-    uint16_t logoCol = isGB ? (uint16_t)0xF800 : t.accent;
-    lcd.fillCircle(SCREEN_W/2, 110, 46, logoCol);
+    lcd.fillCircle(SCREEN_W/2, 110, 46, t.accent);
     lcd.setTextColor(t.bg);
     lcd.setFont(&lgfx::fonts::DejaVu18);
-    lcd.drawString(isGB ? "GB" : "NES", SCREEN_W/2, 110);
+    lcd.drawString("NES", SCREEN_W/2, 110);
 
     lcd.setFont(&lgfx::fonts::DejaVu12);
     lcd.setTextColor(t.textPri);
@@ -704,14 +908,8 @@ static void runEmulator(int idx) {
     GameStats::recentAdd(path);
     GameStats::save();
 
-    int result = 0;
-    if (isGB) {
-        if (settings.diagEmu) Serial.printf("[SYS] Starting GB emulator\n");
-        gb_run(path);
-    } else {
-        if (settings.diagEmu) Serial.printf("[SYS] Starting nofrendo NES emulator\n");
-        result = emu_run(path);
-    }
+    if (settings.diagEmu) Serial.printf("[SYS] Starting nofrendo NES emulator\n");
+    int result = emu_run(path);
 
     // Записываем время игры (в секундах)
     uint32_t _playSecs = (millis() - _playStart) / 1000;

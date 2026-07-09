@@ -1,0 +1,8 @@
+{
+  "name": "minimp3",
+  "version": "0.0.0",
+  "description": "Minimalistic MP3 decoder — header only",
+  "build": {
+    "srcFilter": ["-<*>"]
+  }
+}

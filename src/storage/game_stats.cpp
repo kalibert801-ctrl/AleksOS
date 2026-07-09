@@ -112,7 +112,7 @@ void GameStats::save() {
 
     // Atomic write через temp файл
     const char *tmp = "/game_stats.tmp";
-    SD.remove(tmp);
+    if (SD.exists(tmp)) SD.remove(tmp);
     File f = SD.open(tmp, FILE_WRITE);
     if (!f) return;
     serializeJson(doc, f);

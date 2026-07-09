@@ -31,7 +31,7 @@ static void scanDir(std::vector<ROMInfo> &roms, const char *dir) {
         if (!f.isDirectory()) {
             String n = String(f.name());
             String nl = n; nl.toLowerCase();
-            if (nl.endsWith(".nes") || nl.endsWith(".gb") || nl.endsWith(".gbc")) {
+            if (nl.endsWith(".nes")) {
                 ROMInfo info;
                 int dotPos = n.lastIndexOf('.');
                 info.name = n.substring(0, dotPos);

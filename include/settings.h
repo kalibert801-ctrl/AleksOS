@@ -64,6 +64,12 @@ typedef struct {
     // Максимум 8 кодов, хранятся как 8-байтные строки (7 символов + \0).
     char          ggCodes[8][8];  // 8 слотов по 7 символов кода Game Genie
     unsigned char ggEnabled;      // 1 = применять коды при запуске
+    // ── Sleep / Scanlines ────────────────────────────────────
+    unsigned char sleepTimeout;   // 0=off, 1=1мин, 2=2мин, 5=5мин, 10=10мин
+    unsigned char scanlines;      // 0=off, 1=on
+    // ── Game Shark (Pro Action Replay) ───────────────────────
+    char          gsCodes[8][8];  // 8 слотов по 6 символов "AAAAVV" + \0 + pad
+    unsigned char gsEnabled;      // 1 = применять коды каждый кадр
 } Settings;
 
 /* ── Цвета темы RGB565 ──────────────────────────────────────────── */
@@ -95,7 +101,7 @@ inline void settingsDefault(Settings &s) {
     s.language       = LANG_RU;
     s.brightness     = 80;
     s.volume         = 70;
-    s.emuVolume      = 80;
+    s.emuVolume      = 50;
     s.scale          = SCALE_43;
     s.showFPS        = 0;
     s.autoSave       = 1;
@@ -120,6 +126,10 @@ inline void settingsDefault(Settings &s) {
     s.nesPalette    = 0;       // палитра по умолчанию (nofrendo)
     s.ggEnabled     = 0;
     memset(s.ggCodes, 0, sizeof(s.ggCodes));
+    s.sleepTimeout  = 0;
+    s.scanlines     = 0;
+    s.gsEnabled     = 0;
+    memset(s.gsCodes, 0, sizeof(s.gsCodes));
 }
 
 #endif /* __cplusplus */
