@@ -67,14 +67,14 @@ static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();     f
 static void toGS()       { fadeOut(); state = S_GS;        gsScreenDraw();     fadeIn(); }
 static void toMusic()    { fadeOut(); state = S_MUSIC;     musicPlayerOpen();  fadeIn(); }
 
-// Web Upload screen — рисуется inline при переходе
+// WEB Manager screen — рисуется inline при переходе
 static void drawWebScreen() {
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
     lcd.fillRect(0, 0, SCREEN_W, 34, t.header);
     lcd.setFont(&lgfx::fonts::DejaVu18);
     lcd.setTextDatum(MC_DATUM); lcd.setTextColor(0xFD20u);
-    lcd.drawString("WEB UPLOAD", SCREEN_W / 2, 17);
+    lcd.drawString("WEB MANAGER", SCREEN_W / 2, 17);
 
     lcd.setFont(&lgfx::fonts::DejaVu12);
     lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
@@ -86,23 +86,21 @@ static void drawWebScreen() {
 
     lcd.setFont(&lgfx::fonts::DejaVu12);
     lcd.setTextColor(t.textSec);
-    lcd.drawString("Upload ROMs, Music, Sounds", SCREEN_W / 2, 130);
-    lcd.drawString("Both devices on same WiFi", SCREEN_W / 2, 150);
-    lcd.drawString("SD card changes take effect", SCREEN_W / 2, 170);
-    lcd.drawString("after returning to menu", SCREEN_W / 2, 185);
+    lcd.drawString("Manage files, upload ROMs", SCREEN_W / 2, 130);
+    lcd.drawString("Music, Sounds, Firmware", SCREEN_W / 2, 148);
+    lcd.drawString("Both devices on same WiFi", SCREEN_W / 2, 170);
 
-    // Кнопка STOP SERVER
     int by = SCREEN_H - 44;
     lcd.fillRect(0, by, SCREEN_W, 44, t.header);
     lcd.drawFastHLine(0, by, SCREEN_W, t.accent);
     lcd.setTextColor(t.danger); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("B = Stop server & back", SCREEN_W / 2, by + 22);
+    lcd.drawString("Reset = Stop server & back", SCREEN_W / 2, by + 22);
 }
 
 static void toWebMgr() {
     if (!WiFi.isConnected()) {
         if (!settings.wifiEnabled || settings.wifiSSID[0] == '\0') {
-            popupShow("Web Upload", "No WiFi configured!\nSet up WiFi in Settings first.", 3000);
+            popupShow("Web Manager", "No WiFi configured!\nSet up WiFi in Settings first.", 3000);
             return;
         }
         // Показываем экран подключения
@@ -111,7 +109,7 @@ static void toWebMgr() {
         lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
         lcd.setFont(&lgfx::fonts::DejaVu18);
         lcd.setTextDatum(MC_DATUM); lcd.setTextColor(0xFD20u);
-        lcd.drawString("WEB UPLOAD", SCREEN_W / 2, HDR_H / 2);
+        lcd.drawString("WEB MANAGER", SCREEN_W / 2, HDR_H / 2);
         lcd.setFont(&lgfx::fonts::DejaVu12);
         lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
         lcd.drawString("Connecting to WiFi...", SCREEN_W / 2, 120);
@@ -341,7 +339,11 @@ void loop() {
             _lastActivityMs = millis();
         }
 
-        if (!_sleeping && settings.sleepTimeout > 0) {
+        // В WEB Manager экран не гасим — пользователь работает с браузера
+        bool _noSleep = (state == S_WEBMGR);
+        if (_noSleep) _lastActivityMs = millis();
+
+        if (!_sleeping && settings.sleepTimeout > 0 && !_noSleep) {
             uint32_t limitMs = (uint32_t)settings.sleepTimeout * 60000UL;
             if (millis() - _lastActivityMs >= limitMs) {
                 _sleeping = true;

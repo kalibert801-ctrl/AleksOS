@@ -156,6 +156,7 @@ static void playWavFile(const char *path) {
     uint8_t readBuf[512];
     uint32_t pos = 0;
     bool ok = true;
+    const int vol = settings.volume > 100 ? 100 : (int)settings.volume;
 
     while (ok && pos < dataSize && f.available() && !_stopReq) {
         int toRead = (int)min((uint32_t)sizeof(readBuf), dataSize - pos);
@@ -174,6 +175,10 @@ static void playWavFile(const char *path) {
                 int16_t s = (int16_t)(readBuf[i * frameBytes] |
                                      (readBuf[i * frameBytes + 1] << 8));
                 dacWord = (uint16_t)((uint8_t)((s + 32768) >> 8)) << 8;
+            }
+            if (vol < 100) {
+                int centered = (int)(dacWord >> 8) - 128;
+                dacWord = (uint16_t)(uint8_t)(centered * vol / 100 + 128) << 8;
             }
             _i2sBuf[i] = dacWord;
         }
@@ -197,6 +202,7 @@ static void playMp3File(const char *path) {
     mp3dec_init(&_mp3dec);
 
     int inLen = 0;
+    const int vol = settings.volume > 100 ? 100 : (int)settings.volume;
     uint32_t curSr = 0;
     bool i2sOk = false;
 
@@ -245,7 +251,12 @@ static void playMp3File(const char *path) {
                 } else {
                     s = _mp3Pcm[out + i];
                 }
-                _i2sBuf[i] = (uint16_t)((uint8_t)((s + 32768) >> 8)) << 8;
+                uint16_t dacWord = (uint16_t)((uint8_t)((s + 32768) >> 8)) << 8;
+                if (vol < 100) {
+                    int centered = (int)(dacWord >> 8) - 128;
+                    dacWord = (uint16_t)(uint8_t)(centered * vol / 100 + 128) << 8;
+                }
+                _i2sBuf[i] = dacWord;
             }
             size_t w;
             i2s_write(WAV_I2S, _i2sBuf, (size_t)(chunk * 2), &w, pdMS_TO_TICKS(200));
@@ -264,6 +275,7 @@ static void playSineSeq(const Note *notes, int count) {
     if (!i2sStart(AUDIO_SR)) return;
 
     bool ok = true;
+    const int vol = settings.volume > 100 ? 100 : (int)settings.volume;
     for (int ni = 0; ni < count && ok && !_stopReq; ni++) {
         const Note &note = notes[ni];
         if (note.ms == 0) break;
@@ -280,7 +292,8 @@ static void playSineSeq(const Note *notes, int count) {
                 uint8_t dacVal = (note.freq == 0)
                     ? 128
                     : _sineTable[(int)phase & 0xFF];
-                _i2sBuf[i] = (uint16_t)dacVal << 8;
+                int scaled = (vol < 100) ? ((int)dacVal - 128) * vol / 100 + 128 : (int)dacVal;
+                _i2sBuf[i] = (uint16_t)(uint8_t)scaled << 8;
                 phase += step;
                 if (phase >= 256.0f) phase -= 256.0f;
             }

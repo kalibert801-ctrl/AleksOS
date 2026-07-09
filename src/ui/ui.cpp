@@ -6,7 +6,6 @@
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
 #include <Update.h>
-#include <SD.h>
 
 // ── Forward declarations для иконок и меню (используются до определения) ────
 static void iconTag(int cx,int cy,uint16_t c);
@@ -3404,28 +3403,27 @@ static void _sdFwScan() {
 static bool _sdNumpad(const char *correctPin) {
     const Theme565 &t = getTheme();
 
-    // Сохраняем фон затемнением (просто заливаем центр)
-    const int WX = 20, WY = 28, WW = 280, WH = 210;
-    lcd.fillRoundRect(WX, WY, WW, WH, 10, t.bg);
-    lcd.drawRoundRect(WX, WY, WW, WH, 10, t.accent);
+    // Полноэкранное окно с небольшим отступом
+    const int WX = 5, WY = 4, WW = 310, WH = 232;
+    lcd.fillRoundRect(WX, WY, WW, WH, 8, t.bg);
+    lcd.drawRoundRect(WX, WY, WW, WH, 8, t.accent);
 
     lcd.setTextDatum(MC_DATUM);
     fmd(); lcd.setTextColor((uint16_t)COL_GOLD);
-    lcd.drawString("Enter Password", WX + WW/2, WY + 18);
+    lcd.drawString("Enter Password", WX + WW/2, WY + 16);
 
     // 4 ячейки для ввода
     char entered[5] = {};
     int  elen = 0;
-    const int CX = WX + WW/2;
-    const int CY = WY + 45;
-    const int CW = 42, CH = 32, CGap = 8;
-    const int cx0 = CX - (CW*4 + CGap*3)/2;
+    const int CY = WY + 38;
+    const int CW = 54, CH = 24, CGap = 6;
+    const int cx0 = WX + WW/2 - (CW*4 + CGap*3)/2;
 
     auto drawCells = [&]() {
         for (int i = 0; i < 4; i++) {
             int bx = cx0 + i*(CW+CGap);
-            lcd.fillRoundRect(bx, CY, CW, CH, 5, t.rowEven);
-            lcd.drawRoundRect(bx, CY, CW, CH, 5, i < elen ? t.accent : t.rowOdd);
+            lcd.fillRoundRect(bx, CY, CW, CH, 4, t.rowEven);
+            lcd.drawRoundRect(bx, CY, CW, CH, 4, i < elen ? t.accent : t.rowOdd);
             lcd.setTextDatum(MC_DATUM);
             fmd(); lcd.setTextColor(t.textPri);
             if (i < elen) lcd.drawString("*", bx + CW/2, CY + CH/2);
@@ -3433,10 +3431,10 @@ static bool _sdNumpad(const char *correctPin) {
     };
     drawCells();
 
-    // Кнопки 1-9, 0, ←, OK — 4 строки × 3 кол.
+    // Кнопки 1-9, 0, ←, OK — 4 строки × 3 кол. (умещаются в 240px)
     const char *keys[] = { "1","2","3","4","5","6","7","8","9","←","0","OK" };
-    const int KW = 74, KH = 34, KGX = 8, KGY = 6;
-    const int KX0 = WX + 12, KY0 = WY + 90;
+    const int KW = 93, KH = 27, KGX = 5, KGY = 4;
+    const int KX0 = WX + 10, KY0 = WY + 76;
 
     auto drawKeys = [&]() {
         for (int i = 0; i < 12; i++) {
@@ -3571,8 +3569,8 @@ void sdOtaScreen() {
         lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
         lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
         lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-        lcd.drawString("B = Back", SCREEN_W/2, by + BTNBAR_H/2);
-        // ждём B
+        lcd.drawString("Reset = Back", SCREEN_W/2, by + BTNBAR_H/2);
+        // ждём Reset (BTN_B)
         bool prev = false;
         while (true) {
             buttons.update();
@@ -3583,36 +3581,36 @@ void sdOtaScreen() {
     }
 
     // Рисуем список файлов
-    const int ROW_H = 28;
-    const int ROWS  = (DPAD_Y - HDR_H) / ROW_H;
+    const int FW_ROW_H = 28;
+    const int FW_ROWS  = (DPAD_Y - HDR_H) / FW_ROW_H;
     int sel = 0, off = 0;
 
     auto drawList = [&]() {
         lcd.fillRect(0, HDR_H, SCREEN_W, DPAD_Y - HDR_H, t.bg);
-        for (int i = 0; i < ROWS && (off + i) < _sdFwCount; i++) {
+        for (int i = 0; i < FW_ROWS && (off + i) < _sdFwCount; i++) {
             int idx = off + i;
-            int ry  = HDR_H + i * ROW_H;
+            int ry  = HDR_H + i * FW_ROW_H;
             bool s  = (idx == sel);
-            lcd.fillRect(0, ry, SCREEN_W, ROW_H - 1, s ? t.hilite : (i%2 ? t.rowOdd : t.rowEven));
+            lcd.fillRect(0, ry, SCREEN_W, FW_ROW_H - 1, s ? t.hilite : (i%2 ? t.rowOdd : t.rowEven));
             if (s) lcd.drawFastHLine(0, ry, SCREEN_W, t.accent);
             // имя
             lcd.setTextDatum(ML_DATUM);
             fsm(); lcd.setTextColor(s ? t.selText : t.textPri);
-            lcd.drawString(_sdFwList[idx].name, 8, ry + ROW_H/2);
+            lcd.drawString(_sdFwList[idx].name, 8, ry + FW_ROW_H/2);
             // размер
             char sz[16]; snprintf(sz, sizeof(sz), "%.0f KB", _sdFwList[idx].size/1024.0f);
             lcd.setTextDatum(MR_DATUM);
             fsm(); lcd.setTextColor(s ? t.selText : t.textSec);
-            lcd.drawString(sz, SCREEN_W - 6, ry + ROW_H/2);
+            lcd.drawString(sz, SCREEN_W - 6, ry + FW_ROW_H/2);
         }
         // footer
         int by = DPAD_Y;
         lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
         lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
         lcd.setTextDatum(ML_DATUM); fsm(); lcd.setTextColor(t.textSec);
-        lcd.drawString("B=Back", 8, by + BTNBAR_H/2);
+        lcd.drawString("Reset=Back", 8, by + BTNBAR_H/2);
         lcd.setTextDatum(MR_DATUM);
-        lcd.drawString("START=Flash", SCREEN_W - 8, by + BTNBAR_H/2);
+        lcd.drawString("A=Flash", SCREEN_W - 8, by + BTNBAR_H/2);
     };
     drawList();
 
@@ -3628,9 +3626,9 @@ void sdOtaScreen() {
             if (sel > 0) { sel--; if (sel < off) off = sel; drawList(); }
         }
         if (newBtn & BTN_DOWN) {
-            if (sel < _sdFwCount - 1) { sel++; if (sel >= off + ROWS) off = sel - ROWS + 1; drawList(); }
+            if (sel < _sdFwCount - 1) { sel++; if (sel >= off + FW_ROWS) off = sel - FW_ROWS + 1; drawList(); }
         }
-        if (newBtn & BTN_STA) {
+        if (newBtn & BTN_A) {
             // Подтверждение
             _otaDrawHeader("SD Update");
             fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
@@ -3689,22 +3687,48 @@ static bool _otaSourceChoice() {
     lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
     lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
     fsm(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("B = Cancel", SCREEN_W/2, by + BTNBAR_H/2);
+    lcd.drawString("Reset = Cancel", SCREEN_W/2, by + BTNBAR_H/2);
+
+    // Текущий выбор кнопками: 0=WEB, 1=MANAGER
+    int kbSel = -1;  // -1 = ничего не выбрано кнопками
+    auto highlightKb = [&](int s) {
+        // Перерисовываем рамки кнопок
+        lcd.drawRoundRect(16,  95, 130, 60, 10, s==0 ? (uint16_t)0xFFFF : t.accent);
+        lcd.drawRoundRect(17,  96, 128, 58, 9,  s==0 ? (uint16_t)0xFFFF : t.rowEven);
+        lcd.drawRoundRect(174, 95, 130, 60, 10, s==1 ? (uint16_t)0xFFFF : t.accent);
+        lcd.drawRoundRect(175, 96, 128, 58, 9,  s==1 ? (uint16_t)0xFFFF : t.rowEven);
+    };
 
     bool lastTouch = false;
+    uint8_t prevBtn = 0xFF;
     while (true) {
-        // B = отмена
         buttons.update();
-        if (buttons.readCurrent() & BTN_B) return false;  // false = отмена
+        uint8_t cur    = buttons.readCurrent();
+        uint8_t newBtn = cur & ~prevBtn;
+        prevBtn        = cur;
+
+        // Reset = отмена
+        if (newBtn & BTN_B) return false;
+
+        // LEFT/RIGHT = выбор кнопками
+        if (newBtn & BTN_LEFT)  { kbSel = 0; highlightKb(0); }
+        if (newBtn & BTN_RIGHT) { kbSel = 1; highlightKb(1); }
+
+        // A = подтвердить текущий выбор кнопкой
+        if ((newBtn & BTN_A) && kbSel >= 0) {
+            if (kbSel == 0) return true;
+            sdOtaScreen();
+            return false;
+        }
 
         bool nowTouch = touch.isTouched();
         if (nowTouch && !lastTouch) {
             int tx, ty; touch.getXY(tx, ty);
             if (ty >= 95 && ty <= 155) {
-                if (tx >= 16  && tx <= 146) return true;   // WEB
-                if (tx >= 174 && tx <= 304) {               // MANAGER
+                if (tx >= 16  && tx <= 146) return true;        // WEB
+                if (tx >= 174 && tx <= 304) {                    // MANAGER
                     sdOtaScreen();
-                    return false; // не идём в GitHub OTA
+                    return false;
                 }
             }
         }
