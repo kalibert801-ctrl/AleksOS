@@ -20,6 +20,7 @@
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
 #include "network/web_manager.h"
+#include "network/web_console.h"
 #include "storage/game_stats.h"
 #include "emulator/game_genie.h"
 #include "emulator/game_shark.h"
@@ -128,6 +129,64 @@ static void toWebMgr() {
     fadeIn();
 }
 
+// ── Web Debug: включить/выключить консоль в фоне ─────────────────────────────
+static void toggleWebDebug() {
+    if (webDbgRunning()) {
+        webDbgStop();
+        WiFi.mode(WIFI_OFF);
+        settingsDraw();
+        popupShow("Web Debug", "Console stopped.", 1500);
+        settingsDraw();
+        return;
+    }
+    if (!settings.wifiSSID[0]) {
+        popupShow("Web Debug", "No WiFi configured!\nSet WiFi in Settings.", 3000);
+        settingsDraw();
+        return;
+    }
+    if (!WiFi.isConnected()) {
+        const Theme565 &t = getTheme();
+        lcd.fillScreen(t.bg);
+        lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+        lcd.setFont(&lgfx::fonts::DejaVu18);
+        lcd.setTextDatum(MC_DATUM); lcd.setTextColor(0xFD20u);
+        lcd.drawString("WEB DEBUG", SCREEN_W / 2, HDR_H / 2);
+        lcd.setFont(&lgfx::fonts::DejaVu12);
+        lcd.setTextColor(t.textSec);
+        lcd.drawString("Connecting to WiFi...", SCREEN_W / 2, 120);
+        WiFi.mode(WIFI_STA);
+        if (!wifiMgr.connect(settings.wifiSSID, settings.wifiPass, 12000)) {
+            popupShow("Web Debug", "WiFi failed!", 2000);
+            WiFi.mode(WIFI_OFF);
+            settingsDraw();
+            return;
+        }
+    }
+    webDbgStart();
+    // Показываем экран с адресом — пользователь запоминает и нажимает кнопку
+    const Theme565 &t = getTheme();
+    lcd.fillScreen(t.bg);
+    lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
+    lcd.setFont(&lgfx::fonts::DejaVu18);
+    lcd.setTextDatum(MC_DATUM); lcd.setTextColor(0xFD20u);
+    lcd.drawString("WEB DEBUG ON", SCREEN_W / 2, HDR_H / 2);
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextColor(t.textPri);
+    lcd.drawString("Open in browser:", SCREEN_W / 2, 90);
+    lcd.setFont(&lgfx::fonts::DejaVu18);
+    lcd.setTextColor(t.accent);
+    char url[40]; snprintf(url, sizeof(url), "http://%s/remote", webDbgIP());
+    lcd.drawString(url, SCREEN_W / 2, 120);
+    lcd.setFont(&lgfx::fonts::DejaVu12);
+    lcd.setTextColor(t.textSec);
+    lcd.drawString("Press any button to continue", SCREEN_W / 2, 165);
+    lcd.drawString("Console works while you play!", SCREEN_W / 2, 185);
+    // Ждём нажатия кнопки
+    delay(500);
+    while (!buttons.read()) { webDbgHandle(); delay(50); }
+    settingsDraw();
+}
+
 // WiFi manager keyboard helper — opens password keyboard for selected network
 static void openWifiKeyboard() {
     wifiKeyboardReset();
@@ -174,14 +233,15 @@ static void runEmulator(int idx);
 // ─────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
-    Serial.printf("[SYS] AleksOS %s  Core=%d\n", FIRMWARE_VERSION, xPortGetCoreID());
+    webConsoleInit();
+    webConsolePrintf("[SYS] AleksOS %s  Core=%d\n", FIRMWARE_VERSION, xPortGetCoreID());
 
     if (psramFound()) {
-        Serial.printf("[PSRAM] OK — total: %u KB, free: %u KB\n",
+        webConsolePrintf("[PSRAM] OK — total: %u KB, free: %u KB\n",
             ESP.getPsramSize()  / 1024,
             ESP.getFreePsram()  / 1024);
     } else {
-        Serial.println("[PSRAM] NOT FOUND");
+        webConsolePrintf("[PSRAM] NOT FOUND\n");
     }
 
     settingsDefault(settings);
@@ -282,6 +342,7 @@ void loop() {
     audioUpdate();
     updateAutoBrightness();
     buttons.update();
+    if (webDbgRunning()) webDbgHandle();   // фоновый debug-сервер работает в любом состоянии
 
     // btnPhys  — сырые физические кнопки (для экрана ремапа, где нужен физ. ввод)
     // btnNew   — кнопки после применения таблицы переназначения (для всего остального)
@@ -432,6 +493,7 @@ void loop() {
             if (sel >= 0 && sel < sdMgr.count()) {
                 soundSelect();
                 ledSet(LED_BLUE); delay(150); ledSet(LED_OFF);
+                soundStop();   // ждём чистого завершения I2S перед захватом NES
                 runEmulator(sel);
                 ledSet(LED_GREEN); delay(200); ledSet(LED_OFF);
                 toMenu();
@@ -501,6 +563,7 @@ void loop() {
             if (r == 0x80) { soundClick(); cfgSave(); toWifi(); break; }
             if (r == 0xA0) { soundClick(); otaScreen(); settingsDraw(); break; }
             if (r == 0xB0) { soundClick(); cfgSave(); toGG(); break; }
+            if (r == 0xC0) { soundClick(); toggleWebDebug(); break; }
             if (r == 0xD0) { soundClick(); cfgSave(); toGS(); break; }
             soundClick(); break;
         }
@@ -511,6 +574,7 @@ void loop() {
         else if (action == 0x80)  { soundClick(); cfgSave(); toWifi(); }
         else if (action == 0xA0)  { soundClick(); otaScreen(); settingsDraw(); }
         else if (action == 0xB0)  { soundClick(); cfgSave(); toGG(); }
+        else if (action == 0xC0)  { soundClick(); toggleWebDebug(); }
         else if (action == 0xD0)  { soundClick(); cfgSave(); toGS(); }
         else if (action)            soundClick();
         break;
@@ -872,10 +936,21 @@ static void runEmulator(int idx) {
     const ROMInfo &rom = sdMgr.get(idx);
     const char *path   = rom.path.c_str();
 
+    // ── mapper pre-check: avoid black screen for unsupported ROMs ─────────
+    int romMapper = nes_read_mapper(path);
+    if (!nes_mapper_supported(romMapper)) {
+        state = S_MENU;
+        char ml[36];
+        snprintf(ml, sizeof(ml), "Mapper %d not supported", romMapper);
+        webConsolePrintf("[NES] %s — %s\n", ml, path);
+        showError("Cannot load ROM", ml, rom.name.c_str());
+        return;
+    }
+
     if (settings.diagEmu)
-        Serial.printf("[UI]  Starting '%s' %uKB  heap=%uKB\n",
-                      path, (unsigned)(rom.size/1024),
-                      (unsigned)(ESP.getFreeHeap()/1024));
+        webConsolePrintf("[UI]  Starting '%s' %uKB  mapper=%d  heap=%uKB\n",
+                         path, (unsigned)(rom.size/1024), romMapper,
+                         (unsigned)(ESP.getFreeHeap()/1024));
 
     const Theme565 &t = getTheme();
     lcd.fillScreen(t.bg);
@@ -910,7 +985,7 @@ static void runEmulator(int idx) {
     GameStats::recentAdd(path);
     GameStats::save();
 
-    if (settings.diagEmu) Serial.printf("[SYS] Starting nofrendo NES emulator\n");
+    if (settings.diagEmu) webConsolePrintf("[SYS] Starting nofrendo NES emulator\n");
     int result = emu_run(path);
 
     // Записываем время игры (в секундах)
@@ -921,8 +996,8 @@ static void runEmulator(int idx) {
     }
 
     if (settings.diagEmu)
-        Serial.printf("[SYS] Emulator exited: result=%d  heap=%uKB  playtime=%us\n",
-                      result, (unsigned)(ESP.getFreeHeap()/1024), (unsigned)_playSecs);
+        webConsolePrintf("[SYS] Emulator exited: result=%d  heap=%uKB  playtime=%us\n",
+                         result, (unsigned)(ESP.getFreeHeap()/1024), (unsigned)_playSecs);
 
     initDisplay();
     touch.init();

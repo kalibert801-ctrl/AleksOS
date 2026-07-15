@@ -141,30 +141,29 @@ static void map4_write(uint32 address, uint8 value)
       break;
    }
 
-   if (true == irq.reset)
-      irq.counter = irq.latch;
 }
 
 static void map4_hblank(int vblank)
 {
    if (vblank)
       return;
+   if (!ppu_enabled())
+      return;
 
-   if (ppu_enabled())
+   /* Original structure preserved — only fix: auto-reload from latch when
+   ** counter hits -1 instead of getting stuck there forever. This allows
+   ** continuous periodic IRQs without changing the latch+2 scanline timing
+   ** that official MMC3 games (Felix, etc.) rely on. */
+   if (irq.counter >= 0)
    {
-      if (irq.counter >= 0)
-      {
-         irq.reset = false;
-         irq.counter--;
+      irq.reset = false;
+      irq.counter--;
 
-         if (irq.counter < 0)
-         {
-            if (irq.enabled)
-            {
-               irq.reset = true;
-               nes_irq();
-            }
-         }
+      if (irq.counter < 0)
+      {
+         irq.counter = irq.latch;   /* auto-reload: no longer stuck at -1 */
+         if (irq.enabled)
+            nes_irq();
       }
    }
 }

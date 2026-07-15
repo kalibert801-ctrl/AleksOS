@@ -55,6 +55,14 @@ public:
     // Включить/выключить авто-вибро от кнопок на стороне Pico (по умолчанию вкл)
     void picoHapticEnable(bool en);
 
+    // Inject web button state; auto-expires after 500ms if not refreshed.
+    // Browser sends current bitmask every 150ms while buttons held; send 0 to release.
+    void webInject(uint8_t mask);
+    // Returns active web mask without side effects (for use on Core 1 in osd_getinput).
+    uint8_t webCurrentMask() const {
+        return (_webMask && millis() < _webExpMs) ? _webMask : 0;
+    }
+
 private:
     uint8_t  _state    = 0;
     uint8_t  _prev     = 0;
@@ -66,6 +74,9 @@ private:
 
     void _processByte(uint8_t b);
     void _handlePacket();
+
+    volatile uint8_t  _webMask  = 0;
+    volatile uint32_t _webExpMs = 0;
 };
 
 extern ButtonHandler buttons;

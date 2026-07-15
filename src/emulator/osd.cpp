@@ -5,6 +5,7 @@
 
 #include "display/display_manager.h"
 #include "input/button_handler.h"
+#include "network/web_console.h"
 #include "config.h"
 #include "settings.h"
 #include "driver/i2s.h"
@@ -98,7 +99,7 @@ static uint8_t _inp_prevPad    = 0;
 // Core 1 (эмулятор): audio_frame() → APU → DSP → PSRAM mono ring
 // Core 0 (i2s_out):  audioOutputTask → ring → DRAM stereo buf → i2s_write
 //
-// DSP: vol → IIR LPF α=0.70 (fc≈12кГц) → TPDF ±63 → hard clip ±20000 → DAC
+// DSP: vol → DC-блокер (fc≈7Гц) → TPDF ±63 → soft-knee limiter ±28000 → normalize /120 → 8-bit DAC
 // Кольцо МОНО: 4096 × uint16_t = 8 КБ PSRAM (вдвое меньше чем стерео-пары).
 // SPSC lockless: Core 1 пишет _rHead ПОСЛЕ данных (release),
 //                Core 0 делает барьер ПЕРЕД чтением _rHead (acquire).
@@ -110,6 +111,9 @@ extern "C" void osd_setsound(void (*playfunc)(void *buf, int len)) {
 }
 
 static uint16_t _audio_buf[NES_FRAG_SAMPLES];  // APU пишет сюда (signed int16)
+
+// ── DSP состояние (сбрасывается в osd_init при каждом старте игры) ────────────
+static int32_t _dcX = 0, _dcY = 0;     // DC-блокер: убирает смещение от DMC-канала
 
 // ── TPDF дизеринг ────────────────────────────────────────────────────────────
 static uint32_t _nes_lfsr = 0xDEADBEEFu;
@@ -125,7 +129,7 @@ static inline int32_t nes_tpdf() {
 }
 
 // ── Кольцевой буфер МОНО (PSRAM) ──────────────────────────────────────────────
-#define RING_SAMPLES 4096u  // степень двойки; 4096 × 2 байт = 8 КБ PSRAM
+#define RING_SAMPLES 8192u  // степень двойки; 8192 × 2 байт = 16 КБ PSRAM
 
 static uint16_t         *_ring  = nullptr;   // ps_malloc в audio_init
 static volatile uint32_t _rHead = 0;         // Core 1 пишет
@@ -190,9 +194,14 @@ static void renderOutputTask(void*) {
     }
 }
 
-// ── Core 0: вывод в I2S ──────────────────────────────────────────────────────
+// ── Core 0: вывод в I2S (4× oversample с линейной интерполяцией) ─────────────
+// Кольцо заполняется при 44100 Гц (audio_frame); I2S работает при 176400 Гц.
+// Для каждого входного сэмпла строим 4 выходных через линейную интерполяцию:
+// это убирает ступенчатость zero-order hold и сдвигает imaging-артефакты выше 88кГц,
+// где SC8002B уже их отфильтровывает своим RC на входе.
 static void audioOutputTask(void*) {
-    static uint16_t buf[NES_FRAG_SAMPLES * 2];  // стерео для I2S (DRAM = DMA-safe)
+    static uint16_t buf[NES_FRAG_SAMPLES * 4 * 2];  // 4× oversample, стерео (BSS = DMA-safe)
+    uint16_t prev = 0x8000;  // стартуем с DC mid-point
     while (true) {
         // ACQUIRE: барьер ПЕРЕД чтением _rHead — гарантирует что данные
         // записанные Core 1 в PSRAM видны этому ядру до проверки счётчика.
@@ -202,18 +211,27 @@ static void audioOutputTask(void*) {
         if (avail >= (uint32_t)NES_FRAG_SAMPLES) {
             uint32_t t = _rTail;
             for (int i = 0; i < NES_FRAG_SAMPLES; i++) {
-                uint16_t s = _ring[(t + (uint32_t)i) & (RING_SAMPLES - 1u)];
-                buf[i * 2]     = s;   // L = GPIO26 (DAC2)
-                buf[i * 2 + 1] = s;   // R = заглушка (I2S стерео)
+                uint16_t curr = _ring[(t + (uint32_t)i) & (RING_SAMPLES - 1u)];
+                // Линейная интерполяция prev→curr за 4 шага (os=0..3).
+                // os=0: prev; os=1: prev+¼Δ; os=2: prev+½Δ; os=3: prev+¾Δ.
+                // Следующий цикл: os=0 стартует с curr (т.к. prev=curr).
+                for (int os = 0; os < 4; os++) {
+                    uint16_t s = (uint16_t)(((uint32_t)prev * (4u - (uint32_t)os) +
+                                             (uint32_t)curr * (uint32_t)os) >> 2);
+                    buf[(i * 4 + os) * 2]     = s;  // L = GPIO26 (DAC2)
+                    buf[(i * 4 + os) * 2 + 1] = s;  // R = заглушка
+                }
+                prev = curr;
             }
             __sync_synchronize();
             _rTail = t + NES_FRAG_SAMPLES;
         } else {
             // Underrun: тишина — иначе DMA повторяет старый буфер → щелчки при паузе
-            for (int i = 0; i < NES_FRAG_SAMPLES * 2; i++) buf[i] = 0x8000;
+            for (int i = 0; i < NES_FRAG_SAMPLES * 4 * 2; i++) buf[i] = 0x8000;
+            prev = 0x8000;
         }
         size_t w;
-        i2s_write(I2S_PORT, buf, NES_FRAG_SAMPLES * 4, &w, pdMS_TO_TICKS(100));
+        i2s_write(I2S_PORT, buf, NES_FRAG_SAMPLES * 4 * 2 * 2, &w, pdMS_TO_TICKS(100));
     }
 }
 
@@ -221,19 +239,19 @@ static void audioOutputTask(void*) {
 static void audio_frame(void) {
     if (!_audio_cb) return;
 
-    // Держим кольцо на уровне ≥ 2 кадра (~33 мс запаса).
-    // Если кольцо подсело (медленный кадр) — генерируем больше; макс. 4 кадра.
+    // Держим кольцо на уровне ≥ 4 кадра (~66 мс) — снижает риск заиканий при
+    // тяжёлых NES-кадрах (спрайты, сложная логика, медленный ROM-кадр).
+    // Макс. 5 кадров за раз — не переполняем кольцо (8192 сэмплов).
     const int ONE_FRAME = NES_SAMPLE_RATE / NES_REFRESH_RATE;  // 735
     int fill = (int)(_rHead - _rTail);
-    int need = ONE_FRAME * 2 - fill;
+    int need = ONE_FRAME * 4 - fill;
     if (need < ONE_FRAME)     need = ONE_FRAME;
-    if (need > ONE_FRAME * 4) need = ONE_FRAME * 4;
+    if (need > ONE_FRAME * 5) need = ONE_FRAME * 5;
     int free_space = (int)RING_SAMPLES - fill;
     if (need > free_space) need = free_space;
     if (need <= 0) return;
 
     uint8_t vol = settings.emuVolume > 100 ? 100 : settings.emuVolume;
-    static int32_t _lpf = 0;
 
     while (need > 0) {
         int n = need > NES_FRAG_SAMPLES ? NES_FRAG_SAMPLES : need;
@@ -242,11 +260,31 @@ static void audio_frame(void) {
         for (int i = 0; i < n; i++) {
             int32_t s = (int32_t)(int16_t)_audio_buf[i];  // signed int16 из APU
             s = s * (int32_t)vol / 100;
-            _lpf = (70 * s + 30 * _lpf) / 100;            // LPF α=0.70 fc≈12кГц
-            s = _lpf + nes_tpdf();                         // дизеринг ±63
-            if (s >  20000) s =  20000;                    // один hard clip
-            if (s < -20000) s = -20000;
-            uint16_t out = (uint16_t)(s + 0x8000) & 0xFF00; // DAC-формат ESP32
+            // DC-блокер: y[n] = x[n] − x[n-1] + 0.999·y[n-1], fc ≈ 7 Гц.
+            // Убирает DC-смещение от DMC-канала и асимметрии меандров.
+            {
+                int32_t ny = s - _dcX + _dcY * 999 / 1000;
+                _dcX = s;
+                _dcY = ny;
+                s = ny;
+            }
+            s += nes_tpdf();  // TPDF дизеринг ±63
+
+            // Soft-knee limiter: до ±22000 — линейно, выше — 3:1 компрессия.
+            {
+                const int32_t KNEE = 22000, CEIL = 28000;
+                int32_t a = s < 0 ? -s : s;
+                if (a > KNEE) {
+                    a = KNEE + (a - KNEE) / 3;
+                    if (a > CEIL) a = CEIL;
+                    s = s < 0 ? -a : a;
+                }
+            }
+            // Нормируем к 8-bit DAC. Делитель 120: ±15000 → ±125 → DAC 3..253 (98%),
+            // лимитер выше защищает от перегрузки. Было (s+0x8000)&0xFF00 — только 46%.
+            int32_t dv = s / 120 + 128;
+            if (dv < 0) dv = 0; else if (dv > 255) dv = 255;
+            uint16_t out = (uint16_t)dv << 8;
 
             // SPSC запись в моно-кольцо
             uint32_t h = _rHead;
@@ -260,28 +298,34 @@ static void audio_frame(void) {
     }
 }
 
+static bool _i2sNesInstalled = false;  // avoid redundant uninstall (esp. after soundStop)
+
 static int audio_init(void) {
-    // Ensure no stale I2S driver from a previous (failed) session
-    i2s_driver_uninstall(I2S_PORT); // safe to call even if not installed
+    // Uninstall only if we installed it before (prevents harmless but noisy error log
+    // when soundStop() in main.cpp already called i2s_driver_uninstall before us).
+    if (_i2sNesInstalled) {
+        i2s_driver_uninstall(I2S_PORT);
+        _i2sNesInstalled = false;
+    }
     // Release pin from any LEDC usage before I2S takes it
     ledcDetachPin(AUDIO_PIN);
     pinMode(AUDIO_PIN, INPUT);
 
     i2s_config_t cfg = {};
     cfg.mode              = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN);
-    cfg.sample_rate       = NES_SAMPLE_RATE;
+    // 4× oversample: APU генерирует при 44100 Гц; I2S работает при 176400 Гц.
+    // audioOutputTask строит 4 выходных сэмпла (линейная интерполяция) на каждый входной.
+    cfg.sample_rate       = NES_SAMPLE_RATE * 4;  // 176400 Гц
     cfg.bits_per_sample   = I2S_BITS_PER_SAMPLE_16BIT;
     cfg.channel_format    = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
     cfg.intr_alloc_flags  = 0;
-    // DMA 8×128 = 1024 сэмпла ≈ 23 мс. Было 16×128 (46мс) — лишние 23мс задержки.
-    // 8 буферов достаточно: esp_timer (prio=22) занимает Core 0 максимум 5мс.
-    cfg.dma_buf_count     = 8;    // 8×128 = 1024 сэмпла ≈ 23 мс DMA-буфер
-    cfg.dma_buf_len       = 128;  // каждый буфер = 128 сэмплов = 2.9 мс
-    // rate-limiter: i2s_write блокируется когда все 16 буферов заполнены.
-    // APLL даёт точный 22050 Гц из кварца — нет погрешности APB-делителя.
-    // Если WiFi активен — APLL недоступен (физическое ограничение ESP32),
-    // автоматически откатываемся на APB (погрешность <0.05%, практически незаметна).
+    // DMA 8×512 @ 176400 Гц = 23.2 мс — те же 23 мс задержки, что и раньше (8×128@44100).
+    cfg.dma_buf_count     = 8;    // 8 буферов
+    cfg.dma_buf_len       = 512;  // 512 сэмплов × 4 = 2.9 мс каждый
+    // rate-limiter: i2s_write блокируется когда все 8 буферов заполнены.
+    // APLL даёт точный 176400 Гц из кварца.
+    // Если WiFi активен — APLL недоступен, откатываемся на APB (погрешность ~1.2%, незаметна).
     {
         wifi_mode_t wmode = WIFI_MODE_NULL;
         esp_wifi_get_mode(&wmode);
@@ -290,6 +334,7 @@ static int audio_init(void) {
     }
 
     if (i2s_driver_install(I2S_PORT, &cfg, 0, nullptr) != ESP_OK) return -1;
+    _i2sNesInstalled = true;
     i2s_set_pin(I2S_PORT, nullptr);
     i2s_set_dac_mode(I2S_DAC_CHANNEL_LEFT_EN); // GPIO26 = DAC2 = left channel
 
@@ -300,15 +345,16 @@ static int audio_init(void) {
             printf("[OSD] FATAL: audio ring alloc failed (%u KB PSRAM)\n",
                    (unsigned)(RING_SAMPLES * sizeof(uint16_t) / 1024));
             i2s_driver_uninstall(I2S_PORT);
+            _i2sNesInstalled = false;
             return -1;
         }
         printf("[OSD] Audio ring: %u KB in PSRAM (mono)\n",
                (unsigned)(RING_SAMPLES * sizeof(uint16_t) / 1024));
     }
 
-    // Pre-fill: 2 кадра тишины (~33 мс) — Core 0 сразу пишет в I2S.
+    // Pre-fill: 4 кадра тишины (~66 мс) — Core 0 сразу пишет в I2S.
     {
-        const uint32_t preFill = (uint32_t)(NES_SAMPLE_RATE / 60) * 2; // 1470 сэмплов
+        const uint32_t preFill = (uint32_t)(NES_SAMPLE_RATE / 60) * 4; // 2940 сэмплов
         for (uint32_t i = 0; i < preFill && i < RING_SAMPLES; i++) {
             _ring[i] = 0x8000;
         }
@@ -324,20 +370,24 @@ static int audio_init(void) {
 }
 
 static void audio_deinit(void) {
-    // Завершаем задачу Core 0 до того как удаляем I2S
+    // Fade-out: заполняем кольцо тишиной и даём Core 0 воспроизвести её (~30 мс).
+    // Без этого vTaskDelete убивает задачу посреди звука → клацок на выходе из игры.
+    if (_ring && _audioOutTask) {
+        for (uint32_t i = 0; i < RING_SAMPLES; i++) _ring[i] = 0x8000;
+        __sync_synchronize();
+        _rHead = _rTail + (RING_SAMPLES / 2);  // 4096 семплов тишины вперёд
+        vTaskDelay(pdMS_TO_TICKS(30));          // ждём пока DMA пропустит
+    }
     if (_audioOutTask) { vTaskDelete(_audioOutTask); _audioOutTask = nullptr; }
     _rHead = 0;
     _rTail = 0;
-    /* _ring intentionally NOT freed: the PSRAM block's tail sentinel may have been
-    ** corrupted by a buffer overrun during NES emulation.  Calling free() on a block
-    ** with a bad tail triggers the heap-poisoning panic → reboot.
-    ** _ring is reused across sessions (reset + re-filled with silence in audio_init). */
+    /* _ring intentionally NOT freed — see audio_init for explanation. */
     i2s_driver_uninstall(I2S_PORT);
-    // Відновлюємо GPIO25 (XPT2046 touch CLK) у цифровий режим.
-    // i2s_driver_uninstall в DAC-режимі викликає dac_output_disable для GPIO25
-    // → переводить його в RTC/аналоговий режим → touch перестає відповідати.
+    _i2sNesInstalled = false;
+    // GPIO25 (XPT2046 touch CLK) уходит в RTC-режим при dac_output_disable.
     rtc_gpio_deinit(GPIO_NUM_25);
-    pinMode(AUDIO_PIN, INPUT_PULLDOWN);
+    // INPUT (high-Z): не тянем GPIO26 к GND (было INPUT_PULLDOWN = клацок в усилителе).
+    pinMode(AUDIO_PIN, INPUT);
 }
 
 extern "C" void osd_getsoundinfo(sndinfo_t *info) {
@@ -426,7 +476,7 @@ static void blit_print_stats(void) {
             float fps      = _frameCount * 1000.0f / elapsed;
             uint32_t heap  = ESP.getFreeHeap()  / 1024;
             uint32_t psram = ESP.getFreePsram() / 1024;
-            printf("[EMU] FPS=%.1f  heap=%u KB  psram=%u KB\n", fps, heap, psram);
+            webConsolePrintf("[FPS] %.1f  heap=%u KB  psram=%u KB\n", fps, heap, psram);
         }
         _frameCount = 0;
         _lastMs     = now;
@@ -479,10 +529,21 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
     const uint32_t yStep = ((uint32_t)NES_VISIBLE_HEIGHT << 12) / (uint32_t)sp.outH;
 
     if (_frame && (size_t)sp.outW * sp.outH <= _framePixels) {
-        // ── Быстрый путь: ждём Core 0 → строим _frame → сигнал Core 0 ────────
-        // Core 1 конвертирует индексы в RGB565, потом немедленно возвращается
-        // в NES эмулятор. Core 0 параллельно пушит _frame в SPI (~15мс).
-        xSemaphoreTake(_renderDone, portMAX_DELAY);
+        // ── Быстрый путь: строим _frame → сигнал Core 0 ─────────────────────
+        // Frame skip: если Core 0 ещё толкает предыдущий кадр в SPI — не ждём,
+        // а пропускаем рендер (до 2 кадров подряд). Core 1 уходит в NES сразу.
+        // На 3-й подряд — всё равно ждём чтобы не морозить экран.
+        static int _skipCount = 0;
+        if (_skipCount < 2) {
+            if (xSemaphoreTake(_renderDone, 0) == pdFALSE) {
+                _skipCount++;
+                blit_print_stats();
+                return;
+            }
+        } else {
+            if (xSemaphoreTake(_renderDone, portMAX_DELAY) == pdFALSE) { return; }
+        }
+        _skipCount = 0;
 
         uint16_t *dst = _frame;
         uint32_t yFp  = 0;
@@ -604,12 +665,9 @@ static void _romNameFromPath(const char *path, char *name, size_t maxLen) {
 // ─── Скриншот: сохраняем текущий кадр на SD как RAW файл ────────────────────
 // Формат: 4 байта заголовка (w_lo, w_hi, h_lo, h_hi) + RGB565 пиксели.
 //
-// Файл сохраняется как /Screenshots/<romname>_NNN.raw (нумерованный).
+// Файл сохраняется как /Screenshots/<romname>_NNN.bmp (24-bit BMP, открывается на ПК/телефоне).
 // Обложка /Screenshots/<romname>.raw НЕ перезаписывается, если уже существует
 // (первый скриншот устанавливает обложку автоматически, остальные — только через галерею).
-//
-// Пишем построчно — никакого большого буфера не нужно.
-// _line_buf (static, 320 пикселей / 640 байт) повторно используется для вывода.
 static void _takeScreenshot(void) {
     const ScaleParams sp = getScaleParams();
     uint16_t w = (uint16_t)sp.outW;
@@ -623,7 +681,7 @@ static void _takeScreenshot(void) {
     char path[96];
     int shotNum = 1;
     while (shotNum <= 999) {
-        snprintf(path, sizeof(path), "/Screenshots/%s_%03d.raw", romName, shotNum);
+        snprintf(path, sizeof(path), "/Screenshots/%s_%03d.bmp", romName, shotNum);
         if (!SD.exists(path)) break;
         shotNum++;
     }
@@ -638,65 +696,109 @@ static void _takeScreenshot(void) {
         return;
     }
 
-    // Заголовок
-    f.write((uint8_t)( w & 0xFF));
-    f.write((uint8_t)((w >> 8) & 0xFF));
-    f.write((uint8_t)( h & 0xFF));
-    f.write((uint8_t)((h >> 8) & 0xFF));
+    // ── BMP заголовок (54 байта, 24-bit RGB, top-down) ───────────────────────
+    const uint32_t rowBytes = ((uint32_t)w * 3 + 3) & ~3u;  // выравнивание до 4 байт
+    const uint32_t fileSize = 54 + rowBytes * h;
+    uint8_t hdr[54] = {};
+    hdr[0]='B'; hdr[1]='M';
+    hdr[2]=(uint8_t)( fileSize        & 0xFF);
+    hdr[3]=(uint8_t)((fileSize >>  8) & 0xFF);
+    hdr[4]=(uint8_t)((fileSize >> 16) & 0xFF);
+    hdr[5]=(uint8_t)((fileSize >> 24) & 0xFF);
+    hdr[10]=54;                             // offset до пикселей
+    hdr[14]=40;                             // размер BITMAPINFOHEADER
+    hdr[18]=(uint8_t)(w & 0xFF); hdr[19]=(uint8_t)(w >> 8);
+    // Отрицательная высота = top-down (строки сверху вниз, как в _frame)
+    int32_t negH = -(int32_t)h;
+    hdr[22]=(uint8_t)( negH        & 0xFF);
+    hdr[23]=(uint8_t)((negH >>  8) & 0xFF);
+    hdr[24]=(uint8_t)((negH >> 16) & 0xFF);
+    hdr[25]=(uint8_t)((negH >> 24) & 0xFF);
+    hdr[26]=1;                              // color planes
+    hdr[28]=24;                             // bits per pixel
+    f.write(hdr, 54);
+
+    // ── Построчная запись: RGB565 → BGR888 ────────────────────────────────────
+    uint8_t *rowBuf = (uint8_t *)malloc(rowBytes);
+    if (rowBuf) memset(rowBuf, 0, rowBytes);
 
     if (_frame && _framePixels >= (size_t)w * h) {
-        // ── DMA burst mode: _frame уже содержит готовые pre-inverted пиксели ──
-        f.write((uint8_t *)_frame, (size_t)w * h * sizeof(uint16_t));
-
+        for (int oy = 0; oy < h; oy++) {
+            const uint16_t *src = _frame + oy * w;
+            for (int ox = 0; ox < w && rowBuf; ox++) {
+                uint16_t px = src[ox];  // lcd.color565() format
+                rowBuf[ox*3+0] = (uint8_t)((px << 3) & 0xF8);   // B
+                rowBuf[ox*3+1] = (uint8_t)((px >> 3) & 0xFC);   // G
+                rowBuf[ox*3+2] = (uint8_t)((px >> 8) & 0xF8);   // R
+            }
+            f.write(rowBuf, rowBytes);
+        }
     } else if (_blitBmp) {
-        // ── Fallback mode: рендерим из primary_buffer nofrendo ───────────────
-        // _blitBmp == primary_buffer (bmp_create) — именно туда PPU пишет данные.
-        // _bmp (bmp_createhw/_fb) никогда не заполняется PPU при наличии custom_blit.
-        // _line_buf — статический 320-элементный DRAM буфер, пишем построчно на SD.
         const uint32_t xStep = ((uint32_t)NES_SCREEN_WIDTH  << 12) / (uint32_t)w;
         const uint32_t yStep = ((uint32_t)NES_VISIBLE_HEIGHT << 12) / (uint32_t)h;
         uint32_t yFp = 0;
         for (int oy = 0; oy < h; oy++) {
             const uint8_t *src = _blitBmp->line[(yFp >> 12) + VID_FIRST_LINE];
             uint32_t xFp = 0;
-            for (int ox = 0; ox < w; ox++) {
-                _line_buf[ox] = _pal[src[xFp >> 12]];
+            for (int ox = 0; ox < w && rowBuf; ox++) {
+                uint16_t px = _pal[src[xFp >> 12]];
+                rowBuf[ox*3+0] = (uint8_t)((px << 3) & 0xF8);   // B
+                rowBuf[ox*3+1] = (uint8_t)((px >> 3) & 0xFC);   // G
+                rowBuf[ox*3+2] = (uint8_t)((px >> 8) & 0xF8);   // R
                 xFp += xStep;
             }
-            f.write((uint8_t *)_line_buf, (size_t)w * sizeof(uint16_t));
+            f.write(rowBuf, rowBytes);
             yFp += yStep;
         }
         printf("[EMU] Screenshot: fallback render %dx%d\n", w, h);
-
     } else {
-        f.close();
-        SD.remove(path);
+        free(rowBuf);
+        f.close(); SD.remove(path);
         printf("[EMU] Screenshot: no frame data\n");
         return;
     }
 
-    f.flush();
-    f.close();
+    free(rowBuf);
+    f.flush(); f.close();
     printf("[EMU] Screenshot saved: %s (%dx%d)\n", path, w, h);
 
-    // ── Если обложка ещё не существует — устанавливаем первый скриншот как обложку ──
+    // ── Если обложка ещё не существует — пишем .raw из текущего кадра ─────────
     char coverPath[96];
     snprintf(coverPath, sizeof(coverPath), "/Screenshots/%s.raw", romName);
     if (!SD.exists(coverPath)) {
-        // Копируем нумерованный файл в обложку
-        File src = SD.open(path, FILE_READ);
         File dst = SD.open(coverPath, FILE_WRITE);
-        if (src && dst) {
-            uint8_t copyBuf[512];
-            int nr;
-            while ((nr = src.read(copyBuf, sizeof(copyBuf))) > 0) dst.write(copyBuf, nr);
-            dst.flush();
+        if (dst) {
+            uint8_t ohdr[4] = { (uint8_t)(w & 0xFF), (uint8_t)(w >> 8),
+                                 (uint8_t)(h & 0xFF), (uint8_t)(h >> 8) };
+            dst.write(ohdr, 4);
+            if (_frame && _framePixels >= (size_t)w * h) {
+                dst.write((uint8_t *)_frame, (size_t)w * h * 2);
+            } else if (_blitBmp) {
+                const uint32_t xStep = ((uint32_t)NES_SCREEN_WIDTH  << 12) / (uint32_t)w;
+                const uint32_t yStep = ((uint32_t)NES_VISIBLE_HEIGHT << 12) / (uint32_t)h;
+                uint32_t yFp = 0;
+                for (int oy = 0; oy < h; oy++) {
+                    const uint8_t *src2 = _blitBmp->line[(yFp >> 12) + VID_FIRST_LINE];
+                    uint32_t xFp = 0;
+                    for (int ox = 0; ox < w; ox++) {
+                        _line_buf[ox] = _pal[src2[xFp >> 12]];
+                        xFp += xStep;
+                    }
+                    dst.write((uint8_t *)_line_buf, (size_t)w * 2);
+                    yFp += yStep;
+                }
+            }
+            dst.flush(); dst.close();
             printf("[EMU] Cover art set: %s\n", coverPath);
         }
-        if (src) src.close();
-        if (dst) dst.close();
     }
 }
+
+// ─── Remote view: expose current NES framebuffer ─────────────────────────────
+const void* osdFramePtr()  { return _frame; }
+size_t      osdFrameSize() { return _frame ? _framePixels * 2 : 0; }
+uint16_t    osdFrameW()    { return (uint16_t)_renderSp.outW; }
+uint16_t    osdFrameH()    { return (uint16_t)_renderSp.outH; }
 
 // ─── In-game меню паузы ────────────────────────────────────────────────────────
 // Вызывается из osd_getinput() при удержании HOME.
@@ -869,7 +971,8 @@ extern "C" void osd_getinput(void) {
     esp_task_wdt_reset();
 
     // Применяем таблицу ремапа: физический бит i → settings.btnMap[i]
-    uint8_t pad = buttons.applyBtnMap(buttons.readCurrent());
+    // webCurrentMask() добавляет биты от браузера (веб-управление) без side effects.
+    uint8_t pad = buttons.applyBtnMap(buttons.readCurrent() | buttons.webCurrentMask());
     bool    homeHeld = (buttons.readSysCurrent() & BTN_SYS_HOME) != 0;
 
     _inp_frameCount++;
@@ -1086,6 +1189,7 @@ extern "C" int osd_init(void) {
     _inp_prevPad    = 0;
     _volShowFrames  = 0;      // скрываем OSD громкости
     _volAdjLastMs   = 0;
+    _dcX = 0; _dcY = 0;       // DC-блокер: чистый старт в каждой игровой сессии
     log_chain_logfunc(logprint);
 
     // ── NES 8-bit framebuffer → PSRAM (frees ~60 KB of internal DRAM) ──────

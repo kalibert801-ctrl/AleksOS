@@ -110,7 +110,8 @@ static void i2sStop() {
     i2s_driver_uninstall(WAV_I2S);
     _i2sInstalled = false;
     restoreTouch();
-    pinMode(AUDIO_PIN, INPUT_PULLDOWN);
+    // INPUT (high-Z): не тянем к GND — step-напряжение в усилителе = клацок.
+    pinMode(AUDIO_PIN, INPUT);
 }
 
 // ── WAV helper ────────────────────────────────────────────────
@@ -150,7 +151,7 @@ static void playWavFile(const char *path) {
     if (!found || audioFmt != 1 || channels < 1 || channels > 2
                || bitsPerSample > 16 || sampleRate == 0) { f.close(); return; }
 
-    if (!i2sStart(sampleRate * 10 / 17)) { f.close(); return; }
+    if (!i2sStart(sampleRate)) { f.close(); return; }
 
     const int frameBytes = ((bitsPerSample == 8) ? 1 : 2) * (int)channels;
     uint8_t readBuf[512];
@@ -232,7 +233,7 @@ static void playMp3File(const char *path) {
         // Перезапускаем I2S если sample rate изменился (редко, но бывает)
         if (!i2sOk || fi.hz != curSr) {
             if (i2sOk) i2sStop();
-            if (!i2sStart(fi.hz * 10 / 17)) break;
+            if (!i2sStart(fi.hz)) break;
             i2sOk = true; curSr = fi.hz;
         }
 

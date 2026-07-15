@@ -2,6 +2,7 @@
 #include "ui/ui.h"
 // ui/theme_plugin.h подтянут через ui.h
 #include "network/wifi_manager.h"
+#include "network/web_manager.h"
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
@@ -862,12 +863,42 @@ void menuBatteryAnimTick() {
     _mBattery(295, cy);
 }
 
+// ── Частичная отрисовка при скролле: только список + правая панель ──────────
+// Не трогает шапку и футер — они не меняются при прокрутке.
+// Экономит ~40% пикселей vs menuDraw() (fillRect 320×170 вместо fillScreen 320×240).
+static void _menuRefreshListArea() {
+    const ThemePlugin* tp = ThemeRegistry::active();
+    const Theme565& t = getTheme();
+    int total = _menuListCount();
+
+    lcd.fillRect(0, M_HDR_H, SCREEN_W, M_DPAD_Y - M_HDR_H, t.bg);
+    lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
+
+    if (total == 0) {
+        fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
+        int ey = M_HDR_H + (M_DPAD_Y - M_HDR_H) / 2;
+        if (_searchActive)      lcd.drawString("No results",    M_LIST_W / 2, ey);
+        else if (_favMode)      lcd.drawString("No favourites", M_LIST_W / 2, ey);
+        else {
+            lcd.drawString(cyrStr(S().noRoms),      M_LIST_W / 2, ey - 10);
+            fsm(); lcd.drawString(cyrStr(S().noRomsHint), M_LIST_W / 2, ey + 10);
+        }
+    } else {
+        int end = min(_menuOffset + M_ROWS, total);
+        for (int i = _menuOffset; i < end; i++)
+            tp->drawRomRow(_menuActual(i), i - _menuOffset, i == _menuSel);
+        _menuDrawScrollArrows(total);
+    }
+
+    _menuDrawRightPanel(_menuActual(_menuSel));
+}
+
 void menuScrollUp() {
     if (_menuSel <= 0) return;
     int oldSel = _menuSel--;
     if (_menuSel < _menuOffset) {
         _menuOffset = _menuSel;
-        menuDraw();
+        _menuRefreshListArea();
     } else {
         _menuPartialUpdate(oldSel, _menuSel);
     }
@@ -879,7 +910,7 @@ void menuScrollDown() {
     int oldSel = _menuSel++;
     if (_menuSel >= _menuOffset + M_ROWS) {
         _menuOffset = _menuSel - M_ROWS + 1;
-        menuDraw();
+        _menuRefreshListArea();
     } else {
         _menuPartialUpdate(oldSel, _menuSel);
     }
@@ -1175,6 +1206,103 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
     heap_caps_free(dstBuf);
 }
 
+// ── Отрисовка стандартного BMP файла (24-bit RGB) ─────────────────────────────
+// Читает BMP, масштабирует до dw×dh и выводит на дисплей.
+// Используется для пронумерованных скриншотов (_NNN.bmp).
+static void _drawBmpFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint) {
+    lcd.fillRect(dx, dy, dw, dh, 0x18C3);
+    lcd.drawRect(dx, dy, dw, dh, 0x4208);
+
+    File f = SD.open(path, FILE_READ);
+    if (!f) {
+        if (noArtHint) {
+            lcd.setFont(&lgfx::fonts::DejaVu9);
+            lcd.setTextDatum(MC_DATUM); lcd.setTextColor(0x4208);
+            lcd.drawString("NO ART", dx + dw / 2, dy + dh / 2 - 7);
+            lcd.setTextColor(0x2965);
+            lcd.drawString("HOME>Screenshot", dx + dw / 2, dy + dh / 2 + 7);
+        }
+        return;
+    }
+
+    // Читаем заголовок BMP (54 байта)
+    uint8_t hdr[54] = {};
+    if (f.read(hdr, 54) != 54 || hdr[0] != 'B' || hdr[1] != 'M') { f.close(); return; }
+    uint32_t dataOff = (uint32_t)hdr[10] | ((uint32_t)hdr[11]<<8) | ((uint32_t)hdr[12]<<16) | ((uint32_t)hdr[13]<<24);
+    uint16_t srcW   = (uint16_t)hdr[18] | ((uint16_t)hdr[19] << 8);
+    int32_t  srcHs  = (int32_t)((uint32_t)hdr[22] | ((uint32_t)hdr[23]<<8) | ((uint32_t)hdr[24]<<16) | ((uint32_t)hdr[25]<<24));
+    uint16_t bpp    = (uint16_t)hdr[28] | ((uint16_t)hdr[29] << 8);
+    if (bpp != 24 || srcW == 0 || srcW > 1024 || srcHs == 0) { f.close(); return; }
+    uint16_t srcH   = (uint16_t)(srcHs < 0 ? -srcHs : srcHs);
+    uint32_t rowBytes = ((uint32_t)srcW * 3 + 3) & ~3u;
+
+    // Загружаем весь кадр в PSRAM (если хватает)
+    uint32_t totalPx = (uint32_t)srcW * srcH;
+    uint16_t *fullBuf = (uint16_t *)heap_caps_malloc(totalPx * 2, MALLOC_CAP_SPIRAM);
+    uint8_t  *rowBuf  = (uint8_t  *)malloc(rowBytes);
+    f.seek(dataOff);
+
+    if (fullBuf && rowBuf) {
+        for (int y = 0; y < (int)srcH; y++) {
+            if (f.read(rowBuf, rowBytes) != (int)rowBytes) break;
+            uint16_t *dst = fullBuf + (size_t)y * srcW;
+            for (int x = 0; x < (int)srcW; x++) {
+                uint8_t b = rowBuf[x*3+0], g = rowBuf[x*3+1], r = rowBuf[x*3+2];
+                // BGR888 → lcd.color565() format
+                dst[x] = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
+            }
+        }
+        f.close(); free(rowBuf); rowBuf = nullptr;
+
+        uint16_t *dstBuf = (uint16_t *)heap_caps_malloc((size_t)dw * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        lcd.startWrite();
+        lcd.setAddrWindow(dx, dy, dw, dh);
+        for (int dstY = 0; dstY < dh; dstY++) {
+            int srcY = (dstY * (int)srcH) / dh;
+            const uint16_t *srcRow = fullBuf + (size_t)srcY * srcW;
+            if ((int)srcW == dw) {
+                lcd.writePixels(srcRow, dw, true);
+            } else if (dstBuf) {
+                for (int x = 0; x < dw; x++)
+                    dstBuf[x] = srcRow[(x * (int)srcW) / dw];
+                lcd.writePixels(dstBuf, dw, true);
+            }
+        }
+        lcd.endWrite();
+        heap_caps_free(fullBuf);
+        if (dstBuf) heap_caps_free(dstBuf);
+    } else {
+        // Запасной путь: построчно без PSRAM
+        if (!rowBuf) { heap_caps_free(fullBuf); f.close(); return; }
+        uint16_t *dstBuf = (uint16_t *)malloc((size_t)dw * 2);
+        uint16_t *srcBuf = (uint16_t *)malloc((size_t)srcW * 2);
+        if (dstBuf && srcBuf) {
+            lcd.startWrite();
+            lcd.setAddrWindow(dx, dy, dw, dh);
+            int lastSrcY = -1;
+            for (int dstY = 0; dstY < dh; dstY++) {
+                int srcY = (dstY * (int)srcH) / dh;
+                if (srcY != lastSrcY) {
+                    while (lastSrcY < srcY - 1) { f.seek(f.position() + rowBytes); lastSrcY++; }
+                    if (f.read(rowBuf, rowBytes) == (int)rowBytes) {
+                        for (int x = 0; x < (int)srcW; x++) {
+                            uint8_t b = rowBuf[x*3+0], g = rowBuf[x*3+1], r = rowBuf[x*3+2];
+                            srcBuf[x] = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
+                        }
+                    }
+                    lastSrcY = srcY;
+                }
+                for (int x = 0; x < dw; x++) dstBuf[x] = srcBuf[(x * (int)srcW) / dw];
+                lcd.writePixels(dstBuf, dw, true);
+            }
+            lcd.endWrite();
+        }
+        free(dstBuf); free(srcBuf); free(rowBuf);
+        heap_caps_free(fullBuf);
+        f.close();
+    }
+}
+
 // ── Генерация thumbnail без отрисовки (для предзагрузки при буте) ─────────────
 // Читает .raw, масштабирует до tw×th, записывает .thm. Не трогает LCD.
 static void _generateThumbnail(const char *rawPath, const char *thmPath, int tw, int th) {
@@ -1414,8 +1542,9 @@ void showRomInfo(int idx) {
 
 static const char *_catName[] = {
     "Display", "Audio", "Appearance", "System", "Controls", "Info",
-    "Debug",   // cat=6: виртуальная — открывается из System через gi=25
-    "Battery"  // cat=7: виртуальная — открывается из System через gi=33
+    "Debug",     // cat=6: виртуальная — открывается из System через gi=25
+    "Battery",   // cat=7: виртуальная — открывается через gi=33
+    "Web Debug"  // cat=8: виртуальная — открывается из Debug через gi=37
 };
 
 // ── _catItems[][8]: максимум 8 пунктов на категорию ─────────────────────
@@ -1430,8 +1559,9 @@ static const int _catItems[][8] = {
     { 6, 17, 18, 19, 24, 25, 26, 33 },         // 3: System      (gi=33=Battery screen)
     { 12, 13, 15, 16, 30, 31, 32, 36 },        // 4: Controls    (gi=30=Turbo, gi=31=TurboMode, gi=32=GG, gi=36=GS)
     { 10, 11, 28, -1, -1, -1, -1, -1 },        // 5: Info        (gi=28=Pico Controller перенесён сюда)
-    { 5, 20, 21, 22, 23, -1, -1, -1 },         // 6: Debug (virtual sub-screen; gi=5=showFPS moved here)
+    { 5, 20, 21, 22, 23, 37, -1, -1 },          // 6: Debug (gi=37=Web Debug link)
     { -1, -1, -1, -1, -1, -1, -1, -1 },        // 7: Battery (virtual info screen, через gi=33)
+    { 38, -1, -1, -1, -1, -1, -1, -1 },        // 8: Web Debug (virtual, через gi=37)
 };
 #define CAT_COUNT 6  // в сетке видны только 0..5; cat=6,7 — виртуальные
 
@@ -1558,6 +1688,13 @@ static String settingValue(int gi) {
             return "Off";
         }
         case 35: return settings.scanlines ? "On" : "Off";  // Scanlines
+        case 37: return "Open >";    // Web Debug sub-screen
+        case 38: {  // Web Debug toggle
+            if (!webDbgRunning()) return "Off";
+            static char _dbgVal[24];
+            snprintf(_dbgVal, sizeof(_dbgVal), "http://%s", webDbgIP());
+            return _dbgVal;
+        }
         case 36: {  // Game Shark
             int n = 0;
             for (int i = 0; i < 8; i++) if (settings.gsCodes[i][0]) n++;
@@ -2282,6 +2419,11 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
             lcd.drawFastHLine(cx-6, cy+4, 12, c);
             break;
         }
+        case 37: case 38: {  // Web Debug — WiFi icon с жучком
+            iconWifi(cx, cy-1, c);
+            lcd.fillCircle(cx, cy+4, 2, c);
+            break;
+        }
         default:            iconInfo(cx,cy,c); break;
     }
 }
@@ -2313,6 +2455,8 @@ static const char* getLabelForGi(int gi) {
         case 34: return "Sleep";
         case 35: return "Scanlines";
         case 36: return "Game Shark";
+        case 37: return "Web Debug";
+        case 38: return "Web Debug";
     }
     return "";
 }
@@ -2509,16 +2653,17 @@ static uint8_t handleCategoryDetail(int x, int y) {
         if (gi == 26) return 0xA0;   // Check Update → OTA screen
         if (gi == 32) return 0xB0;   // Game Genie → открыть GG экран
         if (gi == 36) return 0xD0;   // Game Shark → открыть GS экран
-        if (gi == 25 || gi == 33) {
-            // Debug (gi=25→cat=6) / Battery (gi=33→cat=7) — виртуальные sub-экраны
+        if (gi == 25 || gi == 33 || gi == 37) {
+            // Debug→cat=6 / Battery→cat=7 / WebDebug→cat=8
             _prevCat = _settingsCat;
-            _settingsCat = (gi == 33) ? 7 : 6;
+            _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
             _catItemIdx  = 0;
             _detailOffset = 0;
             _detailOpenedMs = millis();
             drawCategoryDetail();
             return 0;
         }
+        if (gi == 38) return 0xC0;   // Web Debug toggle → main.cpp
         settingInc(gi);
         drawCategoryDetail();
         return 0;  // НЕ BTN_A — значение изменено, экран обновлён
@@ -2701,9 +2846,10 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 26) return 0xA0;  // OTA check
             if (gi == 32) return 0xB0;  // open Game Genie codes screen
             if (gi == 36) return 0xD0;  // open Game Shark codes screen
-            if (gi == 25 || gi == 33) {
+            if (gi == 38) return 0xC0;  // Web Debug toggle
+            if (gi == 25 || gi == 33 || gi == 37) {
                 _prevCat = _settingsCat;
-                _settingsCat = (gi == 33) ? 7 : 6;
+                _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -2716,9 +2862,10 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 26) return 0xA0;  // OTA check
             if (gi == 32) return 0xB0;  // open Game Genie
             if (gi == 36) return 0xD0;  // open Game Shark
-            if (gi == 25 || gi == 33) {
+            if (gi == 38) return 0xC0;  // Web Debug toggle
+            if (gi == 25 || gi == 33 || gi == 37) {
                 _prevCat = _settingsCat;
-                _settingsCat = (gi == 33) ? 7 : 6;
+                _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -2732,9 +2879,10 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 26) return 0xA0;
             if (gi == 32) return 0xB0;  // open Game Genie
             if (gi == 36) return 0xD0;  // open Game Shark
-            if (gi == 25 || gi == 33) {
+            if (gi == 38) return 0xC0;  // Web Debug toggle
+            if (gi == 25 || gi == 33 || gi == 37) {
                 _prevCat = _settingsCat;
-                _settingsCat = (gi == 33) ? 7 : 6;
+                _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -4516,7 +4664,7 @@ static int   _galShotOff  = 0;
 
 // ── Сканирование ──────────────────────────────────────────────────────────────
 
-// Сканирует /Screenshots/ и строит список имён игр, у которых есть <name>_NNN.raw
+// Сканирует /Screenshots/ и строит список имён игр, у которых есть <name>_NNN.bmp
 static void _galScanGames() {
     _galGameCnt = 0;
     File dir = SD.open("/Screenshots");
@@ -4526,8 +4674,8 @@ static void _galScanGames() {
         if (!f.isDirectory()) {
             String nm = String(f.name());
             int len = nm.length();
-            // Проверяем паттерн: <name>_NNN.raw  (NNN = ровно 3 цифры)
-            if (len >= 9 && nm.endsWith(".raw")) {
+            // Проверяем паттерн: <name>_NNN.bmp  (NNN = ровно 3 цифры)
+            if (len >= 9 && nm.endsWith(".bmp")) {
                 // Позиция суффикса _NNN.raw: len-8
                 if (nm[len-8] == '_' &&
                     isdigit(nm[len-7]) && isdigit(nm[len-6]) && isdigit(nm[len-5])) {
@@ -4570,10 +4718,10 @@ static void _galScanShots(const char *gameName) {
         if (!f.isDirectory()) {
             String nm = String(f.name());
             int len = nm.length();
-            if (len >= plen + 7 && nm.endsWith(".raw")) {
+            if (len >= plen + 7 && nm.endsWith(".bmp")) {
                 if (strncmp(nm.c_str(), prefix, plen) == 0) {
                     const char *numPart = nm.c_str() + plen;
-                    int numLen = len - plen - 4;  // без ".raw"
+                    int numLen = len - plen - 4;  // без ".bmp"
                     if (numLen == 3 && isdigit(numPart[0]) && isdigit(numPart[1]) && isdigit(numPart[2])) {
                         if (_galShotCnt < GAL_MAX_SHOTS) {
                             snprintf(_galShots[_galShotCnt++], 95,
@@ -4595,19 +4743,47 @@ static void _galScanShots(const char *gameName) {
             }
 }
 
-// ── Копирование скриншота как обложки ────────────────────────────────────────
+// ── Конвертация BMP скриншота в RAW обложку ──────────────────────────────────
+// Читает .bmp (24-bit), конвертирует BGR888 → RGB565, пишет .raw (наш формат).
 static bool _galSetAsCover(const char *shotPath, const char *gameName) {
     char coverPath[96];
     snprintf(coverPath, sizeof(coverPath), "/Screenshots/%s.raw", gameName);
+
     File src = SD.open(shotPath, FILE_READ);
     if (!src) return false;
+    uint8_t hdr[54] = {};
+    if (src.read(hdr, 54) != 54 || hdr[0] != 'B' || hdr[1] != 'M') { src.close(); return false; }
+    uint32_t dataOff = (uint32_t)hdr[10] | ((uint32_t)hdr[11]<<8) | ((uint32_t)hdr[12]<<16) | ((uint32_t)hdr[13]<<24);
+    uint16_t srcW   = (uint16_t)hdr[18] | ((uint16_t)hdr[19] << 8);
+    int32_t  srcHs  = (int32_t)((uint32_t)hdr[22] | ((uint32_t)hdr[23]<<8) | ((uint32_t)hdr[24]<<16) | ((uint32_t)hdr[25]<<24));
+    uint16_t srcH   = (uint16_t)(srcHs < 0 ? -srcHs : srcHs);
+    uint32_t rowBytes = ((uint32_t)srcW * 3 + 3) & ~3u;
+
     SD.remove(coverPath);
     File dst = SD.open(coverPath, FILE_WRITE);
     if (!dst) { src.close(); return false; }
-    uint8_t buf[512]; int nr;
-    while ((nr = src.read(buf, sizeof(buf))) > 0) dst.write(buf, nr);
+
+    uint8_t  ohdr[4] = { (uint8_t)(srcW & 0xFF), (uint8_t)(srcW >> 8),
+                         (uint8_t)(srcH & 0xFF), (uint8_t)(srcH >> 8) };
+    dst.write(ohdr, 4);
+
+    uint8_t  *rowBuf = (uint8_t  *)malloc(rowBytes);
+    uint16_t *pixBuf = (uint16_t *)malloc((size_t)srcW * 2);
+    bool ok = (rowBuf && pixBuf);
+    if (ok) {
+        src.seek(dataOff);
+        for (int y = 0; y < (int)srcH; y++) {
+            src.read(rowBuf, rowBytes);
+            for (int x = 0; x < (int)srcW; x++) {
+                uint8_t b = rowBuf[x*3+0], g = rowBuf[x*3+1], r = rowBuf[x*3+2];
+                pixBuf[x] = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
+            }
+            dst.write((uint8_t *)pixBuf, (size_t)srcW * 2);
+        }
+    }
+    free(rowBuf); free(pixBuf);
     dst.flush(); src.close(); dst.close();
-    return true;
+    return ok;
 }
 
 // ── Диалог «Установить как обложку?» ─────────────────────────────────────────
@@ -4765,7 +4941,7 @@ static void _galDrawShotsLevel() {
     lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
     // Превью выбранного скриншота
     if (_galShotCnt > 0)
-        _drawRawFile(_galShots[_galShotSel],
+        _drawBmpFile(_galShots[_galShotSel],
                      M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
     // Список скриншотов
     for (int s = 0; s < GAL_ROWS; s++) {
@@ -4775,10 +4951,10 @@ static void _galDrawShotsLevel() {
                          (s % 2) ? t.rowOdd : t.rowEven);
             continue;
         }
-        // Имя из пути: "/Screenshots/Name_001.raw" → "Shot 001"
+        // Имя из пути: "/Screenshots/Name_001.bmp" → "Shot 001"
         const char *fn = strrchr(_galShots[idx], '/');
         fn = fn ? fn + 1 : _galShots[idx];
-        // Берём последние 7 символов файла (NNN.raw) → номер
+        // Берём последние 7 символов файла (NNN.bmp) → номер
         int fnLen = strlen(fn);
         char label[24] = "Shot ???";
         if (fnLen >= 7) snprintf(label, sizeof(label), "Shot %c%c%c", fn[fnLen-7], fn[fnLen-6], fn[fnLen-5]);
@@ -4792,7 +4968,7 @@ static void _galDrawShotsLevel() {
 static void _galDrawFullscreen() {
     if (_galShotCnt == 0) return;
     // Рисуем скриншот на весь экран
-    _drawRawFile(_galShots[_galShotSel], 0, 0, SCREEN_W, SCREEN_H, false);
+    _drawBmpFile(_galShots[_galShotSel], 0, 0, SCREEN_W, SCREEN_H, false);
     // Нижняя панель-подсказка
     const Theme565& t = getTheme();
     lcd.fillRect(0, SCREEN_H - 28, SCREEN_W, 28, 0x0000u);
@@ -4815,7 +4991,7 @@ static void _galUpdatePanel() {
         fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
         lcd.drawString(_galGames[_galGameSel], M_PANEL_X + M_PANEL_W / 2, M_INFO_Y + 12);
     } else if (_galLevel == 1 && _galShotCnt > 0) {
-        _drawRawFile(_galShots[_galShotSel],
+        _drawBmpFile(_galShots[_galShotSel],
                      M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
     }
 }

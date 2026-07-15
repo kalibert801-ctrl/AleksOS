@@ -1,5 +1,6 @@
 #include "input/button_handler.h"
 #include "settings.h"
+#include "network/web_console.h"
 
 ButtonHandler buttons;
 
@@ -39,18 +40,16 @@ void ButtonHandler::_handlePacket() {
         case PICO_BTN_PKT:               // 0x42 — кнопки
             if (chk == (uint8_t)(~data)) {
                 if (data != _state && settings.diagButtons) {
-                    // Диагностика: печатаем когда состояние кнопок меняется
-                    Serial.printf("[PICO] raw=0x%02X ->", data);
-                    if (data & 0x01) Serial.print(" STA");
-                    if (data & 0x02) Serial.print(" SEL");
-                    if (data & 0x04) Serial.print(" A");
-                    if (data & 0x08) Serial.print(" B");
-                    if (data & 0x10) Serial.print(" UP");
-                    if (data & 0x20) Serial.print(" DOWN");
-                    if (data & 0x40) Serial.print(" LEFT");
-                    if (data & 0x80) Serial.print(" RIGHT");
-                    if (data == 0)   Serial.print(" (release)");
-                    Serial.println();
+                    webConsolePrintf("[BTN] 0x%02X%s%s%s%s%s%s%s%s%s\n", data,
+                        (data & 0x01) ? " STA"     : "",
+                        (data & 0x02) ? " SEL"     : "",
+                        (data & 0x04) ? " A"       : "",
+                        (data & 0x08) ? " B"       : "",
+                        (data & 0x10) ? " UP"      : "",
+                        (data & 0x20) ? " DOWN"    : "",
+                        (data & 0x40) ? " LEFT"    : "",
+                        (data & 0x80) ? " RIGHT"   : "",
+                        (data == 0)   ? " release" : "");
                 }
                 _state   = data;
                 _lastPkt = millis();
@@ -61,8 +60,8 @@ void ButtonHandler::_handlePacket() {
                 _sysState = data;
                 _lastPkt  = millis();
                 if (settings.diagButtons && data) {
-                    Serial.printf("[PICO] SYS=0x%02X%s\n", data,
-                                  (data & BTN_SYS_HOME) ? " HOME" : "");
+                    webConsolePrintf("[BTN] SYS=0x%02X%s\n", data,
+                                    (data & BTN_SYS_HOME) ? " HOME" : "");
                 }
             }
             break;
@@ -80,12 +79,25 @@ void ButtonHandler::update() {
         _processByte((uint8_t)PICO_SERIAL.read());
 }
 
-uint8_t ButtonHandler::read()    { update(); return _state; }
+uint8_t ButtonHandler::read() {
+    update();
+    uint8_t web = 0;
+    if (_webMask) {
+        if (millis() < _webExpMs) web = _webMask;
+        else                      _webMask = 0;
+    }
+    return _state | web;
+}
+
+void ButtonHandler::webInject(uint8_t mask) {
+    _webMask  = mask;
+    _webExpMs = millis() + 500;
+}
 
 uint8_t ButtonHandler::readNew() {
-    update();
-    uint8_t newly = _state & ~_prev;
-    _prev = _state;
+    uint8_t cur = read(); // includes web inject
+    uint8_t newly = cur & ~_prev;
+    _prev = cur;
     return newly;
 }
 
