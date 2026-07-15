@@ -226,9 +226,17 @@ static void audioOutputTask(void*) {
             __sync_synchronize();
             _rTail = t + NES_FRAG_SAMPLES;
         } else {
-            // Underrun: тишина — иначе DMA повторяет старый буфер → щелчки при паузе
-            for (int i = 0; i < NES_FRAG_SAMPLES * 4 * 2; i++) buf[i] = 0x8000;
-            prev = 0x8000;
+            // Underrun: плавное затухание к тишине (7/8 за шаг, ~1.5 мс до тишины).
+            // Предотвращает щелчок при резком сбросе в 0x8000 и при последующем
+            // возобновлении воспроизведения (prev остаётся вблизи 0x8000).
+            for (int i = 0; i < NES_FRAG_SAMPLES; i++) {
+                prev = (uint16_t)(((uint32_t)prev * 7u + 0x8000u) >> 3);
+                uint16_t s = prev;
+                buf[(i * 4)     * 2]     = s; buf[(i * 4)     * 2 + 1] = s;
+                buf[(i * 4 + 1) * 2]     = s; buf[(i * 4 + 1) * 2 + 1] = s;
+                buf[(i * 4 + 2) * 2]     = s; buf[(i * 4 + 2) * 2 + 1] = s;
+                buf[(i * 4 + 3) * 2]     = s; buf[(i * 4 + 3) * 2 + 1] = s;
+            }
         }
         size_t w;
         i2s_write(I2S_PORT, buf, NES_FRAG_SAMPLES * 4 * 2 * 2, &w, pdMS_TO_TICKS(100));
@@ -239,14 +247,16 @@ static void audioOutputTask(void*) {
 static void audio_frame(void) {
     if (!_audio_cb) return;
 
-    // Держим кольцо на уровне ≥ 4 кадра (~66 мс) — снижает риск заиканий при
-    // тяжёлых NES-кадрах (спрайты, сложная логика, медленный ROM-кадр).
-    // Макс. 5 кадров за раз — не переполняем кольцо (8192 сэмплов).
+    // Держим кольцо на уровне ≥ 5 кадров (~83 мс) — снижает риск заиканий при
+    // тяжёлых NES-кадрах (спрайты, сложная логика, медленный ROM-кадр, WiFi-burst).
+    // Макс. 6 кадров за раз — быстро восстанавливаемся после дренажа.
     const int ONE_FRAME = NES_SAMPLE_RATE / NES_REFRESH_RATE;  // 735
+    // ACQUIRE: читаем актуальный _rTail, который обновляет Core 0 (audioOutputTask)
+    __sync_synchronize();
     int fill = (int)(_rHead - _rTail);
-    int need = ONE_FRAME * 4 - fill;
+    int need = ONE_FRAME * 5 - fill;
     if (need < ONE_FRAME)     need = ONE_FRAME;
-    if (need > ONE_FRAME * 5) need = ONE_FRAME * 5;
+    if (need > ONE_FRAME * 6) need = ONE_FRAME * 6;
     int free_space = (int)RING_SAMPLES - fill;
     if (need > free_space) need = free_space;
     if (need <= 0) return;
@@ -352,9 +362,9 @@ static int audio_init(void) {
                (unsigned)(RING_SAMPLES * sizeof(uint16_t) / 1024));
     }
 
-    // Pre-fill: 4 кадра тишины (~66 мс) — Core 0 сразу пишет в I2S.
+    // Pre-fill: 5 кадров тишины (~83 мс) — Core 0 сразу пишет в I2S.
     {
-        const uint32_t preFill = (uint32_t)(NES_SAMPLE_RATE / 60) * 4; // 2940 сэмплов
+        const uint32_t preFill = (uint32_t)(NES_SAMPLE_RATE / 60) * 5; // 3675 сэмплов
         for (uint32_t i = 0; i < preFill && i < RING_SAMPLES; i++) {
             _ring[i] = 0x8000;
         }
