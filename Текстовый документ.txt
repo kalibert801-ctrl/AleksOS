@@ -15,3 +15,6 @@
 ✅ Готово!
 
 Всё! Код на GitHub обновлён 🎉
+
+
+.\push.ps1 "web-manager+sound+web-debug"
