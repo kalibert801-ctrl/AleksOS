@@ -335,10 +335,23 @@ static void _menuBuildFavList() {
 }
 static void _menuBuildSortedList() {
     int n = sdMgr.count();
-    if (n > 256) n = 256;   // guard: _sortIdx is [256]
+    if (n > 256) n = 256;
     _sortCount = n;
     for (int i = 0; i < n; i++) _sortIdx[i] = i;
     if (_sortMode == 0) return;
+    if (_sortMode == 4) {
+        // Избранные вверху, потом остальные в исходном порядке
+        int head = 0, tail = 0;
+        static int tmp[256];
+        for (int i = 0; i < n; i++) {
+            if (GameStats::favCheck(sdMgr.get(i).path.c_str()))
+                _sortIdx[head++] = i;
+            else
+                tmp[tail++] = i;
+        }
+        for (int i = 0; i < tail; i++) _sortIdx[head + i] = tmp[i];
+        return;
+    }
     std::sort(_sortIdx, _sortIdx + n, [](int a, int b) -> bool {
         if (_sortMode == 2) return sdMgr.get(a).name > sdMgr.get(b).name;
         if (_sortMode == 3) return sdMgr.get(a).size > sdMgr.get(b).size;
@@ -381,53 +394,44 @@ static uint8_t _batAnimPhase = 0;
 // При зарядке — синяя анимация "заполнения" от текущего уровня к 100%.
 // В норме — зелёный/оранжевый/красный по уровню заряда.
 // Корпус 16×8 px, нуб 2×4 px, внутри 13×6 px (0..12 px заливки).
+// Батарея: корпус 20×10 px, нуб 3×6, внутренний заряд 17×8
 static void _mBattery(int cx, int cy) {
     int pct = batteryPercent();
     const Theme565& t = getTheme();
 
     if (batteryCharging()) {
-        // ── Режим зарядки: синяя анимированная заливка ──────────────────────
         constexpr uint16_t COL_CHARGE = 0x07FFu;  // cyan
-
-        lcd.drawRect(cx - 8, cy - 4, 16, 8, COL_CHARGE);
-        lcd.fillRect(cx + 8, cy - 2,  2, 4, COL_CHARGE);
-        lcd.fillRect(cx - 7, cy - 3, 13, 6, t.header);  // очистить внутри
-
-        // Анимация: заливка "бежит" от текущего уровня к 100%.
-        // _batAnimPhase = 0..3 → анимированный дополнительный процент:
-        //   phase 0: +0%, phase 1: +25% от остатка, phase 2: +50%, phase 3: +75%
+        lcd.drawRect(cx - 10, cy - 5, 20, 10, COL_CHARGE);
+        lcd.fillRect(cx + 10, cy - 3,  3,  6, COL_CHARGE);
+        lcd.fillRect(cx -  9, cy - 4, 17,  8, t.header);
         int base    = (pct >= 0) ? pct : 0;
         int extra   = (100 - base) * (int)_batAnimPhase / 4;
         int animPct = base + extra;
-        int fillW   = (animPct * 12 + 50) / 100;
-        if (fillW > 12) fillW = 12;
-        if (fillW > 0)
-            lcd.fillRect(cx - 7, cy - 3, fillW, 6, COL_CHARGE);
+        int fillW   = (animPct * 16 + 50) / 100;
+        if (fillW > 16) fillW = 16;
+        if (fillW > 0)  lcd.fillRect(cx - 9, cy - 4, fillW, 8, COL_CHARGE);
         return;
     }
 
-    // ── Обычный режим: цвет по уровню заряда ────────────────────────────────
     uint16_t fc;
-    if      (pct < 0)   fc = 0xAD55u;  // нет данных — золотой
-    else if (pct <= 15) fc = 0xF800u;  // критический — красный
-    else if (pct <= 40) fc = 0xFD20u;  // низкий — оранжевый
-    else                fc = 0x4EF0u;  // норма — зелёный
+    if      (pct < 0)   fc = 0xAD55u;
+    else if (pct <= 20) fc = 0xF800u;
+    else if (pct <= 50) fc = 0xFFE0u;
+    else                fc = 0x07E0u;
 
-    lcd.drawRect(cx - 8, cy - 4, 16, 8, fc);
-    lcd.fillRect(cx + 8, cy - 2,  2, 4, fc);
-    lcd.fillRect(cx - 7, cy - 3, 13, 6, t.header);
+    lcd.drawRect(cx - 10, cy - 5, 20, 10, fc);
+    lcd.fillRect(cx + 10, cy - 3,  3,  6, fc);
+    lcd.fillRect(cx -  9, cy - 4, 17,  8, t.header);
 
     if (pct < 0) {
-        // Нет данных — знак «?» двумя полосками
-        lcd.fillRect(cx - 4, cy - 2, 7, 1, 0xAD55u);
-        lcd.fillRect(cx - 4, cy + 1, 7, 1, 0xAD55u);
+        lcd.fillRect(cx - 5, cy - 2, 9, 1, 0xAD55u);
+        lcd.fillRect(cx - 5, cy + 1, 9, 1, 0xAD55u);
         return;
     }
 
-    int fillW = (pct * 12 + 50) / 100;
-    if (fillW > 12) fillW = 12;
-    if (fillW > 0)
-        lcd.fillRect(cx - 7, cy - 3, fillW, 6, fc);
+    int fillW = (pct * 16 + 50) / 100;
+    if (fillW > 16) fillW = 16;
+    if (fillW > 0)  lcd.fillRect(cx - 9, cy - 4, fillW, 8, fc);
 }
 
 // ── Шапка нового меню ──────────────────────────────────────────
@@ -443,8 +447,15 @@ static void _menuDrawHeader() {
     _mSearch(44, M_HDR_H / 2, _searchActive ? t.accent : t.textSec);
 
     // Заголовок по центру
-    flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(COL_GOLD);
-    lcd.drawString("NES GAMES", SCREEN_W / 2, M_HDR_H / 2);
+    lcd.setTextDatum(MC_DATUM); lcd.setTextColor(COL_GOLD);
+    if (settings.language == LANG_RU) {
+        fmd();
+        const char *s = cyrStr(S().listTitle);
+        lcd.drawString(s, SCREEN_W/2,   M_HDR_H/2);
+        lcd.drawString(s, SCREEN_W/2+1, M_HDR_H/2);
+    } else {
+        flg(); lcd.drawString(S().listTitle, SCREEN_W/2, M_HDR_H/2);
+    }
 
     // Счётчик ROM (слева от ⋮)
     char badge[8]; snprintf(badge, sizeof(badge), "%d", sdMgr.count());
@@ -469,27 +480,27 @@ static void _menuDrawFooter() {
     lcd.fillRoundRect(2, by + 4, 91, 32, 8, t.selected);
     lcd.fillTriangle(13, cy - 7, 13, cy + 7, 23, cy, (uint16_t)COL_GOLD);
     fmd(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor((uint16_t)COL_WHITE);
-    lcd.drawString("PLAY", 27, cy);
+    lcd.drawString(settings.language==LANG_RU ? cyrStr("ИГРАТЬ") : "PLAY", 27, cy);
 
-    // WiFi иконка (x=103..117)
+    // WiFi иконка (x=97..117, немного шире)
     bool wConn = wifiMgr.isConnected();
-    _mWifi(110, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
+    _mWifi(108, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
 
-    // Время (x=155..212)
+    // Время (x=125..178)
     flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_CYAN);
-    lcd.drawString(timeGetString().c_str(), 181, cy);
+    lcd.drawString(timeGetString().c_str(), 152, cy);
 
-    // Дата (x=221..277)
+    // Дата (x=186..252)
     time_t now = time(nullptr);
     struct tm *ti = localtime(&now);
     char dt[12];
     snprintf(dt, sizeof(dt), "%02d.%02d.%02d",
              ti->tm_mday, ti->tm_mon + 1, ti->tm_year % 100);
-    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
-    lcd.drawString(dt, 221, cy);
+    fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+    lcd.drawString(dt, 218, cy);
 
-    // Батарея (x=287..303) — справа от даты, у правого края
-    _mBattery(295, cy);
+    // Батарея — правее, с учётом нового размера 20+3=23px + 2 отступ
+    _mBattery(293, cy);
 }
 
 // ── Правая панель (обложка + инфо) ─────────────────────────────
@@ -597,8 +608,9 @@ static bool _menuConfirmDelete(const char *name) {
     lcd.fillRoundRect(PX, PY, PW, PH, 8, t.header);
     lcd.drawRoundRect(PX, PY, PW, PH, 8, t.danger);
 
+    bool ru = (settings.language==LANG_RU);
     fmd(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.danger);
-    lcd.drawString("Delete ROM?", SCREEN_W / 2, PY + 20);
+    lcd.drawString(ru ? cyrStr("Удалить ROM?") : "Delete ROM?", SCREEN_W / 2, PY + 20);
 
     String n = String(name);
     if (n.length() > 26) n = n.substring(0, 24) + "..";
@@ -608,9 +620,9 @@ static bool _menuConfirmDelete(const char *name) {
     lcd.fillRoundRect(PX + 8,           BY, BW, BH, 6, t.danger);
     lcd.fillRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, t.selected);
     fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(MC_DATUM);
-    lcd.drawString("YES Delete", PX + 8 + BW / 2,           BY + BH / 2);
+    lcd.drawString(ru ? cyrStr("ДА") : "YES Delete", PX + 8 + BW / 2,           BY + BH / 2);
     lcd.setTextColor(t.textSec);
-    lcd.drawString("NO Cancel",  PX + PW - 8 - BW / 2,     BY + BH / 2);
+    lcd.drawString(ru ? cyrStr("НЕТ") : "NO Cancel",  PX + PW - 8 - BW / 2,     BY + BH / 2);
 
     delay(300);
     uint32_t until = millis() + 8000;
@@ -633,18 +645,19 @@ static bool _menuConfirmDelete(const char *name) {
 // Возвращает: 0=ничего, 1=Settings, 2=Gallery, 3=Music Player
 static uint8_t _menuDotMenu() {
     const Theme565& t = getTheme();
-    static const char* sortLabels[] = {
-        "Sort A-Z", "Sort Z-A", "Sort Size", "Sort Default"
-    };
+    bool ru = (settings.language==LANG_RU);
+    // Используем String чтобы cyrStr-буферы не перезаписывались
+    static const char *sortEN[] = {"Sort A-Z","Sort Z-A","Sort Size","* Favs First","Sort Default"};
+    static const char *sortRU[] = {"А-Я","Я-А","По размеру","* Избр. верх","По умолч."};
+    static const char *itemEN[] = {"","Delete ROM","Gallery","Music Player","Web Upload","Settings"};
+    static const char *itemRU[] = {"","Удалить ROM","Галерея","Плеер","Загрузить","Настройки"};
     const int N = 6;
-    const char* items[N] = {
-        sortLabels[_sortMode % 4],
-        "Delete ROM",
-        "Gallery",
-        "Music Player",
-        "Web Upload",
-        "Settings"
-    };
+    // Строим String-массив (копирует cyrStr-содержимое)
+    String itemStrs[N];
+    itemStrs[0] = ru ? cyrStr(sortRU[_sortMode % 5]) : sortEN[_sortMode % 5];
+    for (int i = 1; i < N; i++)
+        itemStrs[i] = ru ? cyrStr(itemRU[i]) : itemEN[i];
+
     const int PX = 172, PY = M_HDR_H + 1, PW = 146, PH = 184, RH = 30;
 
     auto drawItem = [&](int idx, bool hi) {
@@ -656,7 +669,7 @@ static uint8_t _menuDotMenu() {
         uint16_t ic = (idx == 1) ? (hi ? (uint16_t)COL_WHITE : t.danger)
                                  : (hi ? (uint16_t)COL_WHITE : t.textPri);
         fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(ic);
-        lcd.drawString(items[idx], PX + 10, iy + RH / 2);
+        lcd.drawString(itemStrs[idx].c_str(), PX + 10, iy + RH / 2);
     };
 
     lcd.fillRoundRect(PX, PY, PW, PH, 6, t.header);
@@ -708,8 +721,8 @@ static uint8_t _menuDotMenu() {
     }
 
     switch (choice) {
-        case 0: {  // Сортировка
-            _sortMode = (_sortMode + 1) % 4;
+        case 0: {  // Сортировка (0=default,1=A-Z,2=Z-A,3=size,4=favs first)
+            _sortMode = (_sortMode + 1) % 5;
             _menuBuildSortedList();
             _menuSel = 0; _menuOffset = 0;
             menuDraw();
@@ -772,10 +785,11 @@ void menuDraw() {
     if (total == 0) {
         fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
         int ey = M_HDR_H + (M_DPAD_Y - M_HDR_H) / 2;
+        bool ru = (settings.language==LANG_RU);
         if (_searchActive)
-            lcd.drawString("No results", M_LIST_W / 2, ey);
+            lcd.drawString(ru ? cyrStr("Не найдено") : "No results", M_LIST_W / 2, ey);
         else if (_favMode)
-            lcd.drawString("No favourites", M_LIST_W / 2, ey);
+            lcd.drawString(ru ? cyrStr("Нет избранных") : "No favourites", M_LIST_W / 2, ey);
         else {
             lcd.drawString(cyrStr(S().noRoms),      M_LIST_W / 2, ey - 10);
             fsm(); lcd.drawString(cyrStr(S().noRomsHint), M_LIST_W / 2, ey + 10);
@@ -822,21 +836,20 @@ void menuTimeTick() {
     lcd.fillRect(96, by + 1, SCREEN_W - 96, M_BAR_H - 2, t.header);
 
     bool wConn = wifiMgr.isConnected();
-    _mWifi(110, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
+    _mWifi(108, cy, wConn ? (uint16_t)0x07E0u : (uint16_t)0xF800u);
 
     flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_CYAN);
-    lcd.drawString(timeGetString().c_str(), 181, cy);
+    lcd.drawString(timeGetString().c_str(), 152, cy);
 
     time_t now = time(nullptr);
     struct tm *ti = localtime(&now);
     char dt[12];
     snprintf(dt, sizeof(dt), "%02d.%02d.%02d",
              ti->tm_mday, ti->tm_mon + 1, ti->tm_year % 100);
-    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
-    lcd.drawString(dt, 221, cy);
+    fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+    lcd.drawString(dt, 218, cy);
 
-    // Батарея — правый край (x=287..303), после даты
-    _mBattery(295, cy);
+    _mBattery(293, cy);
 }
 
 // ── Анимация зарядки батареи (вызывать из loop() каждый кадр) ────────────────
@@ -856,11 +869,10 @@ void menuBatteryAnimTick() {
 
     _batAnimPhase = (_batAnimPhase + 1) & 3;  // 0..3
 
-    // Перерисовать только зону батареи в правой части футера
     const Theme565& t = getTheme();
     int by = M_DPAD_Y, cy = M_DPAD_CY;
-    lcd.fillRect(278, by + 1, SCREEN_W - 278, M_BAR_H - 2, t.header);
-    _mBattery(295, cy);
+    lcd.fillRect(274, by + 1, SCREEN_W - 274, M_BAR_H - 2, t.header);
+    _mBattery(293, cy);
 }
 
 // ── Частичная отрисовка при скролле: только список + правая панель ──────────
@@ -877,8 +889,9 @@ static void _menuRefreshListArea() {
     if (total == 0) {
         fmd(); lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
         int ey = M_HDR_H + (M_DPAD_Y - M_HDR_H) / 2;
-        if (_searchActive)      lcd.drawString("No results",    M_LIST_W / 2, ey);
-        else if (_favMode)      lcd.drawString("No favourites", M_LIST_W / 2, ey);
+        bool ru2 = (settings.language==LANG_RU);
+        if (_searchActive)      lcd.drawString(ru2 ? cyrStr("Не найдено")    : "No results",    M_LIST_W / 2, ey);
+        else if (_favMode)      lcd.drawString(ru2 ? cyrStr("Нет избранных") : "No favourites", M_LIST_W / 2, ey);
         else {
             lcd.drawString(cyrStr(S().noRoms),      M_LIST_W / 2, ey - 10);
             fsm(); lcd.drawString(cyrStr(S().noRomsHint), M_LIST_W / 2, ey + 10);
@@ -921,7 +934,11 @@ uint8_t menuHandleTouch(int x, int y, int &romAction) {
 
     // ── Подвал ─────────────────────────────────────────────────
     if (y >= M_DPAD_Y) {
-        if (x <= 93) { romAction = 1; return BTN_A; }  // ▶ PLAY
+        if (x <= 93)  { romAction = 1; return BTN_A; }  // ▶ PLAY
+        if (x <= 124) return 0xE0;  // WiFi иконка → WiFi settings
+        if (x <= 182) return 0xE1;  // Время → настройки времени
+        if (x <= 252) return 0xE2;  // Дата → настройки системы
+        if (x >= 270) return 0xE3;  // Батарея → Battery screen
         return 0;
     }
 
@@ -991,6 +1008,8 @@ uint8_t menuHandleTouch(int x, int y, int &romAction) {
                     _menuSel = max(0, tc - 1);
                     _menuOffset = max(0, _menuSel - M_ROWS / 2);
                 }
+            } else if (_sortMode == 4) {
+                _menuBuildSortedList();  // обновить "favs first" порядок
             }
             menuDraw();
             return 0;
@@ -1540,30 +1559,41 @@ void showRomInfo(int idx) {
 // НАСТРОЙКИ — данные
 // ══════════════════════════════════════════════════════════════
 
+// gi=41 → подменю Appearance (virtual cat=4), gi=42 → подменю Controls (virtual cat=5)
 static const char *_catName[] = {
-    "Display", "Audio", "Appearance", "System", "Controls", "Info",
-    "Debug",     // cat=6: виртуальная — открывается из System через gi=25
-    "Battery",   // cat=7: виртуальная — открывается через gi=33
-    "Web Debug"  // cat=8: виртуальная — открывается из Debug через gi=37
+    "Display", "Audio", "System", "Info",
+    "Appearance",  // cat=4: virtual sub из Display (gi=41)
+    "Controls",    // cat=5: virtual sub из System  (gi=42)
+    "Debug",       // cat=6: virtual, из System gi=25
+    "Battery",     // cat=7: virtual, из System gi=33
+    "Web Debug"    // cat=8: virtual, из Debug  gi=37
 };
+static const char* _catLabel(int cat) {
+    if (settings.language == LANG_RU) {
+        static const char *ru[] = {
+            "Дисплей", "Звук", "Система", "Инфо",
+            "Внеш.вид", "Геймпад", "Debug", "Батарея", "Web"
+        };
+        if (cat >= 0 && cat < 9) return cyrStr(ru[cat]);
+    }
+    return (cat >= 0 && cat < 9) ? _catName[cat] : "";
+}
 
 // ── _catItems[][8]: максимум 8 пунктов на категорию ─────────────────────
-// cat=6 (Debug) не отображается в сетке (CAT_COUNT=6), только через gi=25.
-// gi=24 → WiFi manager (сигнал 0x80 в main.cpp)
-// gi=25 → открыть sub-экран Debug (cat=6 внутри)
-// gi=26 → OTA check (сигнал 0xA0 в main.cpp)
+// gi=24 → WiFi manager (0x80), gi=25 → Debug sub, gi=26 → OTA (0xA0)
+// gi=33 → Battery screen, gi=41 → Appearance sub, gi=42 → Controls sub
 static const int _catItems[][8] = {
-    { 0, 4, 7, 34, 35, -1, -1, -1 },           // 0: Display  (gi=34=Sleep, gi=35=Scanlines)
+    { 0, 4, 7, 34, 35, 41, -1, -1 },           // 0: Display  (41=Appearance→)
     { 1, 14, 8, 9, -1, -1, -1, -1 },           // 1: Audio
-    { 2, 3, 29, -1, -1, -1, -1, -1 },          // 2: Appearance  (gi=29=NES Palette)
-    { 6, 17, 18, 19, 24, 25, 26, 33 },         // 3: System      (gi=33=Battery screen)
-    { 12, 13, 15, 16, 30, 31, 32, 36 },        // 4: Controls    (gi=30=Turbo, gi=31=TurboMode, gi=32=GG, gi=36=GS)
-    { 10, 11, 28, -1, -1, -1, -1, -1 },        // 5: Info        (gi=28=Pico Controller перенесён сюда)
-    { 5, 20, 21, 22, 23, 37, -1, -1 },          // 6: Debug (gi=37=Web Debug link)
-    { -1, -1, -1, -1, -1, -1, -1, -1 },        // 7: Battery (virtual info screen, через gi=33)
-    { 38, -1, -1, -1, -1, -1, -1, -1 },        // 8: Web Debug (virtual, через gi=37)
+    { 6, 17, 18, 19, 24, 26, 33, 42 },         // 2: System   (42=Controls→, убран Debug в Info)
+    { 10, 11, 28, 25, -1, -1, -1, -1 },        // 3: Info     (25=Debug→ перенесён сюда)
+    { 2, 3, 29, -1, -1, -1, -1, -1 },          // 4: Appearance virtual (was cat=2)
+    { 12, 13, 15, 16, 30, 31, 32, 36 },        // 5: Controls virtual   (was cat=4)
+    { 5, 20, 21, 22, 23, 37, -1, -1 },         // 6: Debug virtual
+    { -1, -1, -1, -1, -1, -1, -1, -1 },        // 7: Battery virtual
+    { 38, -1, -1, -1, -1, -1, -1, -1 },        // 8: Web Debug virtual
 };
-#define CAT_COUNT 6  // в сетке видны только 0..5; cat=6,7 — виртуальные
+#define CAT_COUNT 4  // в сетке видны только 0..3; cat=4..8 — виртуальные
 
 static int _prevCat = -1;   // для возврата из Debug sub-экрана в System
 
@@ -1602,14 +1632,15 @@ void settingsPrefetchPicoVer() {
         Serial.println("[UI] Pico fw: N/A (not connected or old fw)");
 }
 
-static int _settingsCat    = -1;
-static int _catItemIdx     =  0;
-static int _gridSelected   = -1;
-static int _detailRowH     = 32;  // реальная высота строки в текущем detail
-static int _detailListTop  = 44;  // реальный Y начала списка
-static int _detailOffset   =  0;  // первая видимая строка (scroll)
-static int _detailVisible  =  5;  // сколько строк влезает на экран
+static int  _settingsCat    = -1;
+static int  _catItemIdx     =  0;
+static int  _gridSelected   = -1;
+static int  _detailRowH     = 32;  // реальная высота строки в текущем detail
+static int  _detailListTop  = 44;  // реальный Y начала списка
+static int  _detailOffset   =  0;  // первая видимая строка (scroll)
+static int  _detailVisible  =  5;  // сколько строк влезает на экран
 static uint32_t _detailOpenedMs = 0;  // момент открытия — debounce тача
+static bool _exitOnBack     = false; // открыто из подвала → Back = выйти из настроек
 
 static int catItemCount(int cat) {
     int n = 0;
@@ -1621,9 +1652,16 @@ static int globalSettingIdx(int cat, int itemInCat) {
     return _catItems[cat][itemInCat];
 }
 
+static const char* _onOff(bool v) {
+    return v ? (settings.language==LANG_RU ? cyrStr("Вкл") : "On")
+             : (settings.language==LANG_RU ? cyrStr("Выкл"): "Off");
+}
+
 static String settingValue(int gi) {
     const char *langs[]  = {"RU","EN","CZ"};
-    const char *scales[] = {"Fit","4:3","1:1"};
+    bool ru = (settings.language==LANG_RU);
+    const char *scales_fit = ru ? cyrStr("Авто") : "Fit";
+    const char *scales[] = { scales_fit, "4:3", "1:1" };
     const char *snds[]   = {"Beep","Click","Chime"};
     switch(gi) {
         case 0:  return String(settings.brightness)+"%";
@@ -1631,25 +1669,25 @@ static String settingValue(int gi) {
         case 2:  return ThemeRegistry::activeName();
         case 3:  return langs[(int)settings.language%LANG_COUNT];
         case 4:  return scales[(int)settings.scale%3];
-        case 5:  return settings.showFPS ? "On" : "Off";
-        case 6:  return settings.autoSave ? "On" : "Off";
-        case 7:  return settings.autoBrightness ? "On" : "Off";
-        case 8:  return settings.soundEnabled ? "On" : "Off";
+        case 5:  return _onOff(settings.showFPS);
+        case 6:  return _onOff(settings.autoSave);
+        case 7:  return _onOff(settings.autoBrightness);
+        case 8:  return _onOff(settings.soundEnabled);
         case 9:  return snds[(int)settings.soundType%3];
         case 10: return FIRMWARE_VERSION;
         case 11: return String(ESP.getFreeHeap()/1024)+"KB";
-        case 12: return "Edit >";
+        case 12: return ru ? cyrStr("Изм >") : "Edit >";
         case 13: return buttons.isConnected() ? "OK" : "---";
         case 14: return String(settings.emuVolume)+"%";
-        case 15: return settings.vibroEnabled ? "On" : "Off";
+        case 15: return _onOff(settings.vibroEnabled);
         case 16: return String(settings.vibroStrength)+"%";
-        case 17: { char b[4]; snprintf(b,4,"%02d", timeGetH()); return String(b)+"h"; }
-        case 18: { char b[4]; snprintf(b,4,"%02d", timeGetM()); return String(b)+"m"; }
-        case 19: return settings.autoScroll  ? "On" : "Off";
-        case 20: return settings.diagButtons ? "On" : "Off";
-        case 21: return settings.diagFPS     ? "On" : "Off";
-        case 22: return settings.diagEmu     ? "On" : "Off";
-        case 23: return settings.diagTouch   ? "On" : "Off";
+        case 17: { char b[16]; snprintf(b,sizeof(b),"%02d %s", timeGetH(), ru ? cyrStr("ч") : "h"); return String(b); }
+        case 18: { char b[16]; snprintf(b,sizeof(b),"%02d %s", timeGetM(), ru ? cyrStr("м") : "m"); return String(b); }
+        case 19: return _onOff(settings.autoScroll);
+        case 20: return _onOff(settings.diagButtons);
+        case 21: return _onOff(settings.diagFPS);
+        case 22: return _onOff(settings.diagEmu);
+        case 23: return _onOff(settings.diagTouch);
         case 24: {  // WiFi
             if (wifiMgr.isConnected()) return wifiMgr.getSSID();
             return settings.wifiSSID[0] ? settings.wifiSSID : "Tap >";
@@ -1679,22 +1717,27 @@ static String settingValue(int gi) {
             if (settings.turboMask == 0x04) return "A";
             if (settings.turboMask == 0x08) return "B";
             if (settings.turboMask == 0x0C) return "A+B";
-            return "Off";
+            return _onOff(false);
         }
         case 34: {  // Sleep Timeout
-            static const char *labels[] = {"Off","1 min","2 min","5 min","10 min"};
-            static const uint8_t vals[] = {0,1,2,5,10};
-            for (int i = 0; i < 5; i++) if (settings.sleepTimeout == vals[i]) return labels[i];
-            return "Off";
+            static const char *lEn[]   = {"Off","1 min","2 min","5 min","10 min"};
+            static const char *lRuUTF[]= {"Выкл","1 мин","2 мин","5 мин","10 мин"};
+            static const uint8_t vals[]= {0,1,2,5,10};
+            for (int i = 0; i < 5; i++)
+                if (settings.sleepTimeout == vals[i])
+                    return ru ? cyrStr(lRuUTF[i]) : lEn[i];
+            return ru ? cyrStr("Выкл") : "Off";
         }
-        case 35: return settings.scanlines ? "On" : "Off";  // Scanlines
-        case 37: return "Open >";    // Web Debug sub-screen
+        case 35: return _onOff(settings.scanlines);  // Scanlines
+        case 37: return ru ? cyrStr("Открыть >") : "Open >";
         case 38: {  // Web Debug toggle
-            if (!webDbgRunning()) return "Off";
+            if (!webDbgRunning()) return (settings.language==LANG_RU) ? cyrStr("Выкл") : "Off";
             static char _dbgVal[24];
             snprintf(_dbgVal, sizeof(_dbgVal), "http://%s", webDbgIP());
             return _dbgVal;
         }
+        case 41: return (settings.language==LANG_RU) ? cyrStr("→") : ">";
+        case 42: return (settings.language==LANG_RU) ? cyrStr("→") : ">";
         case 36: {  // Game Shark
             int n = 0;
             for (int i = 0; i < 8; i++) if (settings.gsCodes[i][0]) n++;
@@ -1807,13 +1850,13 @@ static void settingDec(int gi) {
 
 static void drawCatIcon(int cat, int cx, int cy, uint16_t c) {
     switch(cat) {
-        case 0: iconDisplay (cx, cy, c); break;
-        case 1: iconAudio   (cx, cy, c); break;
-        case 2: iconLook    (cx, cy, c); break;
-        case 3: iconSystem  (cx, cy, c); break;
-        case 4: iconControls(cx, cy, c); break;
-        case 5: iconInfo    (cx, cy, c); break;
-        case 6: // Debug — иконка терминала (окно с курсором)
+        case 0: iconDisplay (cx, cy, c); break;  // Display
+        case 1: iconAudio   (cx, cy, c); break;  // Audio
+        case 2: iconSystem  (cx, cy, c); break;  // System (was cat=3)
+        case 3: iconInfo    (cx, cy, c); break;  // Info   (was cat=5)
+        case 4: iconLook    (cx, cy, c); break;  // Appearance virtual
+        case 5: iconControls(cx, cy, c); break;  // Controls virtual
+        default: // Debug — иконка терминала
             lcd.fillRect(cx-9, cy-6, 18, 13, c);
             lcd.fillRect(cx-8, cy-5, 16, 11, 0x1082);
             lcd.drawLine(cx-6, cy-1, cx-3, cy+1, c);
@@ -1889,14 +1932,21 @@ static void drawCategoryGrid() {
 
     // ── Заголовок ─────────────────────────────────────────────
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
-    flg(); lcd.setTextDatum(MC_DATUM);
-    // Цвет заголовка — как в menuDraw()
     uint16_t hdrTxt;
     if      (t.style & THEME_STYLE_BEVEL) hdrTxt = t.selText ? t.selText : 0xFFFF;
     else if (flat)                         hdrTxt = t.accent;
     else                                   hdrTxt = (uint16_t)COL_GOLD;
-    lcd.setTextColor(hdrTxt);
-    lcd.drawString("SETTINGS", SCREEN_W/2, HDR_H/2);
+    lcd.setTextColor(hdrTxt); lcd.setTextDatum(MC_DATUM);
+    if (settings.language == LANG_RU) {
+        // CyrDejaVu9 — единственный шрифт с кириллицей, рисуем жирным
+        fmd();
+        const char *s = cyrStr("НАСТРОЙКИ");
+        lcd.drawString(s, SCREEN_W/2,   HDR_H/2);
+        lcd.drawString(s, SCREEN_W/2+1, HDR_H/2);
+    } else {
+        flg();
+        lcd.drawString("SETTINGS", SCREEN_W/2, HDR_H/2);
+    }
     // Нижняя линия шапки
     if (t.style & THEME_STYLE_BEVEL) {
         lcd.drawFastHLine(0, HDR_H-2, SCREEN_W, t.hilite);
@@ -1905,8 +1955,8 @@ static void drawCategoryGrid() {
         lcd.drawFastHLine(8, HDR_H, SCREEN_W-16, hdrTxt);
     }
 
-    // ── Сетка тайлов ─────────────────────────────────────────
-    const int COLS = 3, ROWS = (CAT_COUNT + COLS - 1) / COLS, PAD = 6;
+    // ── Сетка тайлов — 2×2 ───────────────────────────────────
+    const int COLS = 2, ROWS = (CAT_COUNT + COLS - 1) / COLS, PAD = 8;
     int cw = (SCREEN_W - PAD*(COLS+1)) / COLS;
     int ch = (DPAD_Y - HDR_H - 3 - PAD*(ROWS+1)) / ROWS;
     int r_tile = flat ? 4 : 9;  // радиус скругления плитки (flat = чуть скруглённые)
@@ -1939,8 +1989,9 @@ static void drawCategoryGrid() {
             drawCatIcon(i, icx, icy, selIcCol);
             fmd(); lcd.setTextDatum(MC_DATUM);
             lcd.setTextColor(selIcCol ? selIcCol : 0xFFFF);
-            lcd.drawString(_catName[i], x+cw/2,   y+ch-14);
-            lcd.drawString(_catName[i], x+cw/2+1, y+ch-14);
+            { String cl = _catLabel(i);
+              lcd.drawString(cl.c_str(), x+cw/2,   y+ch-14);
+              lcd.drawString(cl.c_str(), x+cw/2+1, y+ch-14); }
         } else {
             // ── ОБЫЧНЫЙ ───────────────────────────────────────
             lcd.fillRoundRect(x, y, cw, ch, r_tile, t.header);
@@ -1959,7 +2010,7 @@ static void drawCategoryGrid() {
             uint16_t icCol = flat ? t.accent : (uint16_t)COL_GOLD;
             drawCatIcon(i, icx, icy, icCol);
             fmd(); lcd.setTextColor(icCol); lcd.setTextDatum(MC_DATUM);
-            lcd.drawString(_catName[i], x+cw/2, y+ch-14);
+            lcd.drawString(_catLabel(i), x+cw/2, y+ch-14);
         }
     }
 
@@ -1968,7 +2019,7 @@ static void drawCategoryGrid() {
 }
 
 // ── Info screen ────────────────────────────────────────────────
-struct InfoRow { const char *label; String value; uint16_t vc; bool isDiv; };
+struct InfoRow { String label; String value; uint16_t vc; bool isDiv; };
 static InfoRow _infoRows[52];
 static int     _infoCount  = 0;
 static int     _infoScroll = 0;
@@ -2081,55 +2132,58 @@ static void drawInfoSectionIcon(int secIdx, int cx, int cy, uint16_t c) {
 // Заполняет _infoRows статистикой батареи (разделяет буфер с buildInfoRows).
 static void buildBatteryRows() {
     _infoCount = 0; _infoScroll = 0;
-    auto d = [&](const char *t){ _infoRows[_infoCount++] = {t,"",0,true}; };
-    auto r = [&](const char *l, String v, uint16_t c=0){ _infoRows[_infoCount++]={l,v,c,false}; };
+    bool ru = (settings.language == LANG_RU);
+    auto d = [&](const char *en, const char *ruUTF){
+        _infoRows[_infoCount++] = { ru ? String(cyrStr(ruUTF)) : String(en), "", 0, true };
+    };
+    auto r = [&](const char *en, const char *ruUTF, String v, uint16_t c=0){
+        _infoRows[_infoCount++] = { ru ? String(cyrStr(ruUTF)) : String(en), v, c, false };
+    };
 
     // ── Текущий заряд ─────────────────────────────────────────
-    d("CURRENT");
+    d("CURRENT", "ЗАРЯД");
     int   pct   = batteryPercent();
     float vbat  = batteryVoltage();
 
-    // Процент
     char pctBuf[12];
     if (pct >= 0) snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
     else          strncpy(pctBuf, "N/A", sizeof(pctBuf));
     uint16_t pctCol = (pct < 0)   ? (uint16_t)0xAD55u :
-                      (pct <= 15) ? (uint16_t)0xF800u  :
-                      (pct <= 40) ? (uint16_t)0xFD20u  : (uint16_t)0x4EF0u;
-    r("Charge:", pctBuf, pctCol);
+                      (pct <= 20) ? (uint16_t)0xF800u  :
+                      (pct <= 50) ? (uint16_t)0xFFE0u  : (uint16_t)0x07E0u;
+    r("Charge:", "Заряд:", pctBuf, pctCol);
 
-    // Напряжение
     char vBuf[12];
     if (vbat > 0.1f) snprintf(vBuf, sizeof(vBuf), "%.2f V", vbat);
     else             strncpy(vBuf, "N/A", sizeof(vBuf));
-    r("Voltage:", vBuf);
+    r("Voltage:", "Напряж.:", vBuf);
 
-    // Статус
-    const char *statusStr = batteryCharging()        ? "Charging"   :
-                            (pct < 0)                ? "No sensor"  :
-                            (pct <= 15)              ? "Low!"       : "OK";
+    const char *statusStr = batteryCharging()   ? (ru ? cyrStr("Зарядка") : "Charging")   :
+                            (pct < 0)           ? (ru ? cyrStr("Нет дат.") : "No sensor") :
+                            (pct <= 15)         ? (ru ? cyrStr("Мало!")    : "Low!")       :
+                                                  (ru ? cyrStr("OK")       : "OK");
     uint16_t stCol = batteryCharging()               ? (uint16_t)0x07FFu  :
                      (pct >= 0 && pct <= 15)         ? (uint16_t)0xF800u  :
                                                        (uint16_t)0x4EF0u;
-    r("Status:", statusStr, stCol);
+    r("Status:", "Статус:", statusStr, stCol);
 
     // ── Время работы ─────────────────────────────────────────
-    d("RUNTIME");
+    d("RUNTIME", "РАБОТА");
     BattStats st = batteryStatsGet();
 
     auto fmtTime = [](uint32_t sec) -> String {
-        if (sec < 60)    { char b[16]; snprintf(b,16,"%ds",sec);                    return b; }
-        if (sec < 3600)  { char b[16]; snprintf(b,16,"%dm %ds",sec/60,sec%60);      return b; }
+        if (sec < 60)    { char b[16]; snprintf(b,16,"%ds",sec);                        return b; }
+        if (sec < 3600)  { char b[16]; snprintf(b,16,"%dm %ds",sec/60,sec%60);          return b; }
         if (sec < 86400) { char b[16]; snprintf(b,16,"%dh %dm",sec/3600,(sec%3600)/60); return b; }
         char b[16]; snprintf(b,16,"%dd %dh",sec/86400,(sec%86400)/3600); return b;
     };
 
-    r("Since charge:", fmtTime(st.sessionSec));
-    r("Total runtime:", fmtTime(st.totalSec));
+    r("Since charge:", "С зарядки:", fmtTime(st.sessionSec));
+    r("Total runtime:", "Всего:", fmtTime(st.totalSec));
 
     // ── История зарядок ───────────────────────────────────────
-    d("HISTORY");
-    r("Charge cycles:", String(st.cycles), st.cycles > 0 ? (uint16_t)0x4EF0u : (uint16_t)0xAD55u);
+    d("HISTORY", "ИСТОРИЯ");
+    r("Charge cycles:", "Циклов:", String(st.cycles), st.cycles > 0 ? (uint16_t)0x4EF0u : (uint16_t)0xAD55u);
 }
 
 static void drawInfoScreen(const char *title = "INFO") {
@@ -2156,7 +2210,8 @@ static void drawInfoScreen(const char *title = "INFO") {
     int totalH    = infoTotalH();
     int secIdx    = -1;   // счётчик секций для иконок
 
-    for (int i = 0; i < _infoCount && y < DPAD_Y-2; i++) {
+    for (int i = 0; i < _infoCount; i++) {
+        if (y >= DPAD_Y - 2) break;
         const InfoRow &row = _infoRows[i];
         int rh = row.isDiv ? INFO_DIV_H : INFO_ROW_H;
         if (skipped + rh <= _infoScroll) { skipped += rh; continue; }
@@ -2164,7 +2219,6 @@ static void drawInfoScreen(const char *title = "INFO") {
         skipped += rh;
         int ry = y;
         y += (rh - yOff);
-        if (y > DPAD_Y - 2) break;
 
         if (row.isDiv) {
             secIdx++;
@@ -2178,8 +2232,8 @@ static void drawInfoScreen(const char *title = "INFO") {
             drawInfoSectionIcon(secIdx, LX + 8, ry + (rh / 2) + yOff/2, (uint16_t)COL_GOLD);
             // Заголовок секции
             fsm(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(ML_DATUM);
-            lcd.drawString(row.label, LX + 20, ry + (rh / 2) + yOff / 2);
-            lcd.drawString(row.label, LX + 21, ry + (rh / 2) + yOff / 2); // bold
+            lcd.drawString(row.label.c_str(), LX + 20, ry + (rh / 2) + yOff / 2);
+            lcd.drawString(row.label.c_str(), LX + 21, ry + (rh / 2) + yOff / 2); // bold
         } else {
             // ── Разделитель и текст строки данных ─────────────────────
             int visH = rh - yOff;  // видимая высота строки
@@ -2196,7 +2250,7 @@ static void drawInfoScreen(const char *title = "INFO") {
 
             fsm();
             lcd.setTextColor(t.textSec); lcd.setTextDatum(ML_DATUM);
-            lcd.drawString(row.label, LX + 6, textY);
+            lcd.drawString(row.label.c_str(), LX + 6, textY);
 
             uint16_t vc = row.vc ? row.vc : (uint16_t)COL_WHITE;
             lcd.setTextColor(vc); lcd.setTextDatum(MR_DATUM);
@@ -2221,7 +2275,7 @@ static void drawInfoScreen(const char *title = "INFO") {
 static void infoScrollBy(int delta) {
     int maxS=max(0,infoTotalH()-INFO_AREA);
     _infoScroll=constrain(_infoScroll+delta,0,maxS);
-    drawInfoScreen();
+    drawInfoScreen(_settingsCat == 7 ? "BATTERY" : "INFO");
 }
 
 // ── Детальная категория настроек ───────────────────────────────
@@ -2429,39 +2483,46 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
 }
 
 static const char* getLabelForGi(int gi) {
-    if (gi >= 0 && gi < 12) return S().sLbl[gi];
+    if (gi >= 0 && gi < 12) {
+        // S().sLbl[] хранит UTF-8 — нужно cyrStr для CyrDejaVu шрифта
+        if (settings.language == LANG_RU) return cyrStr(S().sLbl[gi]);
+        return S().sLbl[gi];
+    }
+    bool ru = (settings.language == LANG_RU);
     switch(gi) {
-        case 12: return "Remap Buttons";
+        case 12: return ru ? cyrStr("Кнопки")        : "Remap Buttons";
         case 13: return "Pico";
-        case 14: return "Emu Volume";
-        case 15: return "Vibration";
-        case 16: return "Vibro Strength";
-        case 17: return "Hour";
-        case 18: return "Minute";
-        case 19: return "Auto Scroll";
-        case 20: return "Buttons Log";
-        case 21: return "FPS Log";
-        case 22: return "Emu Log";
-        case 23: return "Touch Log";
+        case 14: return ru ? cyrStr("Громк. эмул.")  : "Emu Volume";
+        case 15: return ru ? cyrStr("Вибрация")      : "Vibration";
+        case 16: return ru ? cyrStr("Сила вибрации") : "Vibro Strength";
+        case 17: return ru ? cyrStr("Часы")          : "Hour";
+        case 18: return ru ? cyrStr("Минуты")        : "Minute";
+        case 19: return ru ? cyrStr("Авто-прокрутка"): "Auto Scroll";
+        case 20: return ru ? cyrStr("Лог кнопок")   : "Buttons Log";
+        case 21: return ru ? cyrStr("Лог FPS")      : "FPS Log";
+        case 22: return ru ? cyrStr("Лог эмулятора"): "Emu Log";
+        case 23: return ru ? cyrStr("Лог касаний")  : "Touch Log";
         case 24: return "WiFi";
-        case 25: return "Debug";
-        case 26: return "Check Update";
-        case 28: return "Pico Controller";
-        case 29: return "NES Palette";
-        case 30: return "Turbo Buttons";
-        case 31: return "Turbo Mode";
+        case 25: return ru ? cyrStr("Отладка")      : "Debug";
+        case 26: return ru ? cyrStr("Обновление")   : "Check Update";
+        case 28: return ru ? cyrStr("Контроллер")   : "Pico Controller";
+        case 29: return ru ? cyrStr("Палитра NES")  : "NES Palette";
+        case 30: return ru ? cyrStr("Турбо")        : "Turbo Buttons";
+        case 31: return ru ? cyrStr("Режим турбо")  : "Turbo Mode";
         case 32: return "Game Genie";
-        case 33: return "Battery";
-        case 34: return "Sleep";
-        case 35: return "Scanlines";
+        case 33: return ru ? cyrStr("Батарея")      : "Battery";
+        case 34: return ru ? cyrStr("Сон экрана")   : "Sleep";
+        case 35: return ru ? cyrStr("Сканлайны")    : "Scanlines";
         case 36: return "Game Shark";
-        case 37: return "Web Debug";
-        case 38: return "Web Debug";
+        case 37: return ru ? cyrStr("Веб-отладка")  : "Web Debug";
+        case 38: return ru ? cyrStr("Веб-консоль")  : "Web Debug";
+        case 41: return ru ? cyrStr("Внеш.вид >")   : "Appearance >";
+        case 42: return ru ? cyrStr("Управление >") : "Controls >";
     }
     return "";
 }
 static void drawCategoryDetail() {
-    if (_settingsCat == 5) { buildInfoRows();   drawInfoScreen("INFO");    return; }
+    if (_settingsCat == 3) { buildInfoRows();    drawInfoScreen("INFO");    return; }
     if (_settingsCat == 7) { buildBatteryRows(); drawInfoScreen("BATTERY"); return; }
 
     const Theme565 &t = getTheme();
@@ -2469,9 +2530,16 @@ static void drawCategoryDetail() {
 
     // ── Заголовок ─────────────────────────────────────────────
     lcd.fillRect(0, 0, SCREEN_W, HDR_H, t.header);
-    flg(); lcd.setTextDatum(MC_DATUM);
+    lcd.setTextDatum(MC_DATUM);
     lcd.setTextColor((uint16_t)COL_GOLD);
-    lcd.drawString(_catName[_settingsCat], SCREEN_W/2, HDR_H/2);
+    if (settings.language == LANG_RU) {
+        fmd();
+        String cl = _catLabel(_settingsCat);
+        lcd.drawString(cl.c_str(), SCREEN_W/2,   HDR_H/2);
+        lcd.drawString(cl.c_str(), SCREEN_W/2+1, HDR_H/2);
+    } else {
+        flg(); lcd.drawString(_catLabel(_settingsCat), SCREEN_W/2, HDR_H/2);
+    }
     lcd.drawFastHLine(0, HDR_H,   SCREEN_W, t.accent);
     lcd.drawFastHLine(0, HDR_H+1, SCREEN_W, t.accent);
 
@@ -2520,16 +2588,18 @@ static void drawCategoryDetail() {
         uint16_t icCol = sel ? t.accent : (uint16_t)COL_GOLD;
         drawSettingIcon(gi, 22, y + rowH/2, icCol);
 
+        // Копируем в String чтобы cyrStr-буфер не перезаписался при вызове settingValue
+        String lbl = getLabelForGi(gi);
+        String val = settingValue(gi);
+
         fmd(); lcd.setTextDatum(ML_DATUM);
         lcd.setTextColor((uint16_t)COL_WHITE);
-        const char *lbl = cyrStr(getLabelForGi(gi));
-        lcd.drawString(lbl, 40, y + rowH/2);
-        if (sel) lcd.drawString(lbl, 41, y + rowH/2);
+        lcd.drawString(lbl.c_str(), 40, y + rowH/2);
+        if (sel) lcd.drawString(lbl.c_str(), 41, y + rowH/2);
 
         uint16_t vCol = sel ? t.accent : (uint16_t)COL_GOLD;
         lcd.setTextColor(vCol);
         lcd.setTextDatum(MR_DATUM);
-        String val = settingValue(gi);
         lcd.drawString(val.c_str(), SCREEN_W-12, y + rowH/2);
         if (sel) lcd.drawString(val.c_str(), SCREEN_W-11, y + rowH/2);
     }
@@ -2550,8 +2620,20 @@ static void drawCategoryDetail() {
 }
 
 void settingsDraw() {
+    _exitOnBack = false;   // обычный вход — сброс флага быстрого выхода
     if (_settingsCat < 0) drawCategoryGrid();
     else                  drawCategoryDetail();
+}
+
+void settingsOpenCat(int cat) {
+    _settingsCat    = cat;
+    _catItemIdx     = 0;
+    _detailOffset   = 0;
+    _prevCat        = -1;
+    _gridSelected   = cat;
+    _exitOnBack     = true;
+    _detailOpenedMs = millis();
+    drawCategoryDetail();
 }
 
 // ── Обработка тача настроек ────────────────────────────────────
@@ -2563,7 +2645,7 @@ static uint8_t handleCategoryGrid(int x, int y) {
     }
     if (y < HDR_H) return 0;
 
-    const int COLS = 3, ROWS = (CAT_COUNT + COLS - 1) / COLS, PAD = 6;
+    const int COLS = 2, ROWS = (CAT_COUNT + COLS - 1) / COLS, PAD = 8;
     int cw = (SCREEN_W - PAD*(COLS+1)) / COLS;
     int ch = (DPAD_Y - HDR_H - 3 - PAD*(ROWS+1)) / ROWS;
 
@@ -2596,8 +2678,17 @@ static uint8_t handleCategoryDetail(int x, int y) {
     if (y >= DPAD_Y) {
         if (x < 80) {
             // BACK
-            if (_settingsCat == 6 || _settingsCat == 7) {
-                // Debug/Battery sub-экран → возврат в родительскую категорию (System)
+            if (_exitOnBack) {
+                // открыто из подвала главного экрана → сразу выйти из настроек
+                _exitOnBack = false;
+                _settingsCat = -1;
+                _gridSelected = -1;
+                _prevCat = -1;
+                return BTN_B;
+            }
+            if (_settingsCat == 4 || _settingsCat == 5 ||
+            _settingsCat == 6 || _settingsCat == 7 || _settingsCat == 8) {
+                // virtual sub → возврат в родительскую категорию
                 _settingsCat = (_prevCat >= 0) ? _prevCat : -1;
                 _prevCat = -1;
                 _detailOffset = 0;  // drawCategoryDetail auto-scrolls to _catItemIdx
@@ -2611,7 +2702,7 @@ static uint8_t handleCategoryDetail(int x, int y) {
             return 0;
         }
         // Info / Battery: скролл в правой половине
-        if (_settingsCat == 5 || _settingsCat == 7) {
+        if (_settingsCat == 3 || _settingsCat == 7) {
             if (x < SCREEN_W/2) infoScrollBy(-INFO_ROW_H * 2);
             else                 infoScrollBy( INFO_ROW_H * 2);
         }
@@ -2624,7 +2715,7 @@ static uint8_t handleCategoryDetail(int x, int y) {
     if (millis() - _detailOpenedMs < 200) return 0;
 
     // Info / Battery — скролл тапом по содержимому
-    if (_settingsCat == 5 || _settingsCat == 7) {
+    if (_settingsCat == 3 || _settingsCat == 7) {
         infoScrollBy(y < (HDR_H + DPAD_Y)/2 ? -INFO_ROW_H*2 : INFO_ROW_H*2);
         return 0;
     }
@@ -2653,10 +2744,10 @@ static uint8_t handleCategoryDetail(int x, int y) {
         if (gi == 26) return 0xA0;   // Check Update → OTA screen
         if (gi == 32) return 0xB0;   // Game Genie → открыть GG экран
         if (gi == 36) return 0xD0;   // Game Shark → открыть GS экран
-        if (gi == 25 || gi == 33 || gi == 37) {
-            // Debug→cat=6 / Battery→cat=7 / WebDebug→cat=8
+        if (gi == 25 || gi == 33 || gi == 37 || gi == 41 || gi == 42) {
+            // Debug→6 / Battery→7 / WebDebug→8 / Appearance→4 / Controls→5
             _prevCat = _settingsCat;
-            _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
+            _settingsCat = (gi==33)?7 : (gi==37)?8 : (gi==41)?4 : (gi==42)?5 : 6;
             _catItemIdx  = 0;
             _detailOffset = 0;
             _detailOpenedMs = millis();
@@ -2801,7 +2892,7 @@ uint8_t settingsNavBtn(uint8_t btn) {
             drawCategoryDetail();
         }
         if (btn & BTN_SEL) { _gridSelected = -1; return BTN_B; }  // SELECT = назад
-    } else if (_settingsCat == 5) {
+    } else if (_settingsCat == 3) {
         // Info — только прокрутка, BACK → сетка
         if (btn & BTN_UP)   infoScrollBy(-INFO_ROW_H * 3);
         if (btn & BTN_DOWN) infoScrollBy( INFO_ROW_H * 3);
@@ -3129,6 +3220,7 @@ const char *wifiManagerSelectedSSID() {
 
 static char  _kbPassword[65] = {};
 static int   _kbLen      = 0;
+static int   _kbCursorPos = 0;   // позиция курсора внутри строки (0.._kbLen)
 static bool  _kbCaps     = false;
 static bool  _kbSymMode  = false;
 static char  _kbSSID[64] = {};
@@ -3250,10 +3342,14 @@ void wifiKeyboardDraw(const char *ssid) {
     String dots = "";
     if (_kbMask) {
         for (int i = 0; i < _kbLen; i++) dots += (i < _kbLen-1) ? '*' : _kbPassword[i];
+        dots += "|";  // cursor always at end in mask mode
     } else {
-        dots = String(_kbPassword);
+        for (int i = 0; i < _kbLen; i++) {
+            if (i == _kbCursorPos) dots += '|';
+            dots += _kbPassword[i];
+        }
+        if (_kbCursorPos >= _kbLen) dots += '|';
     }
-    dots += "|";  // cursor
     fsm(); lcd.setTextDatum(ML_DATUM);
     lcd.setTextColor(t.textPri);
     lcd.drawString(dots.c_str(), 10, KB_INP_Y + KB_INP_H/2);
@@ -3322,13 +3418,41 @@ void wifiKeyboardDraw(const char *ssid) {
 }
 
 uint8_t wifiKeyboardHandleTouch(int x, int y) {
-    // Row 1: y in [KB_ROW_Y, KB_ROW_Y+KB_ROW_H)
+    // Tap on input field — move text cursor (only in non-mask mode)
+    if (y >= KB_INP_Y && y < KB_INP_Y + KB_INP_H && !_kbMask) {
+        fmd();
+        int tapX = x - 10;
+        String built = "";
+        int bestPos = _kbLen;
+        for (int i = 0; i < _kbLen; i++) {
+            int w = lcd.textWidth(built.c_str());
+            if (tapX <= w) { bestPos = i; break; }
+            built += _kbPassword[i];
+        }
+        _kbCursorPos = constrain(bestPos, 0, _kbLen);
+        wifiKeyboardDraw(_kbSSID);
+        return 0;
+    }
+
     auto addChar = [&](char c) {
-        if (_kbLen < 63) { _kbPassword[_kbLen++] = c; _kbPassword[_kbLen] = '\0'; }
+        if (_kbLen < 63) {
+            memmove(_kbPassword + _kbCursorPos + 1,
+                    _kbPassword + _kbCursorPos,
+                    _kbLen - _kbCursorPos + 1);
+            _kbPassword[_kbCursorPos] = c;
+            _kbLen++;
+            _kbCursorPos++;
+        }
         wifiKeyboardDraw(_kbSSID);
     };
     auto delChar = [&]() {
-        if (_kbLen > 0) { _kbPassword[--_kbLen] = '\0'; }
+        if (_kbCursorPos > 0) {
+            memmove(_kbPassword + _kbCursorPos - 1,
+                    _kbPassword + _kbCursorPos,
+                    _kbLen - _kbCursorPos + 1);
+            _kbLen--;
+            _kbCursorPos--;
+        }
         wifiKeyboardDraw(_kbSSID);
     };
 
@@ -3431,7 +3555,7 @@ const char *wifiKeyboardGetPassword() {
 
 // Clear keyboard state (call before opening keyboard)
 void wifiKeyboardReset() {
-    _kbPassword[0] = '\0'; _kbLen = 0;
+    _kbPassword[0] = '\0'; _kbLen = 0; _kbCursorPos = 0;
     _kbCaps = false; _kbSymMode = false;
     _kbLabel[0] = '\0';   // reset to default "Network:"
     _kbMask = true;       // reset to password mode
@@ -3450,6 +3574,7 @@ void wifiKeyboardSetInitial(const char *text) {
     strncpy(_kbPassword, text, sizeof(_kbPassword) - 1);
     _kbPassword[sizeof(_kbPassword) - 1] = '\0';
     _kbLen = (int)strlen(_kbPassword);
+    _kbCursorPos = _kbLen;  // курсор в конец при предзаполнении
 }
 
 // Control whether input is masked (true=dots, false=plain)

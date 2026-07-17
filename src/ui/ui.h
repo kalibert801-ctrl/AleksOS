@@ -46,6 +46,7 @@ int  menuSortMode();
 // -- Settings ----------------------------------------------------------
 uint8_t settingsHandleTouch(int x, int y);
 void settingsDraw();
+void settingsOpenCat(int cat);  // открыть Settings сразу на конкретной категории
 // -- Button remap ------------------------------------------------------
 void    btnMapDraw();
 uint8_t btnMapHandleTouch(int x, int y);

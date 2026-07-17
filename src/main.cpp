@@ -14,6 +14,7 @@
 #include "system/time_manager.h"
 #include "system/battery.h"
 #include "ui/ui.h"
+#include "lang.h"
 #include "emulator/emu_runner.h"
 #include "network/wifi_manager.h"
 #include "network/ntp_manager.h"
@@ -35,6 +36,7 @@ enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
              S_FILEMGR, S_FILEMGR_KB, S_GG, S_GG_KB, S_GS, S_GS_KB,
              S_SEARCH_KB, S_GALLERY, S_MUSIC, S_WEBMGR };
 static State state = S_MENU;
+static bool  _settingsFromMenu = false;  // opened from main screen footer tap → Back returns to menu
 
 // ── Screen-transition helpers ─────────────────────────────────────────────
 // fadeOut: dim to black in 5 steps × 10 ms ≈ 50 ms
@@ -511,7 +513,7 @@ void loop() {
             // 🔍 Поиск — открываем клавиатуру
             soundClick();
             wifiKeyboardReset();
-            wifiKeyboardSetLabel("Search ROMs:");
+            wifiKeyboardSetLabel(settings.language==LANG_RU ? cyrStr("Поиск:") : "Search ROMs:");
             wifiKeyboardSetMask(false);
             state = S_SEARCH_KB;
             wifiKeyboardDraw("");
@@ -529,6 +531,26 @@ void loop() {
             // 🌐 Веб-загрузчик файлов
             soundClick();
             toWebMgr();
+        } else if (action == 0xE0) {
+            // WiFi icon tap → System settings
+            soundClick(); buttons.vibrate1(30);
+            _settingsFromMenu = true;
+            fadeOut(); state = S_SETTINGS; settingsOpenCat(2); fadeIn();
+        } else if (action == 0xE1) {
+            // Time tap → System settings (time/WiFi are in System cat)
+            soundClick(); buttons.vibrate1(30);
+            _settingsFromMenu = true;
+            fadeOut(); state = S_SETTINGS; settingsOpenCat(2); fadeIn();
+        } else if (action == 0xE2) {
+            // Date tap → System settings
+            soundClick(); buttons.vibrate1(30);
+            _settingsFromMenu = true;
+            fadeOut(); state = S_SETTINGS; settingsOpenCat(2); fadeIn();
+        } else if (action == 0xE3) {
+            // Battery icon tap → Battery virtual screen
+            soundClick(); buttons.vibrate1(30);
+            _settingsFromMenu = true;
+            fadeOut(); state = S_SETTINGS; settingsOpenCat(7); fadeIn();
         } else if (action & BTN_A) {
             if (romAction == 2) {
                 soundClick(); buttons.vibrate1(40); showRomInfo(menuSelected()); menuDraw();
@@ -558,7 +580,7 @@ void loop() {
     case S_SETTINGS: {
         if (shellBtn) {
             uint8_t r = settingsNavBtn(shellBtn);
-            if (r & BTN_B) { soundBack(); buttons.vibrate1(50); cfgSave(); toMenu(); break; }
+            if (r & BTN_B) { soundBack(); buttons.vibrate1(50); cfgSave(); _settingsFromMenu = false; toMenu(); break; }
             if (r == 0x40) { soundClick(); buttons.vibrate1(40); toRemap(); break; }
             if (r == 0x80) { soundClick(); cfgSave(); toWifi(); break; }
             if (r == 0xA0) { soundClick(); otaScreen(); settingsDraw(); break; }
@@ -569,7 +591,7 @@ void loop() {
         }
         if (!tapped) break;
         uint8_t action = settingsHandleTouch(x, y);
-        if (action & BTN_B)       { soundBack(); cfgSave(); toMenu(); }
+        if (action & BTN_B)       { soundBack(); cfgSave(); _settingsFromMenu = false; toMenu(); }
         else if (action == 0x40)  { soundClick(); toRemap(); }
         else if (action == 0x80)  { soundClick(); cfgSave(); toWifi(); }
         else if (action == 0xA0)  { soundClick(); otaScreen(); settingsDraw(); }
@@ -604,7 +626,7 @@ void loop() {
                 // START → rename selected ROM
                 soundClick();
                 wifiKeyboardReset();
-                wifiKeyboardSetLabel("Rename:");
+                wifiKeyboardSetLabel(settings.language==LANG_RU ? cyrStr("Переим.:") : "Rename:");
                 wifiKeyboardSetMask(false);  // show plain text, not dots
                 wifiKeyboardSetInitial(sdMgr.get(fileMgrSelected()).name.c_str());
                 state = S_FILEMGR_KB;

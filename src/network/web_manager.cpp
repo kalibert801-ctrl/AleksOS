@@ -92,10 +92,13 @@ static void handleSDFile() {
 static void handleRename() {
     String path = _srv.arg("path");
     String name = _srv.arg("name");
+    // Санитизация: убираем слеши чтобы нельзя было выйти из текущей директории
+    name.replace("/", ""); name.replace("\\", "");
     int sl = path.lastIndexOf('/');
     String dir = (sl > 0) ? path.substring(0, sl) : "/";
     if (path.length() > 0 && name.length() > 0) {
-        String npath = dir + "/" + name;
+        // sl==0 → корневой файл ("/config.json"): dir="/", npath="/newname" (без двойного слеша)
+        String npath = (sl > 0) ? dir + "/" + name : "/" + name;
         if (SD.rename(path.c_str(), npath.c_str()))
             Serial.printf("[WEB] Renamed: %s -> %s\n", path.c_str(), npath.c_str());
     }
@@ -107,10 +110,13 @@ static void handleRename() {
 static void handleRoot() {
     // Выбранная папка из GET-параметра ?dir=
     String curPath = _srv.hasArg("dir") ? _srv.arg("dir") : String(_dirs[0].path);
-    // Найдём её индекс
+    // Найдём её индекс (точное совпадение или подпапка)
     int curIdx = 0;
+    bool curFound = false;
     for (int i = 0; i < _ndirs; i++) {
-        if (curPath == _dirs[i].path) { curIdx = i; break; }
+        if (curPath == _dirs[i].path || curPath.startsWith(String(_dirs[i].path) + "/")) {
+            curIdx = i; curFound = true; break;
+        }
     }
 
     _srv.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -182,6 +188,19 @@ static void handleRoot() {
     _srv.sendContent(F("<div class='hdr'><h1>&#127918; AleksOS Web Manager</h1>"
         "<span class='ver'>"));
     _srv.sendContent(FIRMWARE_VERSION);
+    // SD свободное место
+    {
+        uint64_t tot = SD.totalBytes(), used = SD.usedBytes();
+        if (tot > 0) {
+            uint64_t fr = tot - used;
+            char s[24];
+            if      (fr >= 1073741824ULL) snprintf(s, sizeof(s), "%.1f GB free", fr / 1073741824.0f);
+            else if (fr >= 1048576ULL)    snprintf(s, sizeof(s), "%.0f MB free", fr / 1048576.0f);
+            else                          snprintf(s, sizeof(s), "%.0f KB free", fr / 1024.0f);
+            _srv.sendContent(F("</span><span class='ver' style='color:#4a4'>"));
+            _srv.sendContent(s);
+        }
+    }
     _srv.sendContent(F("</span></div>"));
 
     // ── Основной лайаут
@@ -210,13 +229,17 @@ static void handleRoot() {
     // Тулбар: Upload + New Folder
     _srv.sendContent(F("<div class='toolbar'>"));
 
-    // Upload form
+    // Upload form (accept = типы файлов текущей папки)
     _srv.sendContent(F("<form method='POST' action='/upload' enctype='multipart/form-data'>"));
     _srv.sendContent("<input type='hidden' name='dir' value='");
     _srv.sendContent(curPath);
-    _srv.sendContent(F("'>"
-        "<input type='file' name='file' multiple>"
-        "<button class='btn-up' type='submit'>&#8593; Upload</button>"
+    _srv.sendContent("'><input type='file' name='file' multiple");
+    if (curFound) {
+        _srv.sendContent(" accept='");
+        _srv.sendContent(_dirs[curIdx].accept);
+        _srv.sendContent("'");
+    }
+    _srv.sendContent(F("><button class='btn-up' type='submit'>&#8593; Upload</button>"
         "</form>"));
 
     // New folder form
@@ -228,8 +251,20 @@ static void handleRoot() {
         "<button class='btn-new' type='submit'>+ New</button>"
         "</form></div>"));
 
-    // Список файлов
-    _srv.sendContent(F("<div class='files'>"));
+    // Список файлов — хлебная крошка с текущим путём
+    _srv.sendContent(F("<div style='padding:4px 14px;background:#161616;border-bottom:1px solid #2a2a2a;"
+        "font-size:11px;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"
+        "&#128193; "));
+    _srv.sendContent(curPath);
+    _srv.sendContent(F("</div><div class='files'>"));
+    // Кнопка «Назад» в подпапке
+    if (curFound && curPath != _dirs[curIdx].path) {
+        int ups = curPath.lastIndexOf('/');
+        String parent = (ups > 0) ? curPath.substring(0, ups) : _dirs[curIdx].path;
+        _srv.sendContent("<div class='fi'><span class='fn'>"
+            "<a href='/?dir=" + parent + "' style='color:#8cf;text-decoration:none'>"
+            "&#128194; ..</a></span></div>");
+    }
     File dir = SD.open(curPath);
     int cnt = 0;
     if (dir && dir.isDirectory()) {
@@ -299,7 +334,7 @@ static void handleRoot() {
           "<div class='mbox'>"
             "<span class='mcls' id='audX'>&#10005;</span>"
             "<div class='mtit' id='audT'></div>"
-            "<audio id='audEl' controls autoplay></audio>"
+            "<audio id='audEl' controls></audio>"
           "</div>"
         "</div>"));
 
@@ -321,7 +356,7 @@ static void handleRoot() {
           "aE=document.getElementById('audEl'),"
           "iV=document.getElementById('imgV'),"
           "rC=document.getElementById('rawC');"
-      "function cA(){aM.classList.remove('open');aE.pause();aE.src='';}"
+      "function cA(){aM.classList.remove('open');aE.pause();aE.src='';aE.load();}"
       "function cI(){iM.classList.remove('open');iV.src='';}"
       "document.getElementById('audX').onclick=cA;"
       "document.getElementById('imgX').onclick=cI;"
@@ -333,6 +368,7 @@ static void handleRoot() {
           "document.getElementById('audT').textContent=n;"
           "aE.src='/sd?path='+encodeURIComponent(p);"
           "aM.classList.add('open');"
+          "aE.play().catch(function(){});"
         "}else if(b.classList.contains('view')){"
           "document.getElementById('imgT').textContent=n;"
           "if(p.toLowerCase().endsWith('.raw')){"
