@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -135,13 +135,13 @@ static void map9_setstate(SnssMapperBlock *state)
    regs[3] = state->extraData.mapper9.lastE000Write;
 }
 
-static map_memwrite map9_memwrite[] =
+static const map_memwrite map9_memwrite[] =
 {
    { 0x8000, 0xFFFF, map9_write },
    {     -1,     -1, NULL }
 };
 
-mapintf_t map9_intf =
+const mapintf_t map9_intf =
 {
    9, /* mapper number */
    "MMC2", /* mapper name */

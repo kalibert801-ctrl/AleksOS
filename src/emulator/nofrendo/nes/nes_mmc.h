@@ -53,8 +53,8 @@ typedef struct mapintf_s
    void (*hblank)(int vblank);
    void (*get_state)(SnssMapperBlock *state);
    void (*set_state)(SnssMapperBlock *state);
-   map_memread *mem_read;
-   map_memwrite *mem_write;
+   const map_memread *mem_read;
+   const map_memwrite *mem_write;
    apuext_t *sound_ext;
 } mapintf_t;
 
@@ -62,7 +62,7 @@ typedef struct mapintf_s
 #include <nes_rom.h>
 typedef struct mmc_s
 {
-   mapintf_t *intf;
+   const mapintf_t *intf;
    rominfo_t *cart;  /* link it back to the cart */
 } mmc_t;
 

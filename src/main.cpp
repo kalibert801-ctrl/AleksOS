@@ -26,6 +26,9 @@
 #include "emulator/game_genie.h"
 #include "emulator/game_shark.h"
 
+#include "ui/sdmgr.h"
+#include "gravity/gravity.h"
+
 Settings settings;
 
 // ─────────────────────────────────────────────────────────────
@@ -34,7 +37,7 @@ Settings settings;
 
 enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
              S_FILEMGR, S_FILEMGR_KB, S_GG, S_GG_KB, S_GS, S_GS_KB,
-             S_SEARCH_KB, S_GALLERY, S_MUSIC, S_WEBMGR };
+             S_SEARCH_KB, S_GALLERY, S_MUSIC, S_WEBMGR, S_SDMGR, S_GRAVITY };
 static State state = S_MENU;
 static bool  _settingsFromMenu = false;  // opened from main screen footer tap → Back returns to menu
 
@@ -69,6 +72,22 @@ static void toFileMgr()  { fadeOut(); state = S_FILEMGR;  fileMgrDraw();       f
 static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();     fadeIn(); }
 static void toGS()       { fadeOut(); state = S_GS;        gsScreenDraw();     fadeIn(); }
 static void toMusic()    { fadeOut(); state = S_MUSIC;     musicPlayerOpen();  fadeIn(); }
+
+static void toGravity() {
+    fadeOut();
+    int league = 0, level = 0;
+    if (!gravityLevelSelect(&league, &level)) {
+        fadeIn();
+        return;
+    }
+    if (!gravityOpen(league, level)) {
+        popupShow("Gravity Defied", "gravity.mrg not found!\nCopy to SD root.", 3000);
+        fadeIn();
+        return;
+    }
+    state = S_GRAVITY;
+    fadeIn();
+}
 
 // WEB Manager screen — рисуется inline при переходе
 static void drawWebScreen() {
@@ -128,6 +147,14 @@ static void toWebMgr() {
     state = S_WEBMGR;
     webMgrStart();
     drawWebScreen();
+    fadeIn();
+}
+
+
+static void toSdMgr() {
+    fadeOut();
+    state = S_SDMGR;
+    sdMgrOpen();
     fadeIn();
 }
 
@@ -207,7 +234,6 @@ static void doWifiConnect() {
     settings.wifiSSID[sizeof(settings.wifiSSID)-1] = '\0';
     strncpy(settings.wifiPass, pass, sizeof(settings.wifiPass)-1);
     settings.wifiPass[sizeof(settings.wifiPass)-1] = '\0';
-    settings.wifiEnabled = 1;
 
     // Show "Connecting..." popup style
     const Theme565 &t = getTheme();
@@ -220,6 +246,7 @@ static void doWifiConnect() {
 
     bool ok = wifiMgr.connect(ssid, pass, 12000);
     if (ok) {
+        settings.wifiEnabled = 1;
         cfgSave();
         ntpSync();
         popupShow("WiFi", (String("Connected: ") + ssid).c_str(), 3000);
@@ -395,6 +422,7 @@ void loop() {
                 // Просыпаемся: восстанавливаем яркость, поглощаем ввод
                 _sleeping = false;
                 setBrightness(settings.brightness);
+                state = S_MENU;
                 menuDraw();
                 _lastActivityMs = millis();
                 return;   // не обрабатываем нажатие — оно только для пробуждения
@@ -531,21 +559,25 @@ void loop() {
             // 🌐 Веб-загрузчик файлов
             soundClick();
             toWebMgr();
+        } else if (action == 0xD3) {
+            // 🏍 Gravity Defied
+            soundClick();
+            toGravity();
         } else if (action == 0xE0) {
             // WiFi icon tap → System settings
             soundClick(); buttons.vibrate1(30);
             _settingsFromMenu = true;
             fadeOut(); state = S_SETTINGS; settingsOpenCat(2); fadeIn();
         } else if (action == 0xE1) {
-            // Time tap → System settings (time/WiFi are in System cat)
+            // Time tap → Date & Time sub (cat=9, in Display)
             soundClick(); buttons.vibrate1(30);
             _settingsFromMenu = true;
-            fadeOut(); state = S_SETTINGS; settingsOpenCat(2); fadeIn();
+            fadeOut(); state = S_SETTINGS; settingsOpenCat(9); fadeIn();
         } else if (action == 0xE2) {
-            // Date tap → System settings
+            // Date tap → Date & Time sub (cat=9, in Display)
             soundClick(); buttons.vibrate1(30);
             _settingsFromMenu = true;
-            fadeOut(); state = S_SETTINGS; settingsOpenCat(2); fadeIn();
+            fadeOut(); state = S_SETTINGS; settingsOpenCat(9); fadeIn();
         } else if (action == 0xE3) {
             // Battery icon tap → Battery virtual screen
             soundClick(); buttons.vibrate1(30);
@@ -587,6 +619,7 @@ void loop() {
             if (r == 0xB0) { soundClick(); cfgSave(); toGG(); break; }
             if (r == 0xC0) { soundClick(); toggleWebDebug(); break; }
             if (r == 0xD0) { soundClick(); cfgSave(); toGS(); break; }
+            if (r == 0xD4) { soundClick(); cfgSave(); toSdMgr(); break; }
             soundClick(); break;
         }
         if (!tapped) break;
@@ -598,6 +631,7 @@ void loop() {
         else if (action == 0xB0)  { soundClick(); cfgSave(); toGG(); }
         else if (action == 0xC0)  { soundClick(); toggleWebDebug(); }
         else if (action == 0xD0)  { soundClick(); cfgSave(); toGS(); }
+        else if (action == 0xD4)  { soundClick(); cfgSave(); toSdMgr(); }
         else if (action)            soundClick();
         break;
     }
@@ -826,6 +860,7 @@ void loop() {
                 soundClick();
                 menuSetSearch(wifiKeyboardGetPassword());
                 toMenu();
+                break;
             }
             soundClick(); break;
         }
@@ -891,6 +926,41 @@ void loop() {
         {
             uint8_t r = musicPlayerHandleTouch(x, y);
             if (r == BTN_B) { soundBack(); toMenu(); }
+        }
+        break;
+    }
+
+
+
+    case S_SDMGR: {
+        if (shellBtn) {
+            uint8_t r = sdMgrNavBtn(shellBtn);
+            if (r == BTN_B) { soundBack(); cfgSave(); toSettings(); }
+            break;
+        }
+        if (!tapped) break;
+        {
+            uint8_t r = sdMgrHandleTouch(x, y);
+            if (r == BTN_B) { soundBack(); cfgSave(); toSettings(); }
+        }
+        break;
+    }
+
+    case S_GRAVITY: {
+        if (tapped) gravityHandleTouch(x, y); else gravityNoTouch();
+        // Physical HOME/START (= BTN_A in shellBtn after shell-swap) → exit
+        if (shellBtn & BTN_A) { gravityClose(); toMenu(); break; }
+        // Physical SELECT (= BTN_B in shellBtn) → pause menu
+        if (shellBtn & BTN_B) {
+            if (!gravityPause()) { gravityClose(); toMenu(); break; }
+        }
+        // Game input: held physical button state (raw, no swap)
+        gravityNavBtn(buttons.readCurrent());
+        int gr = gravityUpdate();
+        if (gr == 1 || gr == 2) {
+            delay(1500);
+            gravityClose();
+            toMenu();
         }
         break;
     }

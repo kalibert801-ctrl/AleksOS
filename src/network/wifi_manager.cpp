@@ -1,5 +1,6 @@
 // wifi_manager.cpp — WiFi connection management for RetroESP
 #include "network/wifi_manager.h"
+#include "network/web_manager.h"
 #include "settings.h"
 #include <WiFi.h>
 
@@ -52,6 +53,7 @@ int WiFiManager::getRSSI() const {
 }
 
 int WiFiManager::scan() {
+    if (webMgrRunning() || webDbgRunning()) return -1;
     WiFi.disconnect(true);
     delay(100);
     _scanCount = WiFi.scanNetworks(false, true);  // blocking, show hidden

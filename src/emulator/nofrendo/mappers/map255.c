@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** map255.c
 **
 ** Mapper 255 (110-in-1 / 401-in-1 multicart)
@@ -106,20 +106,20 @@ static void map255_init(void)
 /*-------------------------------------------------------------------*/
 /* Memory maps                                                       */
 /*-------------------------------------------------------------------*/
-static map_memread map255_memread[] =
+static const map_memread map255_memread[] =
 {
    { 0x5800, 0x5FFF, map255_readreg },
    {     -1,     -1, NULL }
 };
 
-static map_memwrite map255_memwrite[] =
+static const map_memwrite map255_memwrite[] =
 {
    { 0x5800, 0x5FFF, map255_writereg },
    { 0x8000, 0xFFFF, map255_write    },
    {     -1,     -1, NULL }
 };
 
-mapintf_t map255_intf =
+const mapintf_t map255_intf =
 {
    255,               /* mapper number */
    "110-in-1",        /* mapper name   */

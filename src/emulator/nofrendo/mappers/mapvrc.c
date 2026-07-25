@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -319,19 +319,19 @@ static void vrc_hblank(int vblank)
 
 
 
-static map_memwrite map21_memwrite[] =
+static const map_memwrite map21_memwrite[] =
 {
    { 0x8000, 0xFFFF, map21_write },
    {     -1,     -1, NULL }
 };
 
-static map_memwrite map22_memwrite[] =
+static const map_memwrite map22_memwrite[] =
 {
    { 0x8000, 0xFFFF, map22_write },
    {     -1,     -1, NULL }
 };
 
-static map_memwrite map23_memwrite[] =
+static const map_memwrite map23_memwrite[] =
 {
    { 0x8000, 0xFFFF, map23_write },
    {     -1,     -1, NULL }
@@ -349,7 +349,7 @@ static void map21_setstate(SnssMapperBlock *state)
    irq.enabled = state->extraData.mapper21.irqCounterEnabled;
 }
 
-mapintf_t map21_intf =
+const mapintf_t map21_intf =
 {
    21, /* mapper number */
    "Konami VRC4 A", /* mapper name */
@@ -363,7 +363,7 @@ mapintf_t map21_intf =
    NULL /* external sound device */
 };
 
-mapintf_t map22_intf =
+const mapintf_t map22_intf =
 {
    22, /* mapper number */
    "Konami VRC2 A", /* mapper name */
@@ -377,7 +377,7 @@ mapintf_t map22_intf =
    NULL /* external sound device */
 };
 
-mapintf_t map23_intf =
+const mapintf_t map23_intf =
 {
    23, /* mapper number */
    "Konami VRC2 B", /* mapper name */
@@ -391,7 +391,7 @@ mapintf_t map23_intf =
    NULL /* external sound device */
 };
 
-mapintf_t map25_intf =
+const mapintf_t map25_intf =
 {
    25, /* mapper number */
    "Konami VRC4 B", /* mapper name */

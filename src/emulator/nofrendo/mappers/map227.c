@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** map227.c
 **
 ** Mapper 227 (1200-in-1 multicart)
@@ -105,13 +105,13 @@ static void map227_init(void)
 /*-------------------------------------------------------------------*/
 /* Memory maps                                                       */
 /*-------------------------------------------------------------------*/
-static map_memwrite map227_memwrite[] =
+static const map_memwrite map227_memwrite[] =
 {
    { 0x8000, 0xFFFF, map227_write },
    {     -1,     -1, NULL }
 };
 
-mapintf_t map227_intf =
+const mapintf_t map227_intf =
 {
    227,               /* mapper number */
    "1200-in-1",       /* mapper name   */

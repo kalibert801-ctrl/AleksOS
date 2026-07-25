@@ -330,10 +330,11 @@ static int audio_init(void) {
     cfg.channel_format    = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
     cfg.intr_alloc_flags  = 0;
-    // DMA 8×512 @ 176400 Гц = 23.2 мс — те же 23 мс задержки, что и раньше (8×128@44100).
-    cfg.dma_buf_count     = 8;    // 8 буферов
-    cfg.dma_buf_len       = 512;  // 512 сэмплов × 4 = 2.9 мс каждый
-    // rate-limiter: i2s_write блокируется когда все 8 буферов заполнены.
+    // DMA 4×256 @ 176400 Гц = 5.8 мс задержки; стерео 4 байт → 4×256×4 = 4 KB (vs 16 KB).
+    // Уменьшено с 8×512 чтобы DMA аллокация проходила при активном WiFi (~100 KB занято).
+    cfg.dma_buf_count     = 4;    // 4 буфера
+    cfg.dma_buf_len       = 256;  // 256 сэмплов × 4 = 5.8 мс каждый
+    // rate-limiter: i2s_write блокируется когда все 4 буфера заполнены.
     // APLL даёт точный 176400 Гц из кварца.
     // Если WiFi активен — APLL недоступен, откатываемся на APB (погрешность ~1.2%, незаметна).
     {
@@ -342,6 +343,7 @@ static int audio_init(void) {
         cfg.use_apll = (wmode == WIFI_MODE_NULL);
         printf("[OSD] I2S clock: %s\n", cfg.use_apll ? "APLL (exact)" : "APB (WiFi active)");
     }
+    printf("[OSD] DMA free: %u bytes\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
 
     if (i2s_driver_install(I2S_PORT, &cfg, 0, nullptr) != ESP_OK) return -1;
     _i2sNesInstalled = true;
@@ -437,26 +439,21 @@ static int  drv_set_mode(int w, int h) { return 0; }
 static void drv_clear(uint8 color)     {}
 
 static void drv_set_palette(rgb_t *pal) {
-    // display_manager.h sets pc.invert=true (INVON). LovyanGFX compensates in its own
-    // drawing calls, but writePixels() is raw — the display hardware will invert every
-    // pixel we write. Pre-invert here so that display-invert(~color) == color.
     const rgb_t *src = nes_palette_get(settings.nesPalette);
 
     if (src) {
-        // Альтернативная палитра: 64 цвета NES, повторяем для всех 256 слотов _pal.
         for (int i = 0; i < 64; i++) {
-            uint16_t c = ~(((uint16_t)(src[i].r >> 3) << 11) |
-                           ((uint16_t)(src[i].g >> 2) << 5)  |
-                            (uint16_t)(src[i].b >> 3));
+            uint16_t c = ((uint16_t)(src[i].r >> 3) << 11) |
+                         ((uint16_t)(src[i].g >> 2) << 5)  |
+                          (uint16_t)(src[i].b >> 3);
             for (int rep = 0; rep < 4; rep++) _pal[i + rep * 64] = c;
         }
     } else {
-        // Дефолтная палитра: nofrendo передаёт все 256 записей (pal[0..255]).
         for (int i = 0; i < 256; i++) {
             uint16_t r = ((uint16_t)pal[i].r >> 3) & 0x1F;
             uint16_t g = ((uint16_t)pal[i].g >> 2) & 0x3F;
             uint16_t b = ((uint16_t)pal[i].b >> 3) & 0x1F;
-            _pal[i] = ~((r << 11) | (g << 5) | b);
+            _pal[i] = (r << 11) | (g << 5) | b;
         }
     }
 }
@@ -730,7 +727,8 @@ static void _takeScreenshot(void) {
 
     // ── Построчная запись: RGB565 → BGR888 ────────────────────────────────────
     uint8_t *rowBuf = (uint8_t *)malloc(rowBytes);
-    if (rowBuf) memset(rowBuf, 0, rowBytes);
+    if (!rowBuf) { f.close(); SD.remove(path); return; }
+    memset(rowBuf, 0, rowBytes);
 
     if (_frame && _framePixels >= (size_t)w * h) {
         for (int oy = 0; oy < h; oy++) {
@@ -966,8 +964,8 @@ static void _ingameMenu(void) {
 // Физическая разводка Pico → биты пакета (подтверждено диагностикой):
 //   бит 0 = START  (BTN_A   = 0x01)
 //   бит 1 = SELECT (BTN_B   = 0x02)
-//   бит 2 = A      (BTN_SEL = 0x04)
-//   бит 3 = B      (BTN_STA = 0x08)
+//   бит 2 = B      (BTN_STA = 0x08)  ← физически B, не A
+//   бит 3 = A      (BTN_SEL = 0x04)  ← физически A, не B
 //   бит 4 = UP  / бит 5 = DOWN / бит 6 = LEFT / бит 7 = RIGHT
 //
 // Комбо выхода: SELECT + START (биты 0+1) удерживать 3 секунды.
@@ -1075,14 +1073,14 @@ extern "C" void osd_getinput(void) {
     // АППАРАТНАЯ РАЗВОДКА контроллера (подтверждена диагностикой):
     //   бит 0 (физ. STA / кнопка START)  → NES START
     //   бит 1 (физ. SEL / кнопка SELECT) → NES SELECT
-    //   бит 2 (физ. A)                   → NES A
-    //   бит 3 (физ. B)                   → NES B
+    //   бит 2 (физ. B)                   → NES B   ← физически B
+    //   бит 3 (физ. A)                   → NES A   ← физически A
     //
     static const int ev[8] = {
         event_joypad1_start,   // бит 0  физ. START  → NES START
         event_joypad1_select,  // бит 1  физ. SELECT → NES SELECT
-        event_joypad1_a,       // бит 2  физ. A      → NES A
-        event_joypad1_b,       // бит 3  физ. B      → NES B
+        event_joypad1_b,       // бит 2  физ. B      → NES B
+        event_joypad1_a,       // бит 3  физ. A      → NES A
         event_joypad1_up,      // бит 4  UP
         event_joypad1_down,    // бит 5  DOWN
         event_joypad1_left,    // бит 6  LEFT
@@ -1098,8 +1096,8 @@ extern "C" void osd_getinput(void) {
         printf("[EMU] raw=0x%02X map=0x%02X |", raw, pad);
         if (pad & 0x01) printf(" STA");
         if (pad & 0x02) printf(" SEL");
-        if (pad & 0x04) printf(" A");
-        if (pad & 0x08) printf(" B");
+        if (pad & 0x04) printf(" B");
+        if (pad & 0x08) printf(" A");
         if (pad & 0x10) printf(" UP");
         if (pad & 0x20) printf(" DOWN");
         if (pad & 0x40) printf(" LEFT");
@@ -1175,8 +1173,13 @@ bool osd_rom_load(const char *path) {
     _rom_size = f.size();
     _rom_buf  = (uint8_t *)ps_malloc(_rom_size);
     if (!_rom_buf) { f.close(); printf("[OSD] No PSRAM for ROM (%u bytes)\n", (unsigned)_rom_size); return false; }
-    f.read(_rom_buf, _rom_size);
+    size_t got = f.read(_rom_buf, _rom_size);
     f.close();
+    if (got != _rom_size) {
+        printf("[OSD] ROM read incomplete: %u/%u\n", (unsigned)got, (unsigned)_rom_size);
+        free(_rom_buf); _rom_buf = nullptr; _rom_size = 0;
+        return false;
+    }
     printf("[OSD] ROM loaded: %u bytes\n", (unsigned)_rom_size);
     return true;
 }

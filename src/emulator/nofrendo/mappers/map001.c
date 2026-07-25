@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -181,13 +181,13 @@ static void map1_setstate(SnssMapperBlock *state)
    bitcount = state->extraData.mapper1.numberOfBits;
 }
 
-static map_memwrite map1_memwrite[] =
+static const map_memwrite map1_memwrite[] =
 {
    { 0x8000, 0xFFFF, map1_write },
    {     -1,     -1, NULL }
 };
 
-mapintf_t map1_intf =
+const mapintf_t map1_intf =
 {
    1, /* mapper number */
    "MMC1", /* mapper name */

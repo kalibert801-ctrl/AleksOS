@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -26,7 +26,7 @@
 #include <noftypes.h>
 #include <nes_mmc.h>
 
-mapintf_t map0_intf = 
+const mapintf_t map0_intf = 
 {
    0, /* mapper number */
    "None", /* mapper name */

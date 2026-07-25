@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -66,13 +66,13 @@ static void map32_write(uint32 address, uint8 value)
    }
 }
 
-static map_memwrite map32_memwrite[] =
+static const map_memwrite map32_memwrite[] =
 {
    { 0x8000, 0xFFFF, map32_write },
    {     -1,     -1, NULL }
 };
 
-mapintf_t map32_intf =
+const mapintf_t map32_intf =
 {
    32, /* mapper number */
    "Irem G-101", /* mapper name */

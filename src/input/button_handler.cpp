@@ -43,8 +43,8 @@ void ButtonHandler::_handlePacket() {
                     webConsolePrintf("[BTN] 0x%02X%s%s%s%s%s%s%s%s%s\n", data,
                         (data & 0x01) ? " STA"     : "",
                         (data & 0x02) ? " SEL"     : "",
-                        (data & 0x04) ? " A"       : "",
-                        (data & 0x08) ? " B"       : "",
+                        (data & 0x04) ? " B"       : "",
+                        (data & 0x08) ? " A"       : "",
                         (data & 0x10) ? " UP"      : "",
                         (data & 0x20) ? " DOWN"    : "",
                         (data & 0x40) ? " LEFT"    : "",
@@ -123,22 +123,25 @@ void ButtonHandler::sendCmd(uint8_t cmd, uint8_t data) {
 // ── Вибро ────────────────────────────────────────────────────────
 void ButtonHandler::vibrate1(uint16_t duration_ms) {
     if (!isConnected() || !settings.vibroEnabled) return;
-    uint8_t dur = (uint8_t)min((int)(duration_ms / 10), 255);
-    if (dur == 0) dur = 1;
+    uint16_t scaled = (uint16_t)((uint32_t)duration_ms * settings.vibroStrength / 100);
+    uint8_t dur = (uint8_t)min((int)(scaled / 10), 255);
+    if (dur == 0) return;
     sendCmd(PICO_CMD_HAPTIC1, dur);
 }
 
 void ButtonHandler::vibrate2(uint16_t duration_ms) {
     if (!isConnected() || !settings.vibroEnabled) return;
-    uint8_t dur = (uint8_t)min((int)(duration_ms / 10), 255);
-    if (dur == 0) dur = 1;
+    uint16_t scaled = (uint16_t)((uint32_t)duration_ms * settings.vibroStrength / 100);
+    uint8_t dur = (uint8_t)min((int)(scaled / 10), 255);
+    if (dur == 0) return;
     sendCmd(PICO_CMD_HAPTIC2, dur);
 }
 
 void ButtonHandler::vibrateBoth(uint16_t duration_ms) {
     if (!isConnected() || !settings.vibroEnabled) return;
-    uint8_t dur = (uint8_t)min((int)(duration_ms / 10), 255);
-    if (dur == 0) dur = 1;
+    uint16_t scaled = (uint16_t)((uint32_t)duration_ms * settings.vibroStrength / 100);
+    uint8_t dur = (uint8_t)min((int)(scaled / 10), 255);
+    if (dur == 0) return;
     sendCmd(PICO_CMD_HAPTIC_B, dur);  // 0x22 — оба мотора одновременно
 }
 

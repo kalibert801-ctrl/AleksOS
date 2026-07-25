@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -165,13 +165,13 @@ static void map24_setstate(SnssMapperBlock *state)
    irq.enabled = state->extraData.mapper24.irqCounterEnabled;
 }
 
-static map_memwrite map24_memwrite[] =
+static const map_memwrite map24_memwrite[] =
 {
    { 0x8000, 0xF002, map24_write },
    {     -1,     -1, NULL }
 };
 
-mapintf_t map24_intf =
+const mapintf_t map24_intf =
 {
    24, /* mapper number */
    "Konami VRC6", /* mapper name */

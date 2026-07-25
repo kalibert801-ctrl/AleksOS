@@ -27,7 +27,7 @@ public:
         pc.memory_height = 320;
         pc.panel_width   = 240;
         pc.panel_height  = 320;
-        pc.invert        = true;
+        pc.invert        = false;
         _panel.config(pc);
 
         auto lc = _light.config();

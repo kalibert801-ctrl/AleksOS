@@ -15,17 +15,6 @@ static LedState _state    = LED_OFF;
 static uint8_t  _step     = 0;
 static uint32_t _nextTime = 0;
 
-// Описание паттерна мигания: {on_ms, off_ms, повторов}
-struct BlinkPattern { uint16_t on; uint16_t off; uint8_t reps; };
-static const BlinkPattern PATTERNS[] = {
-    {0,   0,   0},   // LED_OFF
-    {0,   0,   0},   // LED_GREEN  — управляется через ledUpdate
-    {0,   0,   0},   // LED_RED    — постоянно вкл, не требует update
-    {0,   0,   0},   // LED_BLUE   — управляется через ledUpdate
-    {0,   0,   0},   // LED_YELLOW — управляется через ledUpdate
-    {0,   0,   0},   // LED_BOOT   — управляется через ledUpdate
-};
-
 static inline void ledOn()  { digitalWrite(LED_PIN, LOW);  }   // активный LOW
 static inline void ledOff() { digitalWrite(LED_PIN, HIGH); }
 

@@ -27,8 +27,8 @@ extern uint16_t    osdFrameW();
 extern uint16_t    osdFrameH();
 
 static WebServer    _srv(80);
-static bool         _running   = false;
-static bool         _debugOnly = false;   // true = только /console (не полный менеджер)
+static volatile bool _running   = false;
+static volatile bool _debugOnly = false;   // true = только /console (не полный менеджер)
 static char         _ip[20]    = {};
 static TaskHandle_t _dbgTask   = nullptr; // фоновый task для debug-сервера (работает пока emu_run блокирует loop)
 
@@ -40,6 +40,7 @@ static const UploadDir _dirs[] = {
     { "Sounds",      "/sounds",      ".wav"            },
     { "Cover art",   "/covers",      ".raw,.jpg,.png"  },
     { "Firmware",    "/update",      ".bin"            },
+    { "SD Files",    "/",            "*"              },  // обзор всей SD-карты
 };
 static const int _ndirs = (int)(sizeof(_dirs) / sizeof(_dirs[0]));
 
@@ -169,6 +170,9 @@ static void handleRoot() {
         ".ren{background:#2a2a1a;color:#ff8;border:1px solid #6a6a2d;padding:3px 8px;"
         "border-radius:3px;cursor:pointer;font-size:11px}"
         ".ren:hover{background:#3a3a20}"
+        ".edit{background:#1a1a4a;color:#88f;border:1px solid #2d2d7a;padding:3px 8px;"
+        "border-radius:3px;cursor:pointer;font-size:11px;text-decoration:none}"
+        ".edit:hover{background:#1e1e5a}"
         ".modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);"
         "z-index:100;align-items:center;justify-content:center}"
         ".modal.open{display:flex}"
@@ -257,10 +261,11 @@ static void handleRoot() {
         "&#128193; "));
     _srv.sendContent(curPath);
     _srv.sendContent(F("</div><div class='files'>"));
-    // Кнопка «Назад» в подпапке
-    if (curFound && curPath != _dirs[curIdx].path) {
+    // Кнопка «Назад» в подпапке (всегда, кроме корня)
+    if (curPath != "/") {
         int ups = curPath.lastIndexOf('/');
-        String parent = (ups > 0) ? curPath.substring(0, ups) : _dirs[curIdx].path;
+        String parent = (ups > 0) ? curPath.substring(0, ups) : String("/");
+        if (parent.isEmpty()) parent = "/";
         _srv.sendContent("<div class='fi'><span class='fn'>"
             "<a href='/?dir=" + parent + "' style='color:#8cf;text-decoration:none'>"
             "&#128194; ..</a></span></div>");
@@ -307,11 +312,16 @@ static void handleRoot() {
                 bool isImage = lname.endsWith(".jpg") || lname.endsWith(".jpeg") ||
                                lname.endsWith(".png") || lname.endsWith(".bmp") ||
                                lname.endsWith(".raw");
+                bool isText  = lname.endsWith(".cfg") || lname.endsWith(".txt") ||
+                               lname.endsWith(".json") || lname.endsWith(".ini") ||
+                               lname.endsWith(".log");
                 _srv.sendContent("<span class='act'>");
                 if (isAudio)
                     _srv.sendContent("<button class='play' data-path=\"" + filePath + "\" data-name=\"" + name + "\">&#9654;</button>");
                 if (isImage)
                     _srv.sendContent("<button class='view' data-path=\"" + filePath + "\" data-name=\"" + name + "\">&#128247;</button>");
+                if (isText)
+                    _srv.sendContent("<a class='edit' href='/textedit?path=" + filePath + "'>&#9998;</a>");
                 _srv.sendContent(
                     "<button class='ren' data-path=\"" + filePath + "\" data-name=\"" + name + "\">&#9998;</button>"
                     "<form method='GET' action='/delete' style='margin:0'>"
@@ -322,6 +332,8 @@ static void handleRoot() {
             _srv.sendContent("</div>");
             cnt++;
         }
+        dir.close();
+    } else if (dir) {
         dir.close();
     }
     if (cnt == 0) _srv.sendContent(F("<p class='empty'>Folder is empty</p>"));
@@ -590,7 +602,7 @@ static void handleConsoleLog() {
     _jsonBuf[ji++] = '"'; _jsonBuf[ji++] = 'd'; _jsonBuf[ji++] = 'a';
     _jsonBuf[ji++] = 't'; _jsonBuf[ji++] = 'a'; _jsonBuf[ji++] = '"';
     _jsonBuf[ji++] = ':'; _jsonBuf[ji++] = '"';
-    for (size_t i = 0; i < got && ji < (int)sizeof(_jsonBuf) - 20; i++) {
+    for (size_t i = 0; i < got && ji < (int)sizeof(_jsonBuf) - 32; i++) {
         unsigned char c = (unsigned char)dataBuf[i];
         if      (c == '\\') { _jsonBuf[ji++]='\\'; _jsonBuf[ji++]='\\'; }
         else if (c == '"')  { _jsonBuf[ji++]='\\'; _jsonBuf[ji++]='"';  }
@@ -919,6 +931,77 @@ void webDbgHandle() {
 
 const char* webDbgIP() { return _ip; }
 
+// ── Текстовый редактор файлов ─────────────────────────────────
+static void handleTextEdit() {
+    String path = _srv.arg("path");
+    if (path.isEmpty() || !SD.exists(path)) { _srv.send(404, "text/plain", "Not found"); return; }
+    String lp = path; lp.toLowerCase();
+    if (!lp.endsWith(".cfg") && !lp.endsWith(".txt") && !lp.endsWith(".json")
+        && !lp.endsWith(".ini") && !lp.endsWith(".log")) {
+        _srv.send(403, "text/plain", "Not a text file"); return;
+    }
+    File f = SD.open(path, FILE_READ);
+    if (!f) { _srv.send(500, "text/plain", "Open failed"); return; }
+    String content = f.readString(); f.close();
+    content.replace("&","&amp;"); content.replace("<","&lt;"); content.replace(">","&gt;");
+
+    int sl = path.lastIndexOf('/');
+    String parent = (sl > 0) ? path.substring(0, sl) : String("/");
+
+    _srv.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    _srv.send(200, "text/html; charset=utf-8", "");
+    _srv.sendContent(F("<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<style>*{box-sizing:border-box;margin:0;padding:0}"
+        "body{background:#111;color:#ddd;font-family:monospace;height:100vh;display:flex;flex-direction:column}"
+        ".hdr{background:#1e1e1e;border-bottom:2px solid #f80;padding:8px 14px}"
+        ".hdr h2{color:#f80;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        "textarea{flex:1;background:#0a0a0a;color:#ddd;border:none;padding:10px;font-family:monospace;"
+        "font-size:13px;resize:none;outline:none;line-height:1.5;tab-size:4}"
+        ".bar{background:#1e1e1e;border-top:1px solid #2a2a2a;padding:8px 12px;display:flex;gap:8px;align-items:center}"
+        ".bsave{background:#1a4a1a;color:#8f8;border:1px solid #2d7a2d;border-radius:4px;"
+        "padding:7px 20px;cursor:pointer;font-size:13px}"
+        ".bsave:hover{background:#234a23}"
+        ".bback{background:#2a1a1a;color:#f88;border:1px solid #7a2d2d;border-radius:4px;"
+        "padding:7px 16px;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}"
+        ".bback:hover{background:#3a1a1a}"
+        "#st{color:#8f8;font-size:12px;margin-left:8px}"
+        "</style></head><body>"
+        "<div class='hdr'><h2>&#9998; "));
+    _srv.sendContent(path);
+    _srv.sendContent(F("</h2></div>"
+        "<form method='POST' action='/textsave' style='display:flex;flex-direction:column;flex:1'>"
+        "<input type='hidden' name='path' value='"));
+    _srv.sendContent(path);
+    _srv.sendContent(F("'><textarea name='content'>"));
+    _srv.sendContent(content);
+    _srv.sendContent(F("</textarea><div class='bar'>"
+        "<a class='bback' href='/?dir="));
+    _srv.sendContent(parent);
+    _srv.sendContent(F("'>&#8592; Back</a>"
+        "<button class='bsave' type='submit'>&#10003; Save</button>"
+        "<span id='st'></span></div></form>"
+        "<script>"
+        "document.querySelector('form').onsubmit=function(){"
+          "setTimeout(function(){document.getElementById('st').textContent='Saved!'},200);"
+        "};"
+        "</script></body></html>"));
+}
+
+static void handleTextSave() {
+    String path = _srv.arg("path");
+    String content = _srv.arg("content");
+    if (path.isEmpty() || !path.startsWith("/")) { _srv.send(400, "text/plain", "Bad path"); return; }
+    content.replace("\r\n", "\n");
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) { _srv.send(500, "text/plain", "Write failed"); return; }
+    f.print(content); f.close();
+    int sl = path.lastIndexOf('/');
+    String parent = (sl > 0) ? path.substring(0, sl) : String("/");
+    _srv.sendHeader("Location", "/?dir=" + parent);
+    _srv.send(302, "text/plain", "Saved");
+}
+
 // ══════════════════════════════════════════════════════════════
 void webMgrStart() {
     if (_running && _debugOnly) webDbgStop();  // освобождаем порт под полный менеджер
@@ -935,6 +1018,8 @@ void webMgrStart() {
     _srv.on("/rmdir",       HTTP_GET,  handleRmdir);
     _srv.on("/sd",          HTTP_GET,  handleSDFile);
     _srv.on("/rename",      HTTP_GET,  handleRename);
+    _srv.on("/textedit",    HTTP_GET,  handleTextEdit);
+    _srv.on("/textsave",    HTTP_POST, handleTextSave);
     _srv.on("/console",     HTTP_GET,  handleConsole);
     _srv.on("/console/log", HTTP_GET,  handleConsoleLog);
     _srv.on("/remote",      HTTP_GET,  handleRemote);

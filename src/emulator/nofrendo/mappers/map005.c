@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -246,7 +246,7 @@ static void map5_setstate(SnssMapperBlock *state)
    UNUSED(state);
 }
 
-static map_memwrite map5_memwrite[] =
+static const map_memwrite map5_memwrite[] =
 {
    /* $5000 - $5015 handled by sound */
    { 0x5016, 0x5FFF, map5_write },
@@ -254,13 +254,13 @@ static map_memwrite map5_memwrite[] =
    {     -1,     -1, NULL }
 };
 
-static map_memread map5_memread[] = 
+static const map_memread map5_memread[] = 
 {
    { 0x5204, 0x5204, map5_read },
    {     -1,     -1, NULL }
 };
 
-mapintf_t map5_intf =
+const mapintf_t map5_intf =
 {
    5, /* mapper number */
    "MMC5", /* mapper name */

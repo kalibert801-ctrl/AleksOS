@@ -389,49 +389,81 @@ static void _mWifi(int cx, int cy, uint16_t c) {
 }
 // Фаза анимации зарядки (0-3), обновляется в menuBatteryAnimTick()
 static uint8_t _batAnimPhase = 0;
+static bool    _batBlinkOn   = false;  // мигание при заряде ≤10%
 
-// Батарея: динамическая иконка.
-// При зарядке — синяя анимация "заполнения" от текущего уровня к 100%.
-// В норме — зелёный/оранжевый/красный по уровню заряда.
-// Корпус 16×8 px, нуб 2×4 px, внутри 13×6 px (0..12 px заливки).
-// Батарея: корпус 20×10 px, нуб 3×6, внутренний заряд 17×8
+// Молния ⚡ (5×10px) — предупреждение "поставьте на зарядку"
+static void _drawChargeBolt(int lx, int cy) {
+    constexpr uint16_t C = 0xFFE0u;
+    lcd.fillTriangle(lx+4, cy-5, lx,   cy-1, lx+4, cy-1, C);  // верх
+    lcd.fillTriangle(lx,   cy+1, lx+4, cy+1, lx,   cy+5, C);  // низ
+}
+
+// Батарея: корпус 25×15 px, нуб 4×9 px, внутри 23×13 px (0..22 px заливки).
+// Цвета: >70%=зел, >50%=жёлт, >20%=оранж, >10%=красн, ≤10%=красн мигает + молния.
+// Процент отображается слева от иконки.
 static void _mBattery(int cx, int cy) {
     int pct = batteryPercent();
     const Theme565& t = getTheme();
 
+    // ── Цвет по уровню заряда ────────────────────────────────
+    uint16_t fc;
+    if      (pct < 0)    fc = 0xAD55u;
+    else if (pct <= 10)  fc = _batBlinkOn ? 0xF800u : t.header;
+    else if (pct <= 20)  fc = 0xF800u;
+    else if (pct <= 50)  fc = 0xFC00u;  // оранжевый
+    else if (pct <= 70)  fc = 0xFFE0u;  // жёлтый
+    else                 fc = 0x07E0u;  // зелёный
+
+    // ── Процент (текст слева от иконки) ──────────────────────
+    {
+        uint16_t tc = (pct < 0) ? (uint16_t)0xAD55u : fc;
+        if (pct <= 10 && !_batBlinkOn) tc = 0xF800u;  // всегда красный даже в blink-off
+        fsm();
+        lcd.setTextDatum(MR_DATUM);
+        lcd.setTextColor(tc);
+        if (pct >= 0) {
+            char buf[6]; snprintf(buf, sizeof(buf), "%d%%", pct);
+            lcd.drawString(buf, cx - 16, cy);
+        } else {
+            lcd.drawString("--", cx - 16, cy);
+        }
+    }
+
+    // ── Молния при ≤10% (blink-on фаза) ─────────────────────
+    if (pct >= 0 && pct <= 10 && _batBlinkOn)
+        _drawChargeBolt(cx - 45, cy);
+
+    // ── Зарядка: циан + анимация заполнения ──────────────────
     if (batteryCharging()) {
-        constexpr uint16_t COL_CHARGE = 0x07FFu;  // cyan
-        lcd.drawRect(cx - 10, cy - 5, 20, 10, COL_CHARGE);
-        lcd.fillRect(cx + 10, cy - 3,  3,  6, COL_CHARGE);
-        lcd.fillRect(cx -  9, cy - 4, 17,  8, t.header);
+        constexpr uint16_t CC = 0x07FFu;
+        lcd.drawRect(cx - 12, cy - 7, 25, 15, CC);
+        lcd.fillRect(cx + 13, cy - 4,  4,  9, CC);
+        lcd.fillRect(cx - 11, cy - 6, 23, 13, t.header);
         int base    = (pct >= 0) ? pct : 0;
         int extra   = (100 - base) * (int)_batAnimPhase / 4;
         int animPct = base + extra;
-        int fillW   = (animPct * 16 + 50) / 100;
-        if (fillW > 16) fillW = 16;
-        if (fillW > 0)  lcd.fillRect(cx - 9, cy - 4, fillW, 8, COL_CHARGE);
+        int fillW   = (animPct * 22 + 50) / 100;
+        if (fillW > 22) fillW = 22;
+        if (fillW > 0)  lcd.fillRect(cx - 11, cy - 6, fillW, 13, CC);
         return;
     }
 
-    uint16_t fc;
-    if      (pct < 0)   fc = 0xAD55u;
-    else if (pct <= 20) fc = 0xF800u;
-    else if (pct <= 50) fc = 0xFFE0u;
-    else                fc = 0x07E0u;
-
-    lcd.drawRect(cx - 10, cy - 5, 20, 10, fc);
-    lcd.fillRect(cx + 10, cy - 3,  3,  6, fc);
-    lcd.fillRect(cx -  9, cy - 4, 17,  8, t.header);
+    // ── Нормальная иконка 25×15 ───────────────────────────────
+    lcd.drawRect(cx - 12, cy - 7, 25, 15, fc);
+    lcd.fillRect(cx + 13, cy - 4,  4,  9, fc);
+    lcd.fillRect(cx - 11, cy - 6, 23, 13, t.header);
 
     if (pct < 0) {
-        lcd.fillRect(cx - 5, cy - 2, 9, 1, 0xAD55u);
-        lcd.fillRect(cx - 5, cy + 1, 9, 1, 0xAD55u);
+        lcd.fillRect(cx - 7, cy - 2, 13, 2, 0xAD55u);
+        lcd.fillRect(cx - 7, cy + 2, 13, 2, 0xAD55u);
         return;
     }
 
-    int fillW = (pct * 16 + 50) / 100;
-    if (fillW > 16) fillW = 16;
-    if (fillW > 0)  lcd.fillRect(cx - 9, cy - 4, fillW, 8, fc);
+    if (pct <= 10 && !_batBlinkOn) return;  // blink-off: рамка невидима, заливки нет
+
+    int fillW = (pct * 22 + 50) / 100;
+    if (fillW > 22) fillW = 22;
+    if (fillW > 0)  lcd.fillRect(cx - 11, cy - 6, fillW, 13, fc);
 }
 
 // ── Шапка нового меню ──────────────────────────────────────────
@@ -499,7 +531,7 @@ static void _menuDrawFooter() {
     fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
     lcd.drawString(dt, 218, cy);
 
-    // Батарея — правее, с учётом нового размера 20+3=23px + 2 отступ
+    // Батарея: 25×15 + нуб 4×9 + % текст слева, молния при ≤10%
     _mBattery(293, cy);
 }
 
@@ -580,12 +612,12 @@ static void _menuPartialUpdate(int oldIdx, int newIdx) {
 
     // Старая строка (снять выделение)
     lcd.fillRect(0, M_HDR_H + oldSlot * M_ROW_H, M_LIST_W - 1, M_ROW_H, t.bg);
-    if (oldIdx >= 0 && oldIdx < total)
+    if (tp && oldIdx >= 0 && oldIdx < total)
         tp->drawRomRow(_menuActual(oldIdx), oldSlot, false);
 
     // Новая строка (выделить)
     lcd.fillRect(0, M_HDR_H + newSlot * M_ROW_H, M_LIST_W - 1, M_ROW_H, t.bg);
-    if (newIdx >= 0 && newIdx < total)
+    if (tp && newIdx >= 0 && newIdx < total)
         tp->drawRomRow(_menuActual(newIdx), newSlot, true);
 
     // Разделитель
@@ -642,23 +674,23 @@ static bool _menuConfirmDelete(const char *name) {
 }
 
 // ── Три-точечное контекстное меню ──────────────────────────────
-// Возвращает: 0=ничего, 1=Settings, 2=Gallery, 3=Music Player
+// Возвращает: 0=ничего, 1=Settings, 2=Gallery, 3=Music Player, 4=WebUpload, 5=Gravity
 static uint8_t _menuDotMenu() {
     const Theme565& t = getTheme();
     bool ru = (settings.language==LANG_RU);
     // Используем String чтобы cyrStr-буферы не перезаписывались
     static const char *sortEN[] = {"Sort A-Z","Sort Z-A","Sort Size","* Favs First","Sort Default"};
     static const char *sortRU[] = {"А-Я","Я-А","По размеру","* Избр. верх","По умолч."};
-    static const char *itemEN[] = {"","Delete ROM","Gallery","Music Player","Web Upload","Settings"};
-    static const char *itemRU[] = {"","Удалить ROM","Галерея","Плеер","Загрузить","Настройки"};
-    const int N = 6;
+    static const char *itemEN[] = {"","Delete ROM","Gallery","Music Player","Web Upload","Gravity","Settings"};
+    static const char *itemRU[] = {"","Удалить ROM","Галерея","Плеер","Загрузить","Gravity","Настройки"};
+    const int N = 7;
     // Строим String-массив (копирует cyrStr-содержимое)
     String itemStrs[N];
     itemStrs[0] = ru ? cyrStr(sortRU[_sortMode % 5]) : sortEN[_sortMode % 5];
     for (int i = 1; i < N; i++)
         itemStrs[i] = ru ? cyrStr(itemRU[i]) : itemEN[i];
 
-    const int PX = 172, PY = M_HDR_H + 1, PW = 146, PH = 184, RH = 30;
+    const int PX = 172, PY = M_HDR_H + 1, PW = 146, RH = 28, PH = N * RH + 4;
 
     auto drawItem = [&](int idx, bool hi) {
         int iy = PY + 1 + idx * RH;
@@ -754,7 +786,10 @@ static uint8_t _menuDotMenu() {
         case 4:  // Web Upload
             menuDraw();
             return 4;
-        case 5:  // Settings
+        case 5:  // Gravity Defied
+            menuDraw();
+            return 5;
+        case 6:  // Settings
             menuDraw();
             return 1;
         default:
@@ -795,10 +830,13 @@ void menuDraw() {
             fsm(); lcd.drawString(cyrStr(S().noRomsHint), M_LIST_W / 2, ey + 10);
         }
     } else {
-        int end = min(_menuOffset + M_ROWS, total);
-        for (int i = _menuOffset; i < end; i++)
-            tp->drawRomRow(_menuActual(i), i - _menuOffset, i == _menuSel);
-        _menuDrawScrollArrows(total);
+        if (!tp) { lcd.fillRect(0, M_HDR_H, M_LIST_W, M_DPAD_Y - M_HDR_H, t.bg); }
+        else {
+            int end = min(_menuOffset + M_ROWS, total);
+            for (int i = _menuOffset; i < end; i++)
+                tp->drawRomRow(_menuActual(i), i - _menuOffset, i == _menuSel);
+            _menuDrawScrollArrows(total);
+        }
     }
 
     // ── Правая панель ──────────────────────────────────────────
@@ -852,13 +890,18 @@ void menuTimeTick() {
     _mBattery(293, cy);
 }
 
-// ── Анимация зарядки батареи (вызывать из loop() каждый кадр) ────────────────
-// Работает только когда batteryCharging() == true.
-// Обновляет иконку каждые 600 мс, продвигая фазу 0→1→2→3→0...
-// Перерисовывает только зону батареи (x=278..319) — без мерцания всего футера.
+// ── Анимация батареи (вызывать из loop() каждый кадр) ───────────────────────
+// • Зарядка: циан-анимация заполнения, фаза 0→1→2→3→0 каждые 600 мс
+// • Заряд ≤10%: мигание иконки + молния каждые 600 мс
+// Перерисовывает только правую зону футера (x=246..319) — без мерцания.
 void menuBatteryAnimTick() {
-    if (!batteryCharging()) {
+    int pct = batteryPercent();
+    bool lowBat  = (pct >= 0 && pct <= 10);
+    bool doAnim  = batteryCharging() || lowBat;
+
+    if (!doAnim) {
         _batAnimPhase = 0;
+        _batBlinkOn   = false;
         return;
     }
 
@@ -867,11 +910,18 @@ void menuBatteryAnimTick() {
     if (ms - _lastAnim < 600u) return;
     _lastAnim = ms;
 
-    _batAnimPhase = (_batAnimPhase + 1) & 3;  // 0..3
+    if (batteryCharging()) {
+        _batAnimPhase = (_batAnimPhase + 1) & 3;
+        _batBlinkOn   = false;
+    } else {
+        _batBlinkOn   = !_batBlinkOn;
+        _batAnimPhase = 0;
+    }
 
     const Theme565& t = getTheme();
     int by = M_DPAD_Y, cy = M_DPAD_CY;
-    lcd.fillRect(274, by + 1, SCREEN_W - 274, M_BAR_H - 2, t.header);
+    // Зона: молния(5) + % текст(~28) + батарея(29) = ~62 px; с запасом от x=246
+    lcd.fillRect(246, by + 1, SCREEN_W - 246, M_BAR_H - 2, t.header);
     _mBattery(293, cy);
 }
 
@@ -896,7 +946,7 @@ static void _menuRefreshListArea() {
             lcd.drawString(cyrStr(S().noRoms),      M_LIST_W / 2, ey - 10);
             fsm(); lcd.drawString(cyrStr(S().noRomsHint), M_LIST_W / 2, ey + 10);
         }
-    } else {
+    } else if (tp) {
         int end = min(_menuOffset + M_ROWS, total);
         for (int i = _menuOffset; i < end; i++)
             tp->drawRomRow(_menuActual(i), i - _menuOffset, i == _menuSel);
@@ -964,6 +1014,7 @@ uint8_t menuHandleTouch(int x, int y, int &romAction) {
             if (r == 2) return 0xD0;     // → Gallery
             if (r == 3) return 0xD1;     // → Music Player
             if (r == 4) return 0xD2;     // → Web Upload
+            if (r == 5) return 0xD3;     // → Gravity Defied
             return 0;
         }
         return 0;
@@ -1055,7 +1106,7 @@ void menuRawTouch(int x, int y) {
     if (newOff != _menuOffset) {
         _menuOffset = newOff;
         _menuSel    = constrain(_menuSel, _menuOffset, _menuOffset + M_ROWS - 1);
-        menuDraw();
+        _menuRefreshListArea();
     }
 }
 
@@ -1560,38 +1611,41 @@ void showRomInfo(int idx) {
 // ══════════════════════════════════════════════════════════════
 
 // gi=41 → подменю Appearance (virtual cat=4), gi=42 → подменю Controls (virtual cat=5)
+// gi=47 → подменю DateTime (virtual cat=9)
 static const char *_catName[] = {
     "Display", "Audio", "System", "Info",
     "Appearance",  // cat=4: virtual sub из Display (gi=41)
     "Controls",    // cat=5: virtual sub из System  (gi=42)
     "Debug",       // cat=6: virtual, из System gi=25
     "Battery",     // cat=7: virtual, из System gi=33
-    "Web Debug"    // cat=8: virtual, из Debug  gi=37
+    "Web Debug",   // cat=8: virtual, из Debug  gi=37
+    "Date & Time"  // cat=9: virtual, из Display gi=47
 };
 static const char* _catLabel(int cat) {
     if (settings.language == LANG_RU) {
         static const char *ru[] = {
             "Дисплей", "Звук", "Система", "Инфо",
-            "Внеш.вид", "Геймпад", "Debug", "Батарея", "Web"
+            "Внеш.вид", "Геймпад", "Debug", "Батарея", "Web", "Дата и время"
         };
-        if (cat >= 0 && cat < 9) return cyrStr(ru[cat]);
+        if (cat >= 0 && cat < 10) return cyrStr(ru[cat]);
     }
-    return (cat >= 0 && cat < 9) ? _catName[cat] : "";
+    return (cat >= 0 && cat < 10) ? _catName[cat] : "";
 }
 
-// ── _catItems[][8]: максимум 8 пунктов на категорию ─────────────────────
+// ── _catItems[][9]: максимум 9 пунктов на категорию ─────────────────────
 // gi=24 → WiFi manager (0x80), gi=25 → Debug sub, gi=26 → OTA (0xA0)
-// gi=33 → Battery screen, gi=41 → Appearance sub, gi=42 → Controls sub
-static const int _catItems[][8] = {
-    { 0, 4, 7, 34, 35, 41, -1, -1 },           // 0: Display  (41=Appearance→)
-    { 1, 14, 8, 9, -1, -1, -1, -1 },           // 1: Audio
-    { 6, 17, 18, 19, 24, 26, 33, 42 },         // 2: System   (42=Controls→, убран Debug в Info)
-    { 10, 11, 28, 25, -1, -1, -1, -1 },        // 3: Info     (25=Debug→ перенесён сюда)
-    { 2, 3, 29, -1, -1, -1, -1, -1 },          // 4: Appearance virtual (was cat=2)
-    { 12, 13, 15, 16, 30, 31, 32, 36 },        // 5: Controls virtual   (was cat=4)
-    { 5, 20, 21, 22, 23, 37, -1, -1 },         // 6: Debug virtual
-    { -1, -1, -1, -1, -1, -1, -1, -1 },        // 7: Battery virtual
-    { 38, -1, -1, -1, -1, -1, -1, -1 },        // 8: Web Debug virtual
+// gi=33 → Battery screen, gi=41 → Appearance sub, gi=42 → Controls sub, gi=43 → SD Mgr (0xD4)
+static const int _catItems[][10] = {
+    { 0, 4, 7, 34, 35, 41, 47, -1, -1, -1 },        // 0: Display  (41=Appearance→, 47=DateTime→)
+    { 1, 14, 8, 9, -1, -1, -1, -1, -1, -1 },        // 1: Audio
+    { 6, 19, 24, 26, 33, 42, 43, 25, -1, -1 },      // 2: System   (43=SD, 25=Debug→)
+    { 10, 11, 28, -1, -1, -1, -1, -1, -1, -1 },     // 3: Info
+    { 2, 3, 29, -1, -1, -1, -1, -1, -1, -1 },       // 4: Appearance virtual
+    { 12, 13, 15, 16, 30, 31, 32, 36, -1, -1 },     // 5: Controls virtual
+    { 5, 20, 21, 22, 23, 37, -1, -1, -1, -1 },      // 6: Debug virtual
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },     // 7: Battery virtual
+    { 38, -1, -1, -1, -1, -1, -1, -1, -1, -1 },     // 8: Web Debug virtual
+    { 17, 18, 44, 45, 46, -1, -1, -1, -1, -1 },     // 9: Date & Time virtual
 };
 #define CAT_COUNT 4  // в сетке видны только 0..3; cat=4..8 — виртуальные
 
@@ -1644,7 +1698,7 @@ static bool _exitOnBack     = false; // открыто из подвала → B
 
 static int catItemCount(int cat) {
     int n = 0;
-    while (n < 8 && _catItems[cat][n] >= 0) n++;
+    while (n < 10 && _catItems[cat][n] >= 0) n++;
     return n;
 }
 
@@ -1692,7 +1746,7 @@ static String settingValue(int gi) {
             if (wifiMgr.isConnected()) return wifiMgr.getSSID();
             return settings.wifiSSID[0] ? settings.wifiSSID : "Tap >";
         }
-        case 25: return "Edit >";      // Debug sub-screen
+        case 25: return "Open >";      // Debug sub-screen
         case 26: return "Check >";     // OTA update
         case 28: return picoVerStr();  // Pico firmware version (read-only)
         case 29: {  // NES Palette
@@ -1738,6 +1792,11 @@ static String settingValue(int gi) {
         }
         case 41: return (settings.language==LANG_RU) ? cyrStr("→") : ">";
         case 42: return (settings.language==LANG_RU) ? cyrStr("→") : ">";
+        case 43: return (settings.language==LANG_RU) ? cyrStr("Открыть >") : "Open >";
+        case 44: { char b[4]; snprintf(b,sizeof(b),"%02d", timeGetD());   return String(b); }
+        case 45: { char b[4]; snprintf(b,sizeof(b),"%02d", timeGetMon()); return String(b); }
+        case 46: { char b[6]; snprintf(b,sizeof(b),"%04d", timeGetY());   return String(b); }
+        case 47: return timeGetDateString();
         case 36: {  // Game Shark
             int n = 0;
             for (int i = 0; i < 8; i++) if (settings.gsCodes[i][0]) n++;
@@ -1795,6 +1854,10 @@ static void settingInc(int gi) {
         }
         case 35: settings.scanlines = !settings.scanlines; break;  // Scanlines toggle
         case 36: settings.gsEnabled = !settings.gsEnabled; break;  // Game Shark toggle
+        case 44: { uint8_t d=timeGetD(), m=timeGetMon(); int dim=31; // упрощённый rollover
+                   if (++d > (uint8_t)dim) d=1; timeSetDate(d, m, timeGetY()); break; }
+        case 45: { uint8_t m=timeGetMon(); if (++m > 12) m=1; timeSetDate(timeGetD(), m, timeGetY()); break; }
+        case 46: { uint16_t y=timeGetY(); if (y < 2099) y++; timeSetDate(timeGetD(), timeGetMon(), y); break; }
     }
 }
 
@@ -1845,6 +1908,9 @@ static void settingDec(int gi) {
         }
         case 35: settings.scanlines = !settings.scanlines; break;  // Scanlines toggle
         case 36: settings.gsEnabled = !settings.gsEnabled; break;  // Game Shark toggle
+        case 44: { uint8_t d=timeGetD(), m=timeGetMon(); if (--d < 1) d=31; timeSetDate(d, m, timeGetY()); break; }
+        case 45: { uint8_t m=timeGetMon(); if (--m < 1) m=12; timeSetDate(timeGetD(), m, timeGetY()); break; }
+        case 46: { uint16_t y=timeGetY(); if (y > 2025) y--; timeSetDate(timeGetD(), timeGetMon(), y); break; }
     }
 }
 
@@ -2026,8 +2092,8 @@ static int     _infoScroll = 0;
 
 static void buildInfoRows() {
     _infoCount = 0; _infoScroll = 0;
-    auto d = [&](const char *t){ _infoRows[_infoCount++] = {t,"",0,true}; };
-    auto r = [&](const char *l, String v, uint16_t c=0){ _infoRows[_infoCount++]={l,v,c,false}; };
+    auto d = [&](const char *t){ if (_infoCount < 52) _infoRows[_infoCount++] = {t,"",0,true}; };
+    auto r = [&](const char *l, String v, uint16_t c=0){ if (_infoCount < 52) _infoRows[_infoCount++]={l,v,c,false}; };
 
     // ── Прошивка ──────────────────────────────────────────────
     d("FIRMWARE");
@@ -2097,8 +2163,8 @@ static void buildInfoRows() {
                        String(FIRMWARE_VERSION).lastIndexOf('v')+1), 0x4EF0);
 }
 
-#define INFO_ROW_H  18
-#define INFO_DIV_H  22
+#define INFO_ROW_H  14
+#define INFO_DIV_H  18
 #define INFO_AREA   (DPAD_Y - HDR_H)
 
 static int infoTotalH() {
@@ -2134,10 +2200,10 @@ static void buildBatteryRows() {
     _infoCount = 0; _infoScroll = 0;
     bool ru = (settings.language == LANG_RU);
     auto d = [&](const char *en, const char *ruUTF){
-        _infoRows[_infoCount++] = { ru ? String(cyrStr(ruUTF)) : String(en), "", 0, true };
+        if (_infoCount < 52) _infoRows[_infoCount++] = { ru ? String(cyrStr(ruUTF)) : String(en), "", 0, true };
     };
     auto r = [&](const char *en, const char *ruUTF, String v, uint16_t c=0){
-        _infoRows[_infoCount++] = { ru ? String(cyrStr(ruUTF)) : String(en), v, c, false };
+        if (_infoCount < 52) _infoRows[_infoCount++] = { ru ? String(cyrStr(ruUTF)) : String(en), v, c, false };
     };
 
     // ── Текущий заряд ─────────────────────────────────────────
@@ -2478,6 +2544,22 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
             lcd.fillCircle(cx, cy+4, 2, c);
             break;
         }
+        case 44: case 45: case 46: {  // Day / Month / Year — иконка страницы календаря
+            lcd.drawRect(cx-7, cy-6, 15, 13, c);
+            lcd.drawFastHLine(cx-7, cy-3, 15, c);
+            lcd.drawFastVLine(cx-3, cy-8, 4, c);
+            lcd.drawFastVLine(cx+3, cy-8, 4, c);
+            break;
+        }
+        case 47: {  // Date & Time submenu — часы + дата
+            lcd.drawCircle(cx-2, cy, 5, c);
+            lcd.drawFastVLine(cx-2, cy-3, 4, c);
+            lcd.drawFastHLine(cx-2, cy, 3, c);
+            lcd.drawFastHLine(cx+4, cy-2, 5, c);
+            lcd.drawFastHLine(cx+4, cy,   5, c);
+            lcd.drawFastHLine(cx+4, cy+2, 5, c);
+            break;
+        }
         default:            iconInfo(cx,cy,c); break;
     }
 }
@@ -2516,8 +2598,13 @@ static const char* getLabelForGi(int gi) {
         case 36: return "Game Shark";
         case 37: return ru ? cyrStr("Веб-отладка")  : "Web Debug";
         case 38: return ru ? cyrStr("Веб-консоль")  : "Web Debug";
-        case 41: return ru ? cyrStr("Внеш.вид >")   : "Appearance >";
+        case 41: return ru ? cyrStr("Внеш.вид >")    : "Appearance >";
         case 42: return ru ? cyrStr("Управление >") : "Controls >";
+        case 43: return ru ? cyrStr("Менеджер SD")  : "SD Manager";
+        case 44: return ru ? cyrStr("День")         : "Day";
+        case 45: return ru ? cyrStr("Месяц")        : "Month";
+        case 46: return ru ? cyrStr("Год")          : "Year";
+        case 47: return ru ? cyrStr("Дата и время >"): "Date & Time >";
     }
     return "";
 }
@@ -2744,10 +2831,10 @@ static uint8_t handleCategoryDetail(int x, int y) {
         if (gi == 26) return 0xA0;   // Check Update → OTA screen
         if (gi == 32) return 0xB0;   // Game Genie → открыть GG экран
         if (gi == 36) return 0xD0;   // Game Shark → открыть GS экран
-        if (gi == 25 || gi == 33 || gi == 37 || gi == 41 || gi == 42) {
-            // Debug→6 / Battery→7 / WebDebug→8 / Appearance→4 / Controls→5
+        if (gi == 25 || gi == 33 || gi == 37 || gi == 41 || gi == 42 || gi == 47) {
+            // Debug→6 / Battery→7 / WebDebug→8 / Appearance→4 / Controls→5 / DateTime→9
             _prevCat = _settingsCat;
-            _settingsCat = (gi==33)?7 : (gi==37)?8 : (gi==41)?4 : (gi==42)?5 : 6;
+            _settingsCat = (gi==33)?7 : (gi==37)?8 : (gi==41)?4 : (gi==42)?5 : (gi==47)?9 : 6;
             _catItemIdx  = 0;
             _detailOffset = 0;
             _detailOpenedMs = millis();
@@ -2755,6 +2842,7 @@ static uint8_t handleCategoryDetail(int x, int y) {
             return 0;
         }
         if (gi == 38) return 0xC0;   // Web Debug toggle → main.cpp
+        if (gi == 43) return 0xD4;   // SD Manager → on-device file browser
         settingInc(gi);
         drawCategoryDetail();
         return 0;  // НЕ BTN_A — значение изменено, экран обновлён
@@ -2938,9 +3026,10 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 32) return 0xB0;  // open Game Genie codes screen
             if (gi == 36) return 0xD0;  // open Game Shark codes screen
             if (gi == 38) return 0xC0;  // Web Debug toggle
-            if (gi == 25 || gi == 33 || gi == 37) {
+            if (gi == 43) return 0xD4;  // SD Manager
+            if (gi == 25 || gi == 33 || gi == 37 || gi == 41 || gi == 42 || gi == 47) {
                 _prevCat = _settingsCat;
-                _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
+                _settingsCat = (gi==33)?7 : (gi==37)?8 : (gi==41)?4 : (gi==42)?5 : (gi==47)?9 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -2954,9 +3043,10 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 32) return 0xB0;  // open Game Genie
             if (gi == 36) return 0xD0;  // open Game Shark
             if (gi == 38) return 0xC0;  // Web Debug toggle
-            if (gi == 25 || gi == 33 || gi == 37) {
+            if (gi == 43) return 0xD4;  // SD Manager
+            if (gi == 25 || gi == 33 || gi == 37 || gi == 41 || gi == 42 || gi == 47) {
                 _prevCat = _settingsCat;
-                _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
+                _settingsCat = (gi==33)?7 : (gi==37)?8 : (gi==41)?4 : (gi==42)?5 : (gi==47)?9 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -2971,9 +3061,10 @@ uint8_t settingsNavBtn(uint8_t btn) {
             if (gi == 32) return 0xB0;  // open Game Genie
             if (gi == 36) return 0xD0;  // open Game Shark
             if (gi == 38) return 0xC0;  // Web Debug toggle
-            if (gi == 25 || gi == 33 || gi == 37) {
+            if (gi == 43) return 0xD4;  // SD Manager
+            if (gi == 25 || gi == 33 || gi == 37 || gi == 41 || gi == 42 || gi == 47) {
                 _prevCat = _settingsCat;
-                _settingsCat = (gi == 33) ? 7 : (gi == 37) ? 8 : 6;
+                _settingsCat = (gi==33)?7 : (gi==37)?8 : (gi==41)?4 : (gi==42)?5 : (gi==47)?9 : 6;
                 _catItemIdx = 0; _detailOffset = 0; _detailOpenedMs = millis();
                 drawCategoryDetail(); return 0;
             }
@@ -3628,7 +3719,14 @@ static bool _otaAskUser(const char *cancelLabel, const char *actionLabel,
     lcd.drawString(actionLabel, 237, ty);
 
     uint32_t deadline = millis() + timeoutMs;
+    uint8_t prevBtn = 0xFF;
     while (millis() < deadline) {
+        buttons.update();
+        uint8_t cur = buttons.readCurrent();
+        uint8_t newBtn = cur & ~prevBtn;
+        prevBtn = cur;
+        if (newBtn & BTN_SEL) return false;  // физ. B = Cancel
+        if (newBtn & BTN_STA) return true;   // физ. A = Action
         if (!touch.isTouched()) { delay(20); continue; }
         int tx, ty2; touch.getXY(tx, ty2);
         if (ty2 >= by) return (tx >= 156);
@@ -3656,9 +3754,11 @@ static void _sdFwScan() {
         if (f.isDirectory()) { f.close(); continue; }
         const char *n = f.name();
         int len = strlen(n);
-        if (len < 4) { f.close(); continue; }
-        // Проверяем расширение .bin
-        if (n[len-4]!='.' || (n[len-3]!='b'&&n[len-3]!='B')) { f.close(); continue; }
+        if (len < 5) { f.close(); continue; }
+        // Проверяем расширение .bin (регистронезависимо)
+        if (n[len-4]!='.' || (n[len-3]!='b'&&n[len-3]!='B') ||
+            (n[len-2]!='i'&&n[len-2]!='I') || (n[len-1]!='n'&&n[len-1]!='N'))
+            { f.close(); continue; }
         // basename
         const char *sl = strrchr(n, '/');
         const char *base = sl ? sl + 1 : n;
@@ -3704,8 +3804,8 @@ static bool _sdNumpad(const char *correctPin) {
     };
     drawCells();
 
-    // Кнопки 1-9, 0, ←, OK — 4 строки × 3 кол. (умещаются в 240px)
-    const char *keys[] = { "1","2","3","4","5","6","7","8","9","←","0","OK" };
+    // Кнопки 1-9, 0, DEL, OK — 4 строки × 3 кол. (умещаются в 240px)
+    const char *keys[] = { "1","2","3","4","5","6","7","8","9","DEL","0","OK" };
     const int KW = 93, KH = 27, KGX = 5, KGY = 4;
     const int KX0 = WX + 10, KY0 = WY + 76;
 
@@ -3763,7 +3863,7 @@ static bool _sdNumpad(const char *correctPin) {
 
         // Физическая кнопка B = отмена
         buttons.update();
-        if (buttons.readCurrent() & BTN_B) return false;
+        if (buttons.readCurrent() & BTN_SEL) return false;
     }
 }
 
@@ -3842,12 +3942,12 @@ void sdOtaScreen() {
         lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
         lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
         lcd.setTextColor(t.textSec); lcd.setTextDatum(MC_DATUM);
-        lcd.drawString("Reset = Back", SCREEN_W/2, by + BTNBAR_H/2);
-        // ждём Reset (BTN_B)
+        lcd.drawString("B = Back", SCREEN_W/2, by + BTNBAR_H/2);
+        // ждём физ. B (BTN_SEL)
         bool prev = false;
         while (true) {
             buttons.update();
-            bool now = (buttons.readCurrent() & BTN_B) != 0;
+            bool now = (buttons.readCurrent() & BTN_SEL) != 0;
             if (now && !prev) return;
             prev = now; delay(20);
         }
@@ -3881,7 +3981,7 @@ void sdOtaScreen() {
         lcd.fillRect(0, by, SCREEN_W, BTNBAR_H, t.header);
         lcd.drawFastHLine(0, by, SCREEN_W, (uint16_t)COL_TOPBAR);
         lcd.setTextDatum(ML_DATUM); fsm(); lcd.setTextColor(t.textSec);
-        lcd.drawString("Reset=Back", 8, by + BTNBAR_H/2);
+        lcd.drawString("B=Back", 8, by + BTNBAR_H/2);
         lcd.setTextDatum(MR_DATUM);
         lcd.drawString("A=Flash", SCREEN_W - 8, by + BTNBAR_H/2);
     };
@@ -3894,14 +3994,14 @@ void sdOtaScreen() {
         uint8_t newBtn = cur & ~prevPad;
         prevPad        = cur;
 
-        if (newBtn & BTN_B) return;
+        if (newBtn & BTN_SEL) return;
         if (newBtn & BTN_UP) {
             if (sel > 0) { sel--; if (sel < off) off = sel; drawList(); }
         }
         if (newBtn & BTN_DOWN) {
             if (sel < _sdFwCount - 1) { sel++; if (sel >= off + FW_ROWS) off = sel - FW_ROWS + 1; drawList(); }
         }
-        if (newBtn & BTN_A) {
+        if (newBtn & BTN_STA) {
             // Подтверждение
             _otaDrawHeader("SD Update");
             fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);

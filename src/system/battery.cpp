@@ -1,7 +1,7 @@
 // ── battery.cpp ─ Мониторинг заряда LiPo + статистика ───────────────────────
-// Схема: LiPo(+) → R1=470kΩ → GPIO35 → R2=470kΩ → GND
+// Схема: LiPo(+) → R1=100kΩ → GPIO35 → R2=100kΩ → GND  + 100нФ на GPIO35→GND
 // Делитель: V_pin = V_bat / 2.  ADC: 12-bit, ATT_11db (0–3.3V).
-// V_bat = raw / 4095 × 3.3 × (R1+R2)/R2
+// V_bat = raw / 4095 × 3.3 × (R1+R2)/R2 × BAT_CAL_GAIN
 
 #include "system/battery.h"
 #include "config.h"
@@ -42,7 +42,7 @@ static float _rawToVbat(int32_t raw) {
 #if BAT_ADC_PIN >= 0
     constexpr float VREF = 3.3f;
     constexpr float DIV  = (float)(BAT_R_TOP + BAT_R_BOT) / (float)BAT_R_BOT;
-    return raw * (VREF / 4095.0f) * DIV;
+    return raw * (VREF / 4095.0f) * DIV * BAT_CAL_GAIN;
 #else
     (void)raw; return 0.0f;
 #endif
@@ -66,7 +66,7 @@ static int _voltToPct(float v) {
 
 void batteryInit() {
 #if BAT_ADC_PIN >= 0
-    analogSetAttenuation(ADC_11db);
+    analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);  // только GPIO35, не все каналы
     pinMode(BAT_ADC_PIN, INPUT);
     batteryUpdate();
 #endif
@@ -86,12 +86,17 @@ void batteryUpdate() {
     float newV = _rawToVbat(sum >> 4);
 
     // ── Детектирование зарядки ────────────────────────────────────────────────
-    // Сравниваем напряжение каждые 30 секунд (не 5 с — слишком шумно).
-    // Порог 100 мВ за 30 с >> ADC-шум (~30 мВ), но детектирует начало зарядки
-    // (первое подключение: скачок 100-300 мВ в первые 30 с).
+    // Fast path: скачок >80мВ за 5 с (между соседними вызовами) — зарядник только что подключён.
+    // _batV здесь ещё не обновлён, поэтому содержит предыдущий замер (5 с назад).
+    if (!_charging && _batV > 0.5f && (newV - _batV) > 0.080f) {
+        _charging      = true;
+        _chargeConfirm = 2;
+    }
+
+    // Slow path: каждые 30 с сравниваем с предыдущим снимком.
+    // Порог снижен до 30 мВ — покрывает стационарный режим CC (10-40 мВ/30 с).
     uint32_t ms = millis();
     if (_batVFor30s < 0.1f || _chargeChkMs == 0) {
-        // Первый замер — инициализируем
         _batVFor30s  = newV;
         _chargeChkMs = ms;
     } else if (ms - _chargeChkMs >= 30000u) {
@@ -99,18 +104,16 @@ void batteryUpdate() {
         _batVFor30s  = newV;
         _chargeChkMs = ms;
 
-        if (delta > 0.100f) {
-            // Напряжение выросло на >100мВ за 30с → зарядка
+        if (delta > 0.030f) {
+            // Напряжение выросло на >30мВ за 30с → зарядка (одно подтверждение достаточно)
             _chargeConfirm = min((int8_t)2, (int8_t)(_chargeConfirm + 1));
+            if (_chargeConfirm >= 1) _charging = true;
         } else if (delta < -0.040f) {
-            // Напряжение упало на >40мВ за 30с → разрядка
+            // Напряжение упало на >40мВ за 30с → зарядник отключён
             _chargeConfirm = max((int8_t)-2, (int8_t)(_chargeConfirm - 1));
+            if (_chargeConfirm <= -1) _charging = false;
         }
-        // иначе (±40..100мВ): стабильно — сохраняем предыдущее состояние
-
-        // Требуем 2 подтверждения подряд (60 с суммарно) — устойчивость к шуму
-        if      (_chargeConfirm >=  2) _charging = true;
-        else if (_chargeConfirm <= -2) _charging = false;
+        // иначе (±30..40мВ): стабильно — сохраняем предыдущее состояние
     }
 
     // Детектируем момент подключения зарядки (false → true)

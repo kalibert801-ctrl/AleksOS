@@ -44,6 +44,9 @@ void cfgLoad() {
     settings.soundType      = (SoundType)(doc["sndtype"] | 1);
     settings.timeH          = doc["timeh"]        | 12;
     settings.timeM          = doc["timem"]        | 0;
+    settings.timeDay        = doc["timed"]        | 1;
+    settings.timeMon        = doc["timemon"]      | 1;
+    settings.timeYear       = doc["timeyear"]     | 2025;
     settings.autoScroll     = doc["autoscroll"]   | 1;
     settings.diagButtons    = doc["diagbtn"]      | 0;
     settings.diagFPS        = doc["diagfps"]      | 0;
@@ -88,8 +91,8 @@ void cfgLoad() {
             if (slot >= 8) break;
             const char *s = v.as<const char*>();
             if (s) {
-                strncpy(settings.ggCodes[slot], s, 7);
-                settings.ggCodes[slot][7] = '\0';
+                strncpy(settings.ggCodes[slot], s, 8);
+                settings.ggCodes[slot][8] = '\0';
             }
             slot++;
         }
@@ -138,6 +141,9 @@ void cfgSave() {
     doc["sndtype"]    = (int)settings.soundType;
     doc["timeh"]      = settings.timeH;
     doc["timem"]      = settings.timeM;
+    doc["timed"]      = settings.timeDay;
+    doc["timemon"]    = settings.timeMon;
+    doc["timeyear"]   = settings.timeYear;
     doc["autoscroll"] = settings.autoScroll;
     doc["diagbtn"]    = settings.diagButtons;
     doc["diagfps"]    = settings.diagFPS;

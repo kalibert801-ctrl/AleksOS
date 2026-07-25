@@ -1,4 +1,4 @@
-/*
+﻿/*
 ** Nofrendo (c) 1998-2000 Matthew Conte (matt@conte.com)
 **
 **
@@ -41,7 +41,7 @@ static void map99_init(void)
    ppu_setvromswitch(map99_vromswitch);
 }
 
-mapintf_t map99_intf =
+const mapintf_t map99_intf =
 {
    99, /* mapper number */
    "VS. System", /* mapper name */

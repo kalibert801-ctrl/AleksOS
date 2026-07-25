@@ -57,7 +57,7 @@ static uint32_t _dotNextMs = 0;
 static constexpr uint16_t DOT_STEP_MS = 100;
 
 // ── Boot image ────────────────────────────────────────────────────────────────
-static uint8_t *_bootImg = nullptr;   // 320×240×2 bytes, pre-inverted RGB565 LE
+static uint8_t *_bootImg = nullptr;   // 320×240×2 bytes, RGB565 LE
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -73,7 +73,7 @@ static uint32_t lerpCol(uint8_t fr, uint8_t fg, uint8_t fb,
 }
 
 // Write a horizontal span from _bootImg to the display.
-// Uses the same raw pixel path as osd.cpp: swap_bytes=true, pre-inverted data.
+// swap_bytes=true: LE buffer, display expects BE on SPI.
 static void restoreImgRow(int y, int x0, int width) {
     if (!_bootImg || y < 0 || y >= SCREEN_H) return;
     int cx = (x0 < 0) ? 0 : x0;
@@ -183,23 +183,29 @@ void bootLogoLoad() {
         return;
     }
 
+    // boot.raw was stored pre-inverted (designed when pc.invert=true).
+    // Un-invert all pixels so they display correctly on the non-inverted display.
+    for (size_t i = 0; i < SIZE; i += 2) {
+        uint16_t raw = _bootImg[i] | ((uint16_t)_bootImg[i + 1] << 8);
+        raw = ~raw;
+        _bootImg[i]     = (uint8_t)(raw & 0xFF);
+        _bootImg[i + 1] = (uint8_t)(raw >> 8);
+    }
+
     // ── Pre-darken bottom strip ───────────────────────────────────────────────
-    // The image bottom (y ≥ DARK_START_Y) is dimmed to 25 % so the white dot
+    // The image bottom (y ≥ DARK_START_Y) is dimmed to 25 % so the dot
     // spinner and status text are legible over any photo content.
     for (int y = DARK_START_Y; y < SCREEN_H; y++) {
         for (int x = 0; x < SCREEN_W; x++) {
             int off = (y * SCREEN_W + x) * 2;
-            // Each pixel stored LE pre-inverted: raw = ~rgb565 & 0xFFFF
-            uint16_t raw   = _bootImg[off] | ((uint16_t)_bootImg[off+1] << 8);
-            uint16_t pixel = (~raw) & 0xFFFF;           // un-invert → RGB565
+            uint16_t pixel = _bootImg[off] | ((uint16_t)_bootImg[off + 1] << 8);
             // Reduce to 25 % brightness (>> 2 on each channel)
             uint8_t r5 = ((pixel >> 11) & 0x1F) >> 2;
             uint8_t g6 = ((pixel >>  5) & 0x3F) >> 2;
             uint8_t b5 = ( pixel        & 0x1F) >> 2;
             uint16_t dark     = ((uint16_t)r5 << 11) | ((uint16_t)g6 << 5) | b5;
-            uint16_t dark_inv = (~dark) & 0xFFFF;
-            _bootImg[off]     = dark_inv & 0xFF;
-            _bootImg[off + 1] = (dark_inv >> 8) & 0xFF;
+            _bootImg[off]     = (uint8_t)(dark & 0xFF);
+            _bootImg[off + 1] = (uint8_t)(dark >> 8);
         }
     }
 

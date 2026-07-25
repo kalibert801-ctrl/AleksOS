@@ -67,10 +67,19 @@ size_t webConsolePos() {
 }
 
 size_t webConsoleRead(size_t fromPos, char *outBuf, size_t maxLen, size_t *newPos) {
-    if (!maxLen || !outBuf) { if (newPos) *newPos = fromPos; return 0; }
+    if (!maxLen || !outBuf || !_mux) { if (newPos) *newPos = fromPos; return 0; }
+
+    if (xSemaphoreTake(_mux, pdMS_TO_TICKS(10)) != pdTRUE) {
+        if (newPos) *newPos = fromPos;
+        return 0;
+    }
 
     size_t cur = _total;
-    if (fromPos >= cur) { if (newPos) *newPos = cur; return 0; }
+    if (fromPos >= cur) {
+        xSemaphoreGive(_mux);
+        if (newPos) *newPos = cur;
+        return 0;
+    }
 
     size_t avail = cur - fromPos;
     if (avail > CON_BUF) { fromPos = cur - CON_BUF; avail = CON_BUF; }
@@ -86,6 +95,7 @@ size_t webConsoleRead(size_t fromPos, char *outBuf, size_t maxLen, size_t *newPo
         memcpy(outBuf + first, _buf,          toSend - first);
     }
 
+    xSemaphoreGive(_mux);
     if (newPos) *newPos = fromPos + toSend;
     return toSend;
 }

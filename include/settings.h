@@ -41,9 +41,12 @@ typedef struct {
     /* Вибро */
     unsigned char vibroEnabled;
     unsigned char vibroStrength;
-    /* ── Время (обновляется time_manager) ── */
+    /* ── Время и дата (обновляется time_manager) ── */
     unsigned char timeH;    // часы   0–23
     unsigned char timeM;    // минуты 0–59
+    unsigned char timeDay;  // день   1–31
+    unsigned char timeMon;  // месяц  1–12
+    unsigned short timeYear;// год  2025–2099
     unsigned char autoScroll; // авто-прокрутка при удержании кнопки
     // ── Диагностика (вывод в Serial) ────────────────────────
     unsigned char diagButtons;  // нажатия кнопок
@@ -62,7 +65,7 @@ typedef struct {
     // Коды применяются к ROM при запуске через патч CPU памяти.
     // 6-символьный код → адрес+значение; 8-символьный → адрес+значение+сравнение.
     // Максимум 8 кодов, хранятся как 8-байтные строки (7 символов + \0).
-    char          ggCodes[8][8];  // 8 слотов по 7 символов кода Game Genie
+    char          ggCodes[8][9];  // 8 слотов по 8 символов кода Game Genie + \0
     unsigned char ggEnabled;      // 1 = применять коды при запуске
     // ── Sleep / Scanlines ────────────────────────────────────
     unsigned char sleepTimeout;   // 0=off, 1=1мин, 2=2мин, 5=5мин, 10=10мин
@@ -113,6 +116,9 @@ inline void settingsDefault(Settings &s) {
     s.vibroStrength = 70;
     s.timeH         = 12;
     s.timeM         = 0;
+    s.timeDay       = 1;
+    s.timeMon       = 1;
+    s.timeYear      = 2025;
     s.autoScroll    = 1;
     s.diagButtons   = 0;
     s.diagFPS       = 0;

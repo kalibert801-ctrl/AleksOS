@@ -4,6 +4,7 @@
 #include "network/ntp_manager.h"
 #include "settings.h"
 #include "system/time_manager.h"
+#include "storage/config_manager.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -55,24 +56,28 @@ void ntpSync() {
     configTime(_utcOffsetSec, 0,
                "pool.ntp.org", "time.nist.gov", "time.google.com");
 
-    // 3. Ждём синхронизации
+    // 3. Ждём синхронизации (не более 6 сек)
     struct tm timeinfo = {};
-    uint32_t deadline = millis() + 10000;
-    while (millis() < deadline) {
-        if (getLocalTime(&timeinfo, 2000)) {
-            _synced = true;
-            int h = timeinfo.tm_hour;
-            int m = timeinfo.tm_min;
-            timeSet(h, m);
-            settings.timeH = (unsigned char)h;
-            settings.timeM = (unsigned char)m;
-            Serial.printf("[NTP] OK — %02d:%02d  (UTC%+ld)\n",
-                          h, m, _utcOffsetSec / 3600);
-            return;
-        }
-        delay(500);
+    if (getLocalTime(&timeinfo, 6000)) {
+        _synced = true;
+        int h    = timeinfo.tm_hour;
+        int m    = timeinfo.tm_min;
+        int d    = timeinfo.tm_mday;
+        int mon  = timeinfo.tm_mon + 1;          // tm_mon: 0–11 → 1–12
+        int year = timeinfo.tm_year + 1900;
+        timeSet(h, m);
+        timeSetDate((uint8_t)d, (uint8_t)mon, (uint16_t)year);
+        settings.timeH   = (unsigned char)h;
+        settings.timeM   = (unsigned char)m;
+        settings.timeDay = (unsigned char)d;
+        settings.timeMon = (unsigned char)mon;
+        settings.timeYear= (unsigned short)year;
+        cfgSave();
+        Serial.printf("[NTP] OK — %02d:%02d  %02d.%02d.%04d  (UTC%+ld)\n",
+                      h, m, d, mon, year, _utcOffsetSec / 3600);
+    } else {
+        Serial.println("[NTP] Timeout — time not synced.");
     }
-    Serial.println("[NTP] Timeout — time not synced.");
 }
 
 bool ntpIsSynced()     { return _synced; }

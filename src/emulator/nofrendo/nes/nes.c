@@ -136,8 +136,8 @@ static nes6502_memwrite default_writehandler[] =
 static void build_address_handlers(nes_t *machine)
 {
    int count, num_handlers = 0;
-   mapintf_t *intf;
-   
+   const mapintf_t *intf;
+
    ASSERT(machine);
    intf = machine->mmc->intf;
 
@@ -296,7 +296,7 @@ void nes_nmi(void)
 static void nes_renderframe(bool draw_flag)
 {
    int elapsed_cycles;
-   mapintf_t *mapintf = nes.mmc->intf;
+   const mapintf_t *mapintf = nes.mmc->intf;
    int in_vblank = 0;
 
    while (262 != nes.scanline)

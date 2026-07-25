@@ -48,9 +48,11 @@ void updateAutoBrightness() {
     // при небольшом затенении сразу падал до 70%.
     uint8_t target = (uint8_t)map(constrain(smoothed, 0, 4095), 4095, 0, 10, 100);
 
-    // Обновляем только если изменение > 2% (гистерезис)
-    if (abs((int)target - (int)settings.brightness) > 2) {
-        settings.brightness = target;
+    // Обновляем только если изменение > 2% (гистерезис).
+    // Не трогаем settings.brightness — это пользовательская настройка.
+    static uint8_t _autoTarget = 0;
+    if (abs((int)target - (int)_autoTarget) > 2) {
+        _autoTarget = target;
         setBrightness(target);
     }
 }
