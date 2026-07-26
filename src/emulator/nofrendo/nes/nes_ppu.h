@@ -114,6 +114,8 @@ typedef struct ppu_s
 } ppu_t;
 
 
+extern bool ppu_checkzapperhit(bitmap_t *bmp, int x, int y);
+
 /* TODO: should use this pointers */
 extern void ppu_setlatchfunc(ppulatchfunc_t func);
 extern void ppu_setvromswitch(ppuvromswitch_t func);

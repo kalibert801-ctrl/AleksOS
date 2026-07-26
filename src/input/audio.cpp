@@ -20,12 +20,6 @@
 #include "driver/rtc_io.h"
 #include <math.h>
 
-// minimp3 — single-header MP3 decoder (https://github.com/lieff/minimp3)
-// Добавить в platformio.ini: https://github.com/lieff/minimp3.git
-#define MINIMP3_IMPLEMENTATION
-#define MINIMP3_ONLY_MP3
-#include <minimp3.h>
-
 static inline void restoreTouch() { rtc_gpio_deinit(GPIO_NUM_25); }
 
 #define AUDIO_SR      22050      // sample rate для тонов
@@ -67,12 +61,6 @@ static bool          _sdSounds = false;
 // ── DMA буфер (моно, статический — не занимает стек задачи) ───
 static uint16_t _i2sBuf[WAV_DMA_LEN];
 static bool     _i2sInstalled = false;  // отслеживаем состояние драйвера
-
-// ── MP3 статические буферы (в DRAM, не на стеке задачи) ───────
-// mp3dec_t ≈ 4 KB; inBuf 4 KB; pcmBuf 4.5 KB — итого ~12.5 KB DRAM
-static mp3dec_t  _mp3dec;
-static uint8_t   _mp3In[4096];
-static mp3d_sample_t _mp3Pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];  // 2304 × int16
 
 // ── I2S старт/стоп (общий для WAV и тонов) ────────────────────
 static bool i2sStart(uint32_t sr) {
@@ -171,10 +159,19 @@ static void playWavFile(const char *path) {
         for (int i = 0; i < samples; i++) {
             uint16_t dacWord;
             if (bitsPerSample == 8) {
-                dacWord = (uint16_t)readBuf[i * frameBytes] << 8;
+                int mono = (channels == 2)
+                    ? ((int)readBuf[i * frameBytes] + (int)readBuf[i * frameBytes + 1]) / 2
+                    : (int)readBuf[i * frameBytes];
+                dacWord = (uint16_t)(uint8_t)mono << 8;
             } else {
-                int16_t s = (int16_t)(readBuf[i * frameBytes] |
-                                     (readBuf[i * frameBytes + 1] << 8));
+                int16_t l = (int16_t)(readBuf[i * frameBytes] | (readBuf[i * frameBytes + 1] << 8));
+                int16_t s;
+                if (channels == 2) {
+                    int16_t r = (int16_t)(readBuf[i * frameBytes + 2] | (readBuf[i * frameBytes + 3] << 8));
+                    s = (int16_t)(((int32_t)l + r) / 2);
+                } else {
+                    s = l;
+                }
                 dacWord = (uint16_t)((uint8_t)((s + 32768) >> 8)) << 8;
             }
             if (vol < 100) {
@@ -192,81 +189,6 @@ static void playWavFile(const char *path) {
 
     f.close();
     i2sStop();
-}
-
-// ── Воспроизведение MP3 файла (minimp3) ──────────────────────────────────────
-// Декодирует фрейм за фреймом (1152 сэмпла/фрейм), стерео → моно для DAC.
-static void playMp3File(const char *path) {
-    File f = SD.open(path, FILE_READ);
-    if (!f) return;
-
-    mp3dec_init(&_mp3dec);
-
-    int inLen = 0;
-    const int vol = settings.volume > 100 ? 100 : (int)settings.volume;
-    uint32_t curSr = 0;
-    bool i2sOk = false;
-
-    while (!_stopReq) {
-        // Дозаполняем входной буфер из SD
-        if (inLen < (int)sizeof(_mp3In) && f.available()) {
-            int got = f.read(_mp3In + inLen, sizeof(_mp3In) - inLen);
-            if (got > 0) inLen += got;
-        }
-        if (inLen == 0) break;
-
-        mp3dec_frame_info_t fi;
-        int samples = mp3dec_decode_frame(&_mp3dec, _mp3In, inLen, _mp3Pcm, &fi);
-
-        // Сдвигаем буфер на обработанный фрейм
-        if (fi.frame_bytes > 0) {
-            if (fi.frame_bytes < inLen)
-                memmove(_mp3In, _mp3In + fi.frame_bytes, inLen - fi.frame_bytes);
-            inLen -= fi.frame_bytes;
-        } else if (samples == 0) {
-            // Недостаточно данных и файл закончился — выходим
-            if (!f.available()) break;
-            continue;
-        }
-        if (samples <= 0) continue;
-
-        // Перезапускаем I2S если sample rate изменился (редко, но бывает)
-        if (!i2sOk || fi.hz != curSr) {
-            if (i2sOk) i2sStop();
-            if (!i2sStart(fi.hz)) break;
-            i2sOk = true; curSr = fi.hz;
-        }
-
-        // Количество фреймов (mono = samples, stereo = samples/2)
-        int frames = (fi.channels > 1) ? samples / 2 : samples;
-
-        // Пишем в I2S чанками WAV_DMA_LEN
-        int out = 0;
-        while (out < frames && !_stopReq) {
-            int chunk = min(frames - out, (int)WAV_DMA_LEN);
-            for (int i = 0; i < chunk; i++) {
-                int16_t s;
-                if (fi.channels > 1) {
-                    s = (int16_t)(((int32_t)_mp3Pcm[(out + i) * 2] +
-                                   (int32_t)_mp3Pcm[(out + i) * 2 + 1]) / 2);
-                } else {
-                    s = _mp3Pcm[out + i];
-                }
-                uint16_t dacWord = (uint16_t)((uint8_t)((s + 32768) >> 8)) << 8;
-                if (vol < 100) {
-                    int centered = (int)(dacWord >> 8) - 128;
-                    dacWord = (uint16_t)(uint8_t)(centered * vol / 100 + 128) << 8;
-                }
-                _i2sBuf[i] = dacWord;
-            }
-            size_t w;
-            i2s_write(WAV_I2S, _i2sBuf, (size_t)(chunk * 2), &w, pdMS_TO_TICKS(200));
-            out += chunk;
-        }
-    }
-
-    f.close();
-    if (i2sOk) i2sStop();
 }
 
 // ── Синтез синус-волны (I2S DAC) ──────────────────────────────
@@ -317,10 +239,7 @@ static void audioTask(void*) {
         if (!settings.soundEnabled) { _busy = false; continue; }
 
         if (_req.type == AUDIO_WAV) {
-            const char *dot = strrchr(_req.path, '.');
-            bool isMp3 = dot && (dot[1]=='m'||dot[1]=='M') && (dot[2]=='p'||dot[2]=='P') && dot[3]=='3' && dot[4]=='\0';
-            if (isMp3) playMp3File(_req.path);
-            else                                       playWavFile(_req.path);
+            playWavFile(_req.path);
         } else if (_req.type == AUDIO_TONE) {
             playSineSeq(_req.notes, _req.noteCount);
         }
@@ -400,8 +319,6 @@ void soundOK() {
     triggerTone(n, 6);
 }
 
-bool audioIsBusy() { return _busy; }
-
 void soundStop() {
     if (!_busy) return;
     _stopReq = true;
@@ -410,12 +327,3 @@ void soundStop() {
     _stopReq = false;
 }
 
-void soundPlayPath(const char *path) {
-    if (!_task || _busy) return;
-    strncpy(_req.path, path, sizeof(_req.path) - 1);
-    _req.path[sizeof(_req.path) - 1] = '\0';
-    _req.type = AUDIO_WAV;
-    _busy = true;
-    _stopReq = false;
-    xTaskNotifyGive(_task);
-}

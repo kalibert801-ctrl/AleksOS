@@ -26,12 +26,18 @@ static float    _batV         = 0.0f;
 static bool     _charging     = false;
 static bool     _prevCharging = false;
 
-// Детектирование зарядки: сравниваем каждые 30 секунд.
-// Порог 100 мВ за 30 с — уверенно выше шума АЦП (~30 мВ).
-// При первом подключении TP4056 напряжение скачет на 100-300 мВ мгновенно.
-static float    _batVFor30s   = 0.0f;  // снимок напряжения 30 секунд назад
-static uint32_t _chargeChkMs  = 0;     // момент последней проверки
-static int8_t   _chargeConfirm = 0;    // счётчик подтверждений (+ зарядка, - разрядка)
+// Коррекция процента во время зарядки.
+// Проблема: TP4056 держит клеммное напряжение ~4.2V — АЦП читает 100%, хотя реальный заряд ниже.
+// Решение: запоминаем % ДО начала зарядки и медленно увеличиваем во время неё.
+static int      _batPctBeforeCharge = -1;  // % в момент начала зарядки
+static uint32_t _chargeStartMs      =  0;  // millis() когда началась зарядка
+
+// Детектирование скачка/провала напряжения при подключении/отключении зарядника.
+static float    _prevV       = 0.0f;
+// Последний известный % без зарядки (для старта с уже подключённым зарядником).
+static int      _lastKnownPct = -1;
+// Защита от сохранения цикла ДО загрузки статистики с SD.
+static bool     _statsLoaded = false;
 
 static BattStats _stats       = { 0, 0, 0 };
 static uint32_t  _lastSaveMs  = 0;   // для авто-сохранения каждые 5 мин
@@ -76,7 +82,6 @@ void batteryUpdate() {
 #if BAT_ADC_PIN >= 0
     // 16 замеров × 2 мс = 32 мс.
     // ТРЕБУЕТСЯ: конденсатор 100нФ между GPIO35 и GND для стабилизации напряжения.
-    // Без него S/H АЦП (~100пФ) не успевает зарядиться через 50кОм источника (RC≈5мкс).
     delay(5);   // пре-settle: даём конденсатору зарядиться перед первым замером
     int32_t sum = 0;
     for (int i = 0; i < 16; i++) {
@@ -86,45 +91,55 @@ void batteryUpdate() {
     float newV = _rawToVbat(sum >> 4);
 
     // ── Детектирование зарядки ────────────────────────────────────────────────
-    // Fast path: скачок >80мВ за 5 с (между соседними вызовами) — зарядник только что подключён.
-    // _batV здесь ещё не обновлён, поэтому содержит предыдущий замер (5 с назад).
-    if (!_charging && _batV > 0.5f && (newV - _batV) > 0.080f) {
-        _charging      = true;
-        _chargeConfirm = 2;
-    }
+    // Два критерия: порог напряжения (CV-режим TP4056 при высоком заряде)
+    // ИЛИ резкий скачок напряжения (CC-режим при низком заряде — зарядник только подключили).
+    // Резкий провал = зарядник отключён (клеммное напряжение упало до ОХХ батареи).
+    float vDelta = (_prevV > 0.5f) ? (newV - _prevV) : 0.0f;
+    _prevV = newV;
 
-    // Slow path: каждые 30 с сравниваем с предыдущим снимком.
-    // Порог снижен до 30 мВ — покрывает стационарный режим CC (10-40 мВ/30 с).
-    uint32_t ms = millis();
-    if (_batVFor30s < 0.1f || _chargeChkMs == 0) {
-        _batVFor30s  = newV;
-        _chargeChkMs = ms;
-    } else if (ms - _chargeChkMs >= 30000u) {
-        float delta = newV - _batVFor30s;
-        _batVFor30s  = newV;
-        _chargeChkMs = ms;
+    bool suddenJump = (vDelta >=  0.15f && newV >= 3.90f);  // подключение зарядника
+    bool suddenDrop = (vDelta <= -0.12f);                    // отключение зарядника
 
-        if (delta > 0.030f) {
-            // Напряжение выросло на >30мВ за 30с → зарядка (одно подтверждение достаточно)
-            _chargeConfirm = min((int8_t)2, (int8_t)(_chargeConfirm + 1));
-            if (_chargeConfirm >= 1) _charging = true;
-        } else if (delta < -0.040f) {
-            // Напряжение упало на >40мВ за 30с → зарядник отключён
-            _chargeConfirm = max((int8_t)-2, (int8_t)(_chargeConfirm - 1));
-            if (_chargeConfirm <= -1) _charging = false;
-        }
-        // иначе (±30..40мВ): стабильно — сохраняем предыдущее состояние
-    }
+    if (newV >= 4.18f || suddenJump)
+        _charging = true;
+    else if (newV < 4.05f || suddenDrop)
+        _charging = false;
 
     // Детектируем момент подключения зарядки (false → true)
-    if (_charging && !_prevCharging) {
-        _stats.cycles++;
-        _stats.sessionSec = 0;   // сбрасываем счётчик сессии
-        batteryStatsSave();
+    bool justStartedCharging = _charging && !_prevCharging;
+    if (justStartedCharging) {
+        // Базовый % берём из актуального значения (если уже было замерено),
+        // иначе из последнего сохранённого на SD (для старта с подключённым зарядником).
+        if (_batPct >= 0)
+            _batPctBeforeCharge = _batPct;
+        else if (_lastKnownPct >= 0)
+            _batPctBeforeCharge = _lastKnownPct;
+        else
+            _batPctBeforeCharge = 0;
+        _chargeStartMs = millis();
+        // Счётчик цикла только после загрузки статистики с SD (иначе перезапишем).
+        if (_statsLoaded) {
+            _stats.cycles++;
+            _stats.sessionSec = 0;
+            batteryStatsSave();
+        }
     }
     _prevCharging = _charging;
-    _batV   = newV;
-    _batPct = _voltToPct(_batV);
+    _batV = newV;
+
+    if (!_charging) {
+        // Зарядник отключён: реальное напряжение надёжно
+        _batPct             = _voltToPct(_batV);
+        _batPctBeforeCharge = -1;
+        _lastKnownPct       = _batPct;   // обновляем последний известный %
+    } else {
+        // Зарядник подключён: клеммное напряжение завышено зарядником —
+        // не доверяем ему для расчёта %. Берём % до начала зарядки и медленно
+        // прибавляем: +1% каждую минуту (≈100 мин на полный заряд).
+        int base = (_batPctBeforeCharge >= 0) ? _batPctBeforeCharge : 0;
+        int inc  = (int)((millis() - _chargeStartMs) / 60000u);   // +1% / мин
+        _batPct  = min(99, base + inc);  // 100% только после отключения и замера
+    }
 #endif
 }
 
@@ -136,15 +151,18 @@ bool  batteryCharging() { return _charging; }
 
 void batteryStatsLoad() {
     File f = SD.open(BAT_STATS_FILE, FILE_READ);
-    if (!f) return;
+    if (!f) { _statsLoaded = true; return; }   // файла нет — состояние чистое, разрешаем сохранять
     StaticJsonDocument<128> doc;
     if (!deserializeJson(doc, f)) {
         _stats.sessionSec = doc["session"] | (uint32_t)0;
         _stats.totalSec   = doc["total"]   | (uint32_t)0;
         _stats.cycles     = doc["cycles"]  | (uint32_t)0;
+        int sp = doc["pct"] | -1;
+        if (sp >= 0 && sp <= 100) _lastKnownPct = sp;
     }
     f.close();
-    _lastSaveMs = millis();
+    _lastSaveMs   = millis();
+    _statsLoaded  = true;
 }
 
 void batteryStatsSave() {
@@ -154,6 +172,7 @@ void batteryStatsSave() {
     doc["session"] = _stats.sessionSec;
     doc["total"]   = _stats.totalSec;
     doc["cycles"]  = _stats.cycles;
+    if (_batPct >= 0) doc["pct"] = _batPct;   // сохраняем последний % для старта с зарядником
     serializeJson(doc, f);
     f.close();
     _lastSaveMs = millis();

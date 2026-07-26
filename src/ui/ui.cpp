@@ -674,16 +674,16 @@ static bool _menuConfirmDelete(const char *name) {
 }
 
 // ── Три-точечное контекстное меню ──────────────────────────────
-// Возвращает: 0=ничего, 1=Settings, 2=Gallery, 3=Music Player, 4=WebUpload, 5=Gravity
+// Возвращает: 0=ничего, 1=Settings, 2=Gallery, 3=WebUpload, 4=Gravity
 static uint8_t _menuDotMenu() {
     const Theme565& t = getTheme();
     bool ru = (settings.language==LANG_RU);
     // Используем String чтобы cyrStr-буферы не перезаписывались
     static const char *sortEN[] = {"Sort A-Z","Sort Z-A","Sort Size","* Favs First","Sort Default"};
     static const char *sortRU[] = {"А-Я","Я-А","По размеру","* Избр. верх","По умолч."};
-    static const char *itemEN[] = {"","Delete ROM","Gallery","Music Player","Web Upload","Gravity","Settings"};
-    static const char *itemRU[] = {"","Удалить ROM","Галерея","Плеер","Загрузить","Gravity","Настройки"};
-    const int N = 7;
+    static const char *itemEN[] = {"","Delete ROM","Gallery","Web Upload","Gravity","Settings"};
+    static const char *itemRU[] = {"","Удалить ROM","Галерея","Загрузить","Gravity","Настройки"};
+    const int N = 6;
     // Строим String-массив (копирует cyrStr-содержимое)
     String itemStrs[N];
     itemStrs[0] = ru ? cyrStr(sortRU[_sortMode % 5]) : sortEN[_sortMode % 5];
@@ -780,16 +780,13 @@ static uint8_t _menuDotMenu() {
         case 2:  // Gallery
             menuDraw();
             return 2;
-        case 3:  // Music Player
+        case 3:  // Web Upload
             menuDraw();
             return 3;
-        case 4:  // Web Upload
+        case 4:  // Gravity Defied
             menuDraw();
             return 4;
-        case 5:  // Gravity Defied
-            menuDraw();
-            return 5;
-        case 6:  // Settings
+        case 5:  // Settings
             menuDraw();
             return 1;
         default:
@@ -1012,9 +1009,8 @@ uint8_t menuHandleTouch(int x, int y, int &romAction) {
             uint8_t r = _menuDotMenu();
             if (r == 1) return BTN_SEL;  // → Settings
             if (r == 2) return 0xD0;     // → Gallery
-            if (r == 3) return 0xD1;     // → Music Player
-            if (r == 4) return 0xD2;     // → Web Upload
-            if (r == 5) return 0xD3;     // → Gravity Defied
+            if (r == 3) return 0xD2;     // → Web Upload
+            if (r == 4) return 0xD3;     // → Gravity Defied
             return 0;
         }
         return 0;
@@ -2342,6 +2338,26 @@ static void infoScrollBy(int delta) {
     int maxS=max(0,infoTotalH()-INFO_AREA);
     _infoScroll=constrain(_infoScroll+delta,0,maxS);
     drawInfoScreen(_settingsCat == 7 ? "BATTERY" : "INFO");
+}
+
+// ── Обновление экрана батареи в настройках (вызывать из loop() в S_SETTINGS) ──
+// Перерисовывает экран батареи раз в 5 с, пока он открыт.
+void settingsBatteryTick() {
+    static uint32_t _lastBat  = 0;
+    static int      _prevCat7 = 0;
+    int onBat = (_settingsCat == 7) ? 1 : 0;
+
+    if (onBat && !_prevCat7) _lastBat = 0;  // вошли в экран — обновить сразу
+    _prevCat7 = onBat;
+    if (!onBat) return;
+
+    uint32_t ms = millis();
+    if (_lastBat != 0 && ms - _lastBat < 5000u) return;
+    _lastBat = ms;
+
+    batteryUpdate();
+    buildBatteryRows();
+    drawInfoScreen("BATTERY");
 }
 
 // ── Детальная категория настроек ───────────────────────────────
@@ -5265,375 +5281,6 @@ static void _galMoveSel(int delta) {
     }
 }
 
-// ══════════════════════════════════════════════════════════════
-// MUSIC PLAYER
-// ══════════════════════════════════════════════════════════════
-// MUSIC PLAYER — воспроизведение WAV/MP3 из /Music на SD
-// Функции: авто-переход, перемешивание, пред/след, строка "сейчас играет"
-// ══════════════════════════════════════════════════════════════
-#include "input/audio.h"
-
-#define MP_MAX_FILES  32
-#define MP_HDR_H      30
-#define MP_NP_H       36    // строка "сейчас играет"
-#define MP_BAR_H      40    // подвал
-#define MP_ROW_H      26
-#define MP_LIST_Y     (MP_HDR_H + MP_NP_H)
-#define MP_ROWS       ((SCREEN_H - MP_LIST_Y - MP_BAR_H) / MP_ROW_H)
-
-static char _mpFiles[MP_MAX_FILES][48];
-static int  _mpCount   = 0;
-static int  _mpSel     = 0;
-static int  _mpOffset  = 0;
-static int  _mpPlaying = -1;
-static bool _mpShuffle = false;
-
-static void _mpScan() {
-    _mpCount = 0;
-    File dir = SD.open("/Music");
-    if (!dir || !dir.isDirectory()) return;
-    while (_mpCount < MP_MAX_FILES) {
-        File f = dir.openNextFile();
-        if (!f) break;
-        if (!f.isDirectory()) {
-            const char *raw = f.name();
-            const char *slash = strrchr(raw, '/');
-            const char *name = slash ? slash + 1 : raw;
-            int len = strlen(name);
-            if (len > 4) {
-                char ext[5];
-                for (int i = 0; i < 4; i++) ext[i] = tolower((unsigned char)name[len - 4 + i]);
-                ext[4] = '\0';
-                if (strcmp(ext, ".wav") == 0 || strcmp(ext, ".mp3") == 0) {
-                    strncpy(_mpFiles[_mpCount], name, 47);
-                    _mpFiles[_mpCount][47] = '\0';
-                    _mpCount++;
-                }
-            }
-        }
-        f.close();
-    }
-    dir.close();
-}
-
-static void _mpPlaySelected() {
-    if (_mpSel < 0 || _mpSel >= _mpCount) return;
-    if (audioIsBusy()) soundStop();
-    char path[64];
-    snprintf(path, sizeof(path), "/Music/%s", _mpFiles[_mpSel]);
-    soundPlayPath(path);
-    _mpPlaying = _mpSel;
-}
-
-// Убираем расширение из имени файла для отображения
-static void _mpDispName(const char *src, char *dst, int dstSize) {
-    strncpy(dst, src, dstSize - 1);
-    dst[dstSize - 1] = '\0';
-    int len = (int)strlen(dst);
-    for (int i = len - 1; i > 0 && i > len - 6; i--) {
-        if (dst[i] == '.') { dst[i] = '\0'; break; }
-    }
-}
-
-static void _mpDrawNowPlaying() {
-    const Theme565& t = getTheme();
-    bool ru = (settings.language == LANG_RU);
-    bool playing = (_mpPlaying >= 0) && audioIsBusy();
-
-    uint16_t barBg = playing ? t.selected : t.rowOdd;
-    lcd.fillRect(0, MP_HDR_H, SCREEN_W, MP_NP_H, barBg);
-    lcd.drawFastHLine(0, MP_HDR_H, SCREEN_W, t.accent);
-    lcd.drawFastHLine(0, MP_HDR_H + MP_NP_H - 1, SCREEN_W, (uint16_t)COL_SEP);
-
-    int cy = MP_HDR_H + MP_NP_H / 2;
-    uint16_t fg = playing ? (t.selText ? t.selText : (uint16_t)COL_WHITE) : t.textSec;
-
-    if (_mpCount == 0) {
-        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
-        lcd.drawString(ru ? cyrStr("Нет файлов в /Music") : "No audio files in /Music",
-                       SCREEN_W / 2, cy);
-        return;
-    }
-
-    // Иконка: ▶ при воспроизведении, • при остановке
-    if (playing) {
-        lcd.fillTriangle(7, cy - 6, 7, cy + 6, 17, cy, t.accent);
-    } else {
-        lcd.fillCircle(12, cy, 4, t.textSec);
-    }
-
-    // Имя трека без расширения
-    int showIdx = playing ? _mpPlaying : _mpSel;
-    char disp[48];
-    _mpDispName(_mpFiles[showIdx], disp, sizeof(disp));
-    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(fg);
-    lcd.drawString(disp, 26, cy);
-
-    // Счётчик X/N справа
-    char num[8]; snprintf(num, sizeof(num), "%d/%d", showIdx + 1, _mpCount);
-    lcd.setTextDatum(MR_DATUM); lcd.setTextColor(playing ? fg : t.textSec);
-    lcd.drawString(num, SCREEN_W - 8, cy);
-}
-
-static void _mpDrawList() {
-    const Theme565& t = getTheme();
-    bool ru = (settings.language == LANG_RU);
-    int listH = SCREEN_H - MP_LIST_Y - MP_BAR_H;
-    lcd.fillRect(0, MP_LIST_Y, SCREEN_W, listH, t.bg);
-
-    if (_mpCount == 0) return;
-
-    for (int r = 0; r < MP_ROWS; r++) {
-        int idx = _mpOffset + r;
-        if (idx >= _mpCount) break;
-        int ry = MP_LIST_Y + r * MP_ROW_H;
-        bool isSel     = (idx == _mpSel);
-        bool isPlaying = (idx == _mpPlaying) && audioIsBusy();
-        uint16_t bg = isSel ? t.selected : (r % 2 ? t.rowOdd : t.rowEven);
-        uint16_t fg = isSel ? (t.selText ? t.selText : (uint16_t)COL_WHITE)
-                            : (isPlaying ? t.accent : t.textPri);
-        lcd.fillRect(0, ry, SCREEN_W, MP_ROW_H, bg);
-        lcd.drawFastHLine(0, ry + MP_ROW_H - 1, SCREEN_W, (uint16_t)COL_SEP);
-        if (isPlaying)
-            lcd.fillTriangle(7, ry + 7, 7, ry + MP_ROW_H - 7, 15, ry + MP_ROW_H / 2, fg);
-        char numBuf[4]; snprintf(numBuf, sizeof(numBuf), "%d", idx + 1);
-        fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
-        lcd.drawString(numBuf, isPlaying ? 22 : 8, ry + MP_ROW_H / 2);
-        lcd.setTextColor(fg);
-        lcd.drawString(_mpFiles[idx], isPlaying ? 36 : 28, ry + MP_ROW_H / 2);
-    }
-}
-
-static void _mpDrawFull() {
-    const Theme565& t = getTheme();
-    bool ru = (settings.language == LANG_RU);
-    lcd.fillScreen(t.bg);
-
-    // Шапка
-    lcd.fillRect(0, 0, SCREEN_W, MP_HDR_H, t.header);
-    lcd.drawFastHLine(0, MP_HDR_H - 1, SCREEN_W, t.accent);
-    // Иконка нотки
-    int mx = 18, my = MP_HDR_H / 2;
-    lcd.fillRect(mx, my - 5, 2, 9, t.accent);
-    lcd.fillRect(mx + 5, my - 7, 2, 8, t.accent);
-    lcd.fillRect(mx, my - 5, 7, 2, t.accent);
-    lcd.fillCircle(mx - 1, my + 4, 3, t.accent);
-    lcd.fillCircle(mx + 4, my + 1, 3, t.accent);
-    // Заголовок
-    if (ru) {
-        fmd(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_GOLD);
-        const char *s = cyrStr("МУЗЫКА");
-        lcd.drawString(s, SCREEN_W / 2, MP_HDR_H / 2);
-        lcd.drawString(s, SCREEN_W / 2 + 1, MP_HDR_H / 2);
-    } else {
-        flg(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor((uint16_t)COL_GOLD);
-        lcd.drawString("MUSIC", SCREEN_W / 2, MP_HDR_H / 2);
-    }
-    // Перемешивание / счётчик справа
-    fsm(); lcd.setTextDatum(MR_DATUM);
-    if (_mpShuffle) {
-        lcd.setTextColor(t.accent);
-        lcd.drawString("RND", SCREEN_W - 8, MP_HDR_H / 2);
-    } else if (_mpCount > 0) {
-        lcd.setTextColor(t.textSec);
-        char cnt[8]; snprintf(cnt, sizeof(cnt), "%d", _mpCount);
-        lcd.drawString(cnt, SCREEN_W - 8, MP_HDR_H / 2);
-    }
-
-    _mpDrawNowPlaying();
-    _mpDrawList();
-
-    // Подвал — 4 кнопки: НАЗАД | << | ИГРАТЬ/СТОП | >>
-    int fy = SCREEN_H - MP_BAR_H;
-    lcd.fillRect(0, fy, SCREEN_W, MP_BAR_H, t.header);
-    lcd.drawFastHLine(0, fy, SCREEN_W, t.accent);
-    int bw = SCREEN_W / 4;  // 80px на кнопку
-    lcd.drawFastVLine(bw,     fy + 4, MP_BAR_H - 8, t.accent);
-    lcd.drawFastVLine(bw * 2, fy + 4, MP_BAR_H - 8, t.accent);
-    lcd.drawFastVLine(bw * 3, fy + 4, MP_BAR_H - 8, t.accent);
-    int cy = fy + MP_BAR_H / 2;
-    fsm(); lcd.setTextDatum(MC_DATUM);
-    // НАЗАД
-    lcd.setTextColor(t.textPri);
-    lcd.drawString(ru ? cyrStr("НАЗАД") : "BACK", bw / 2, cy);
-    // <<
-    lcd.setTextColor(_mpCount > 0 ? t.textPri : t.textSec);
-    lcd.drawString("<<", bw + bw / 2, cy);
-    // ИГРАТЬ / СТОП
-    if (audioIsBusy()) {
-        lcd.setTextColor(t.danger);
-        lcd.drawString(ru ? cyrStr("СТОП") : "STOP", bw * 2 + bw / 2, cy);
-    } else {
-        lcd.setTextColor(t.accent);
-        lcd.drawString(ru ? cyrStr("ИГРАТЬ") : "PLAY", bw * 2 + bw / 2, cy);
-    }
-    // >>
-    lcd.setTextColor(_mpCount > 0 ? t.textPri : t.textSec);
-    lcd.drawString(">>", bw * 3 + bw / 2, cy);
-}
-
-void musicPlayerOpen() {
-    _mpCount = 0; _mpSel = 0; _mpOffset = 0; _mpPlaying = -1; _mpShuffle = false;
-    _mpScan();
-    _mpDrawFull();
-}
-
-void musicPlayerDraw() {
-    _mpDrawFull();
-}
-
-void musicPlayerTick() {
-    // Трек закончился — авто-переход к следующему
-    if (_mpPlaying >= 0 && !audioIsBusy()) {
-        if (_mpCount > 0) {
-            int next;
-            if (_mpShuffle && _mpCount > 1) {
-                do { next = (int)random(_mpCount); } while (next == _mpPlaying);
-            } else {
-                next = (_mpPlaying + 1) % _mpCount;
-            }
-            _mpSel = next;
-            if (_mpSel < _mpOffset) _mpOffset = _mpSel;
-            if (_mpSel >= _mpOffset + MP_ROWS) _mpOffset = _mpSel - MP_ROWS + 1;
-            _mpPlaySelected();
-            _mpDrawFull();
-        } else {
-            _mpPlaying = -1;
-        }
-    }
-}
-
-uint8_t musicPlayerHandleTouch(int x, int y) {
-    int fy = SCREEN_H - MP_BAR_H;
-    int bw = SCREEN_W / 4;
-
-    // Подвал
-    if (y >= fy) {
-        if (x < bw) {
-            soundStop(); _mpPlaying = -1;
-            return BTN_B;
-        } else if (x < bw * 2) {
-            // << ПРЕД
-            if (_mpCount > 0) {
-                if (_mpShuffle && _mpCount > 1) {
-                    int next; do { next = (int)random(_mpCount); } while (next == _mpSel);
-                    _mpSel = next;
-                } else {
-                    _mpSel = (_mpSel - 1 + _mpCount) % _mpCount;
-                }
-                if (_mpSel < _mpOffset) _mpOffset = _mpSel;
-                _mpPlaySelected();
-                _mpDrawFull();
-            }
-        } else if (x < bw * 3) {
-            // ИГРАТЬ / СТОП
-            if (audioIsBusy()) {
-                soundStop(); _mpPlaying = -1;
-            } else {
-                _mpPlaySelected();
-            }
-            _mpDrawFull();
-        } else {
-            // >> СЛЕД
-            if (_mpCount > 0) {
-                if (_mpShuffle && _mpCount > 1) {
-                    int next; do { next = (int)random(_mpCount); } while (next == _mpSel);
-                    _mpSel = next;
-                } else {
-                    _mpSel = (_mpSel + 1) % _mpCount;
-                }
-                if (_mpSel >= _mpOffset + MP_ROWS) _mpOffset = _mpSel - MP_ROWS + 1;
-                _mpPlaySelected();
-                _mpDrawFull();
-            }
-        }
-        return 0;
-    }
-
-    // Строка "сейчас играет" — тап переключает режим перемешивания
-    if (y >= MP_HDR_H && y < MP_LIST_Y) {
-        _mpShuffle = !_mpShuffle;
-        _mpDrawFull();
-        return 0;
-    }
-
-    // Список треков
-    if (y >= MP_LIST_Y && y < fy) {
-        int row = (y - MP_LIST_Y) / MP_ROW_H;
-        int idx = _mpOffset + row;
-        if (idx >= 0 && idx < _mpCount) {
-            _mpSel = idx;
-            _mpPlaySelected();
-            _mpDrawFull();
-        }
-    }
-    return 0;
-}
-
-uint8_t musicPlayerNavBtn(uint8_t btn) {
-    if (btn & BTN_B) {
-        soundStop(); _mpPlaying = -1;
-        return BTN_B;
-    }
-    if (btn & BTN_SEL) {
-        _mpShuffle = !_mpShuffle;
-        _mpDrawFull();
-        return 0;
-    }
-    if (btn & BTN_LEFT) {
-        if (_mpCount > 0) {
-            if (_mpShuffle && _mpCount > 1) {
-                int next; do { next = (int)random(_mpCount); } while (next == _mpSel);
-                _mpSel = next;
-            } else {
-                _mpSel = (_mpSel - 1 + _mpCount) % _mpCount;
-            }
-            if (_mpSel < _mpOffset) _mpOffset = _mpSel;
-            _mpPlaySelected(); _mpDrawFull();
-        }
-        return 0;
-    }
-    if (btn & BTN_RIGHT) {
-        if (_mpCount > 0) {
-            if (_mpShuffle && _mpCount > 1) {
-                int next; do { next = (int)random(_mpCount); } while (next == _mpSel);
-                _mpSel = next;
-            } else {
-                _mpSel = (_mpSel + 1) % _mpCount;
-            }
-            if (_mpSel >= _mpOffset + MP_ROWS) _mpOffset = _mpSel - MP_ROWS + 1;
-            _mpPlaySelected(); _mpDrawFull();
-        }
-        return 0;
-    }
-    if (btn & BTN_UP) {
-        if (_mpSel > 0) {
-            _mpSel--;
-            if (_mpSel < _mpOffset) _mpOffset = _mpSel;
-            _mpDrawNowPlaying();
-            _mpDrawList();
-        }
-        return 0;
-    }
-    if (btn & BTN_DOWN) {
-        if (_mpSel < _mpCount - 1) {
-            _mpSel++;
-            if (_mpSel >= _mpOffset + MP_ROWS) _mpOffset = _mpSel - MP_ROWS + 1;
-            _mpDrawNowPlaying();
-            _mpDrawList();
-        }
-        return 0;
-    }
-    if (btn & BTN_A) {
-        if (audioIsBusy()) {
-            soundStop(); _mpPlaying = -1; _mpDrawFull();
-        } else {
-            _mpPlaySelected(); _mpDrawFull();
-        }
-        return 0;
-    }
-    return 0;
-}
 
 // ══════════════════════════════════════════════════════════════
 // PUBLIC GALLERY API

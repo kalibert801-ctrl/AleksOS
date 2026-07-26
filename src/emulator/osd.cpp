@@ -5,6 +5,7 @@
 
 #include "display/display_manager.h"
 #include "input/button_handler.h"
+#include "input/touch_handler.h"
 #include "network/web_console.h"
 #include "config.h"
 #include "settings.h"
@@ -32,10 +33,12 @@ extern "C" {
 #include "nofrendo/vid_drv.h"
 #include "nofrendo/nes/nes.h"
 #include "nofrendo/nes/nes_pal.h"
+#include "nofrendo/nes/nes_ppu.h"
 #include "nofrendo/nes/nesinput.h"
 #include "nofrendo/nes/nesstate.h"
 #include "nofrendo/event.h"
 #include "nofrendo/log.h"
+nesinput_t *event_get_zapper(void);
 }
 
 // ─── constants ─────────────────────────────────────────────────────────────
@@ -79,6 +82,20 @@ static char _romPath[PATH_MAX + 1] = {};
 // и вызывает main_eject() — уже вне стека frame-callback, без краша.
 static volatile bool _emuExitReq = false;
 extern "C" bool osd_exit_requested(void) { return _emuExitReq; }
+
+// ─── Zapper ISR ───────────────────────────────────────────────────────────────
+// GPIO36 (TOUCH_IRQ) — FALLING edge = начало касания.
+// ISR срабатывает прямо во время nes_renderframe(), до оконания кадра.
+// Это устраняет задержку в 1 кадр (16 мс) которая была при опросе в osd_getinput().
+static volatile int  _zapCountdown = 0;
+static nesinput_t   *_zapInputPtr  = nullptr;
+
+static void IRAM_ATTR zapperTouchISR() {
+    if (_zapInputPtr) {
+        _zapInputPtr->data = INP_ZAPPER_TRIG | INP_ZAPPER_HIT;
+    }
+    _zapCountdown = 8;
+}
 
 // ─── OSD громкости (показывается поверх игры при HOME+UP/DOWN) ────────────────
 static int     _volShowFrames = 0;   // кол-во кадров для отображения
@@ -1114,6 +1131,28 @@ extern "C" void osd_getinput(void) {
 
     // Синхронизируем глобальный _pad (используется emu_setController извне)
     _pad = pad;
+
+    // ── Zapper (light gun) via touchscreen ─────────────────────────────────
+    // zapperTouchISR (FALLING на GPIO36) обновляет zap->data=TRIG|HIT
+    // немедленно внутри nes_renderframe() — нет задержки в кадр.
+    // osd_getinput() только поддерживает активность пока держим палец
+    // и сбрасывает в MISS когда таймаут истёк.
+    {
+        nesinput_t *zap = _zapInputPtr;
+        if (zap) {
+            if (digitalRead(TOUCH_IRQ) == LOW) {
+                // палец держим — продлеваем окно
+                _zapCountdown = 8;
+                zap->data = INP_ZAPPER_TRIG | INP_ZAPPER_HIT;
+            } else if (_zapCountdown > 0) {
+                // палец отпустили — ещё 8 кадров активности
+                _zapCountdown--;
+                zap->data = INP_ZAPPER_TRIG | INP_ZAPPER_HIT;
+            } else {
+                zap->data = INP_ZAPPER_MISS;
+            }
+        }
+    }
 }
 
 extern "C" void osd_getmouse(int *x, int *y, int *button) {}
@@ -1267,7 +1306,21 @@ extern "C" int osd_init(void) {
     // остаются чёрными на протяжении всей игровой сессии — больше не "вырви глаз".
     lcd.fillScreen(TFT_BLACK);
 
-    return audio_init();
+    int ret = audio_init();
+    // audio_init() вызывает i2s_set_pin(NULL), что переводит GPIO25 (DAC1)
+    // в RTC-режим. GPIO25 = VSPI CLK тачскрина XPT2046 — без deinit
+    // SPI-транзакции к тачу зависают во время эмуляции.
+    rtc_gpio_deinit(GPIO_NUM_25);
+    touch.init();   // переинициализируем VSPI для тача
+
+    // Zapper ISR: FALLING на GPIO36 (TOUCH_IRQ) = начало касания.
+    // Срабатывает внутри nes_renderframe() — нет задержки в 1 кадр.
+    _zapInputPtr = event_get_zapper();
+    if (_zapInputPtr) {
+        _zapInputPtr->data = INP_ZAPPER_MISS;
+        attachInterrupt(digitalPinToInterrupt(TOUCH_IRQ), zapperTouchISR, FALLING);
+    }
+    return ret;
 }
 
 extern "C" void osd_shutdown(void) {

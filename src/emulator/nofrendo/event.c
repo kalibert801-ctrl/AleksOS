@@ -40,8 +40,9 @@
 static event_t *system_events = NULL;
 
 /* standard keyboard input */
-static nesinput_t kb_input = { INP_JOYPAD0, 0 };
+static nesinput_t kb_input     = { INP_JOYPAD0, 0 };
 static nesinput_t kb_alt_input = { INP_JOYPAD1, 0 };
+static nesinput_t zapper_input = { INP_ZAPPER, INP_ZAPPER_MISS };
 
 static void func_event_quit(int code)
 {
@@ -535,6 +536,12 @@ void event_init(void)
 {
    input_register(&kb_input);
    input_register(&kb_alt_input);
+   input_register(&zapper_input);
+}
+
+nesinput_t *event_get_zapper(void)
+{
+   return &zapper_input;
 }
 
 /* set up the event system for a certain console/system type */

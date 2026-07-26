@@ -37,7 +37,7 @@ Settings settings;
 
 enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
              S_FILEMGR, S_FILEMGR_KB, S_GG, S_GG_KB, S_GS, S_GS_KB,
-             S_SEARCH_KB, S_GALLERY, S_MUSIC, S_WEBMGR, S_SDMGR, S_GRAVITY };
+             S_SEARCH_KB, S_GALLERY, S_WEBMGR, S_SDMGR, S_GRAVITY };
 static State state = S_MENU;
 static bool  _settingsFromMenu = false;  // opened from main screen footer tap → Back returns to menu
 
@@ -71,7 +71,6 @@ static void toWifi()     { fadeOut(); state = S_WIFI;     wifiManagerDraw();   f
 static void toFileMgr()  { fadeOut(); state = S_FILEMGR;  fileMgrDraw();       fadeIn(); }
 static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();     fadeIn(); }
 static void toGS()       { fadeOut(); state = S_GS;        gsScreenDraw();     fadeIn(); }
-static void toMusic()    { fadeOut(); state = S_MUSIC;     musicPlayerOpen();  fadeIn(); }
 
 static void toGravity() {
     fadeOut();
@@ -327,8 +326,8 @@ void setup() {
     // ── Периферия ─────────────────────────────────────────────
     bootProgress(88, "Init audio...");
     audioInit();
+    batteryStatsLoad();  // загрузить session/total/cycles/pct из /battery_stats.json ПЕРЕД init
     batteryInit();       // ADC1 GPIO35, делитель 470k+470k (safe с WiFi)
-    batteryStatsLoad();  // загрузить session/total/cycles из /battery_stats.json
 
     bootProgress(93, "Init touch...");
     touch.init();
@@ -551,10 +550,6 @@ void loop() {
             soundClick();
             state = S_GALLERY;
             galleryOpen();
-        } else if (action == 0xD1) {
-            // ♪ Музыкальный плеер
-            soundClick();
-            toMusic();
         } else if (action == 0xD2) {
             // 🌐 Веб-загрузчик файлов
             soundClick();
@@ -610,6 +605,7 @@ void loop() {
     }
 
     case S_SETTINGS: {
+        settingsBatteryTick();
         if (shellBtn) {
             uint8_t r = settingsNavBtn(shellBtn);
             if (r & BTN_B) { soundBack(); buttons.vibrate1(50); cfgSave(); _settingsFromMenu = false; toMenu(); break; }
@@ -911,21 +907,6 @@ void loop() {
                 webMgrStop();
                 toMenu();
             }
-        }
-        break;
-    }
-
-    case S_MUSIC: {
-        musicPlayerTick();   // refresh UI когда трек закончился
-        if (shellBtn) {
-            uint8_t r = musicPlayerNavBtn(shellBtn);
-            if (r == BTN_B) { soundBack(); toMenu(); }
-            break;
-        }
-        if (!tapped) break;
-        {
-            uint8_t r = musicPlayerHandleTouch(x, y);
-            if (r == BTN_B) { soundBack(); toMenu(); }
         }
         break;
     }

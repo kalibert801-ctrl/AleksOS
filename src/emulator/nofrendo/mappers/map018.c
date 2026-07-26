@@ -129,8 +129,8 @@ static void map18_write(uint32 address, uint8 value)
       {
       case 0:  ppu_mirror(0, 0, 1, 1); break;
       case 1:  ppu_mirror(0, 1, 0, 1); break;
-      case 2:  ppu_mirror(1,1,1,1);break;
-      case 3:  ppu_mirror(1,1,1,1);break; // should this be zero?
+      case 2:  ppu_mirror(0,0,0,0);break; /* one-screen NT0 */
+      case 3:  ppu_mirror(1,1,1,1);break; /* one-screen NT1 */
       default: break;
       }
       break;

@@ -51,16 +51,16 @@ static void map48_write(uint32 address, uint8 value)
       mmc_bankvrom(1, 0x0C00, (value << 1) + 1);
       break;
    case 0xA000:
-      mmc_bankvrom(1, 0x1000, (value << 1) + 0);
+      mmc_bankvrom(1, 0x1000, value);
       break;
    case 0xA001:
-      mmc_bankvrom(1, 0x1400, (value << 1) + 0);
+      mmc_bankvrom(1, 0x1400, value);
       break;
    case 0xA002:
-      mmc_bankvrom(1, 0x1800, (value << 1) + 0);
+      mmc_bankvrom(1, 0x1800, value);
       break;
    case 0xA003:
-      mmc_bankvrom(1, 0x1C00, (value << 1) + 0);
+      mmc_bankvrom(1, 0x1C00, value);
       break;
    case 0xC000:
       reg48_irq_cnt = value;

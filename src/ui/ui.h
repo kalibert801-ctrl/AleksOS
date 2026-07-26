@@ -21,6 +21,7 @@ void menuScrollUp();
 void menuScrollDown();
 void menuTimeTick();          // call in loop() -- updates clock in bottom bar
 void menuBatteryAnimTick();   // call in loop() -- charging animation (600ms steps)
+void settingsBatteryTick();   // call in loop() -- refreshes battery screen every 5s
 int  menuSelected();
 void showRomInfo(int idx);
 
@@ -99,12 +100,6 @@ uint8_t fileMgrHandleTouch(int x, int y);
 uint8_t fileMgrNavBtn(uint8_t btn);
 int     fileMgrSelected();
 
-// -- Music player ------------------------------------------------------
-void    musicPlayerOpen();
-void    musicPlayerDraw();
-void    musicPlayerTick();            // вызывать в loop() — refresh по окончании трека
-uint8_t musicPlayerHandleTouch(int x, int y);
-uint8_t musicPlayerNavBtn(uint8_t btn);
 
 // -- Cover art thumbnail pre-cache ------------------------------------
 // Вызывать при загрузке (после sdMgr.init).

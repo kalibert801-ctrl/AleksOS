@@ -173,7 +173,7 @@ static void map1_getstate(SnssMapperBlock *state)
 
 static void map1_setstate(SnssMapperBlock *state)
 {
-   regs[1] = state->extraData.mapper1.registers[0];
+   regs[0] = state->extraData.mapper1.registers[0];
    regs[1] = state->extraData.mapper1.registers[1];
    regs[2] = state->extraData.mapper1.registers[2];
    regs[3] = state->extraData.mapper1.registers[3];

@@ -72,13 +72,13 @@ static void map64_write(uint32 address, uint8 value)
       switch (command & 0xF)
       {
       case 0:
-         mmc_bankvrom(1, 0x0000 ^ vrombase, value);
-         mmc_bankvrom(1, 0x0400 ^ vrombase, value);
+         mmc_bankvrom(1, 0x0000 ^ vrombase, (value << 1));
+         mmc_bankvrom(1, 0x0400 ^ vrombase, (value << 1) + 1);
          break;
 
       case 1:
-         mmc_bankvrom(1, 0x0800 ^ vrombase, value);
-         mmc_bankvrom(1, 0x0C00 ^ vrombase, value);
+         mmc_bankvrom(1, 0x0800 ^ vrombase, (value << 1));
+         mmc_bankvrom(1, 0x0C00 ^ vrombase, (value << 1) + 1);
          break;
 
       case 2:
@@ -106,11 +106,11 @@ static void map64_write(uint32 address, uint8 value)
          break;
 
       case 8:
-         mmc_bankvrom(1, 0x0400, value);
+         mmc_bankvrom(1, 0x0400 ^ vrombase, value);
          break;
 
       case 9:
-         mmc_bankvrom(1, 0x0C00, value);
+         mmc_bankvrom(1, 0x0C00 ^ vrombase, value);
          break;
 
       case 15:

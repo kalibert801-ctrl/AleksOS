@@ -1101,7 +1101,6 @@ void ppu_scanline(bitmap_t *bmp, int scanline, bool draw_flag)
    }
 }
 
-/*
 bool ppu_checkzapperhit(bitmap_t *bmp, int x, int y)
 {
    uint8 pixel = bmp->line[y][x] & 0x3F;
@@ -1111,7 +1110,6 @@ bool ppu_checkzapperhit(bitmap_t *bmp, int x, int y)
 
    return false;
 }
-*/
 
 /*************************************************/
 /* TODO: all this stuff should go somewhere else */
