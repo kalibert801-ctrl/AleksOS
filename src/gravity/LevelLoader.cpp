@@ -18,7 +18,7 @@ LevelLoader::LevelLoader(const char* mrgFilePath) {
     }
     levelFileStream = new FileStream(mrgFilePath);
     if (!levelFileStream->isOpen()) {
-        Serial.println("[GD] levels.mrg not found on SD!");
+        Serial.println("[GD] levels.mrg not found on SD root!");
         return;
     }
     loadLevels();

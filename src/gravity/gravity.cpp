@@ -8,12 +8,23 @@
 #include "display/display_manager.h"
 #include "ui/ui.h"
 #include "input/button_handler.h"
+#include "input/touch_handler.h"
 #include "settings.h"
 #include <Arduino.h>
 
 // Micro stub definitions
 bool Micro::isInGameMenu = false;
 bool Micro::field_249    = true;
+
+// Raw physical button bits from Pico UART protocol (independent of user btnMap)
+#define PHYS_STA   0x01
+#define PHYS_SEL   0x02
+#define PHYS_B     0x04
+#define PHYS_A     0x08
+#define PHYS_UP    0x10
+#define PHYS_DOWN  0x20
+#define PHYS_LEFT  0x40
+#define PHYS_RIGHT 0x80
 
 static LevelLoader*  s_ll     = nullptr;
 static GamePhysics*  s_gp     = nullptr;
@@ -30,7 +41,7 @@ bool gravityOpen(int league, int level) {
     gravityClose();
     Serial.printf("[GD] Opening league=%d level=%d\n", league, level);
 
-    s_ll = new LevelLoader("/gravity.mrg");
+    s_ll = new LevelLoader("/levels.mrg");
     if (!s_ll->gameLevel) {
         Serial.println("[GD] Failed: gameLevel is null");
         gravityClose();
@@ -55,7 +66,9 @@ bool gravityOpen(int league, int level) {
 
     // Draw initial frame
     GDGfx gfx(SCREEN_W, SCREEN_H);
+    gfx.startFrame();
     s_gc->drawGame(&gfx);
+    gfx.endFrame();
 
     Serial.println("[GD] Game started OK");
     return true;
@@ -68,10 +81,10 @@ void gravityClose() {
 }
 
 bool gravityLevelSelect(int* outLeague, int* outLevel) {
-    LevelLoader* ll = new LevelLoader("/gravity.mrg");
+    LevelLoader* ll = new LevelLoader("/levels.mrg");
     if (!ll->gameLevel) {
         delete ll;
-        popupShow("Gravity Defied", "gravity.mrg not found!\nCopy to SD root.", 3000);
+        popupShow("Gravity Defied", "levels.mrg not found!\nCopy to SD root.", 3000);
         return false;
     }
 
@@ -139,26 +152,56 @@ bool gravityLevelSelect(int* outLeague, int* outLevel) {
 
     draw();
     delay(200);
-    while (buttons.readCurrent()) delay(10);
+    while (buttons.read()) delay(10);
 
     bool result = false;
     for (;;) {
         buttons.update();
-        uint8_t btn = buttons.readNew();
+        uint8_t btn = buttons.readNew();  // raw physical bits
+
+        // Touch navigation
+        if (touch.isTouched()) {
+            int tx, ty; touch.getXY(tx, ty);
+            if (stage == 0) {
+                for (int i = 0; i < 3; i++) {
+                    if (tx >= 20 && tx <= 300 && ty >= 66+i*52 && ty < 66+i*52+44) {
+                        if (i == league) { stage = 1; level = 0; draw(); }
+                        else { league = i; draw(); }
+                        break;
+                    }
+                }
+            } else {
+                int n = (int)ll->levelNames[league].size(); if (n < 1) n = 1;
+                int vis = 4;
+                int start = level - 1; if (start < 0) start = 0;
+                if (n > vis && start + vis > n) start = n - vis;
+                for (int i = 0; i < vis && start+i < n; i++) {
+                    int lvl = start + i;
+                    if (tx >= 20 && tx <= 300 && ty >= 62+i*42 && ty < 62+i*42+36) {
+                        if (lvl == level) {
+                            *outLeague = league; *outLevel = level; result = true;
+                            delete ll; return result;
+                        }
+                        level = lvl; draw(); break;
+                    }
+                }
+            }
+        }
+
         if (!btn) { delay(16); continue; }
 
         if (stage == 0) {
-            if (btn & BTN_UP)   { league = (league + 2) % 3; draw(); }
-            if (btn & BTN_DOWN) { league = (league + 1) % 3; draw(); }
-            if (btn & (BTN_A | BTN_STA)) { stage = 1; level = 0; draw(); }
-            if (btn & BTN_B)    { result = false; break; }
+            if (btn & PHYS_UP)              { league = (league + 2) % 3; draw(); }
+            if (btn & PHYS_DOWN)            { league = (league + 1) % 3; draw(); }
+            if (btn & (PHYS_A | PHYS_STA))  { stage = 1; level = 0; draw(); }
+            if (btn & PHYS_B)               { result = false; break; }
         } else {
             int n = (int)ll->levelNames[league].size();
             if (n < 1) n = 1;
-            if (btn & BTN_UP)   { level = (level > 0) ? level - 1 : n - 1; draw(); }
-            if (btn & BTN_DOWN) { level = (level < n - 1) ? level + 1 : 0;  draw(); }
-            if (btn & (BTN_A | BTN_STA)) { *outLeague = league; *outLevel = level; result = true; break; }
-            if (btn & BTN_B)    { stage = 0; level = 0; draw(); }
+            if (btn & PHYS_UP)              { level = (level > 0) ? level - 1 : n - 1; draw(); }
+            if (btn & PHYS_DOWN)            { level = (level < n - 1) ? level + 1 : 0; draw(); }
+            if (btn & (PHYS_A | PHYS_STA))  { *outLeague = league; *outLevel = level; result = true; break; }
+            if (btn & PHYS_B)               { stage = 0; level = 0; draw(); }
         }
         delay(16);
     }
@@ -198,10 +241,10 @@ int gravityUpdate() {
         upDown = 1;                            // any touch = gas
         lr     = (s_touchX < SCREEN_W / 2) ? -1 : 1;
     }
-    if (s_btnState & BTN_A)     upDown = 1;   // A = gas
-    if (s_btnState & BTN_B)     upDown = -1;  // B = brake
-    if (s_btnState & BTN_LEFT)  lr = -1;
-    if (s_btnState & BTN_RIGHT) lr = 1;
+    if (s_btnState & PHYS_A)     upDown = 1;   // physical A = gas
+    if (s_btnState & PHYS_B)     upDown = -1;  // physical B = brake
+    if (s_btnState & PHYS_LEFT)  lr = -1;
+    if (s_btnState & PHYS_RIGHT) lr = 1;
 
     s_gp->method_30(upDown, lr);
 
@@ -263,14 +306,14 @@ bool gravityPause() {
 
     draw();
     delay(200);
-    while (buttons.readCurrent()) delay(10); // wait for release
+    while (buttons.read()) delay(10); // wait for release
 
     for (;;) {
         buttons.update();
-        uint8_t btn = buttons.readNew();
-        if (btn & BTN_UP)   { sel = sel > 0 ? sel - 1 : N - 1; draw(); }
-        if (btn & BTN_DOWN) { sel = sel < N - 1 ? sel + 1 : 0;  draw(); }
-        if (btn & (BTN_A | BTN_STA)) {
+        uint8_t btn = buttons.readNew();  // raw physical bits
+        if (btn & PHYS_UP)              { sel = sel > 0 ? sel - 1 : N - 1; draw(); }
+        if (btn & PHYS_DOWN)            { sel = sel < N - 1 ? sel + 1 : 0; draw(); }
+        if (btn & (PHYS_A | PHYS_STA)) {
             if (sel == 0) return true;  // Resume
             if (sel == 1) {             // Restart
                 gravityOpen(s_ll->field_125, s_ll->field_126);
@@ -278,8 +321,7 @@ bool gravityPause() {
             }
             return false;              // Exit to Menu
         }
-        // B button = resume
-        if (btn & BTN_B) return true;
+        if (btn & PHYS_B) return true;  // B = resume
         delay(16);
     }
 }

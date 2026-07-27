@@ -73,15 +73,18 @@ static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();     f
 static void toGS()       { fadeOut(); state = S_GS;        gsScreenDraw();     fadeIn(); }
 
 static void toGravity() {
-    fadeOut();
+    State prev = state;
     int league = 0, level = 0;
+    // Level select видно без fade — fade только перед загрузкой игры
     if (!gravityLevelSelect(&league, &level)) {
-        fadeIn();
+        if (prev == S_MENU) menuDraw();
         return;
     }
+    fadeOut();
     if (!gravityOpen(league, level)) {
-        popupShow("Gravity Defied", "gravity.mrg not found!\nCopy to SD root.", 3000);
+        popupShow("Gravity Defied", "levels.mrg not found!\nCopy to SD root.", 3000);
         fadeIn();
+        if (prev == S_MENU) menuDraw();
         return;
     }
     state = S_GRAVITY;
@@ -929,17 +932,22 @@ void loop() {
 
     case S_GRAVITY: {
         if (tapped) gravityHandleTouch(x, y); else gravityNoTouch();
-        // Physical HOME/START (= BTN_A in shellBtn after shell-swap) → exit
-        if (shellBtn & BTN_A) { gravityClose(); toMenu(); break; }
-        // Physical SELECT (= BTN_B in shellBtn) → pause menu
-        if (shellBtn & BTN_B) {
+        // Physical START (raw 0x01) → exit game
+        if (btnPhys & 0x01) { gravityClose(); toMenu(); break; }
+        // Physical SELECT (raw 0x02) → pause menu
+        if (btnPhys & 0x02) {
             if (!gravityPause()) { gravityClose(); toMenu(); break; }
         }
-        // Game input: held physical button state (raw, no swap)
+        // Game input: raw physical bits — A=gas(0x08), B=brake(0x04), no btnMap
         gravityNavBtn(buttons.readCurrent());
         int gr = gravityUpdate();
         if (gr == 1 || gr == 2) {
-            delay(1500);
+            // Level complete or crash → back to level select
+            delay(gr == 1 ? 2000 : 1500);
+            gravityClose();
+            toGravity();
+            if (state != S_GRAVITY) toMenu();
+        } else if (gr == 3) {
             gravityClose();
             toMenu();
         }

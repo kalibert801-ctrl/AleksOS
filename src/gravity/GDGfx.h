@@ -34,8 +34,7 @@ public:
     GDGfx(int w = 320, int h = 240) : _sw(w), _sh(h) {}
 
     void setColor(int r, int g, int b) {
-        // Panel has invert=true, so negate colors to get correct display
-        _color = lcd.color565(255 - r, 255 - g, 255 - b);
+        _color = lcd.color565(r, g, b);
     }
 
     void drawLine(int x1, int y1, int x2, int y2) {

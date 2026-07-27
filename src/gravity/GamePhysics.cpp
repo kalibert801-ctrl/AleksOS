@@ -245,6 +245,7 @@ int GamePhysics::updatePhysics() {
     if (isGenerateInputAI) setInputFromAI();
     GameCanvas::method_151();
     method_35();
+    field_36 = false;  // reset per-step: set again by method_46 if body touches track THIS step
     int v1;
     if ((v1=method_39(field_7))!=5 && !field_36) {
         if (field_35) return 3;

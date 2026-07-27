@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-// Returns false if /gravity.mrg not found on SD root
+// Returns false if /levels.mrg not found on SD root
 bool gravityOpen(int league = 0, int level = 0);
 void gravityClose();
 
@@ -17,7 +17,7 @@ void gravityNoTouch();
 bool gravityNavBtn(uint8_t heldPhysBtn);
 
 // Level/league selection screen. Call before gravityOpen.
-// Returns false if gravity.mrg not found or user pressed Back.
+// Returns false if levels.mrg not found or user pressed Back.
 bool gravityLevelSelect(int* outLeague, int* outLevel);
 
 // Pause menu: returns false if user chose "Exit"

@@ -1,14 +1,15 @@
-
 # AleksOS — NES консоль на ESP32
 
 **AleksOS** — портативная игровая консоль на базе **ESP32-2432S028** («Cheap Yellow Display»).  
 NES-эмулятор **Nofrendo** с полностью переработанным интерфейсом, веб-менеджером, виброотдачей и поддержкой WiFi.
+
 <img width="1100" height="2444" alt="IMG_20260726_133154414" src="https://github.com/user-attachments/assets/c72e5b01-b47e-4029-afbf-c507f819335b" />
 <img width="1167" height="2592" alt="IMG_20260726_133100712_HDR" src="https://github.com/user-attachments/assets/b108dd02-263d-4322-aef2-74800967cb69" />
 <img width="1198" height="2662" alt="IMG_20260726_133041177_HDR" src="https://github.com/user-attachments/assets/3d1222c4-d76a-432e-8064-ebd70ecd382d" />
 <img width="1151" height="2557" alt="IMG_20260726_133021497_HDR" src="https://github.com/user-attachments/assets/806ac94c-bbb1-41b6-a92f-1b33cf85e1ea" />
 <img width="1611" height="2147" alt="IMG_20260726_132854269_HDR" src="https://github.com/user-attachments/assets/48815d97-3e87-4beb-9c1e-743788e33950" />
 <img width="2174" height="978" alt="IMG_20260724_225933957_HDR" src="https://github.com/user-attachments/assets/e9ead0a4-658e-4241-bf18-4d75c3697210" />
+
 > ⚠️ Проект создан под конкретное модифицированное железо. Работа на других платах не гарантируется.
 
 ---
@@ -44,7 +45,6 @@ NES-эмулятор **Nofrendo** с полностью переработанн
 - Браузер ROM — сканирует SD карту, навигация кнопками и тачем
 - Обложки игр (`.raw`, `.jpg`, `.png` в `/covers/`)
 - Скриншоты на SD карту
-- Встроенный MP3/WAV плеер
 
 ### Интерфейс
 - Несколько тем оформления
@@ -73,11 +73,11 @@ NES-эмулятор **Nofrendo** с полностью переработанн
 ```
 /
 ├── FomiCon/        ← ROM файлы (.nes)
-├── Music/          ← Музыка (.mp3, .wav)
 ├── sounds/         ← Звуки интерфейса (.wav)
 ├── covers/         ← Обложки игр (.raw, .jpg, .png)
 ├── update/         ← Прошивки для SD OTA (.bin)
 ├── Screenshots/    ← Скриншоты (создаётся автоматически)
+├── levels.mrg      ← Данные уровней Gravity Defied (из оригинального JAR)
 └── config.json     ← Настройки (создаётся автоматически)
 ```
 
