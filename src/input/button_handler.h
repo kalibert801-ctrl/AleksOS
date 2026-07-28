@@ -19,8 +19,8 @@
 //   Pico→ESP32:  [0xAA] [0x42] [btns]  [~btns]
 //   ESP32→Pico:  [0xAA] [cmd]  [data]  [cmd^data]
 //     0x01 = PING
-//     0x20 = HAPTIC1  data=duration×10мс (0=стоп, 255=2550мс)
-//     0x21 = HAPTIC2  data=duration×10мс
+//     0x20 = HAPTIC1  data=[(power:4)|(dur:4)]  power нібл×17=PWM, dur нібл×10мс
+//     0x21 = HAPTIC2  data=[(power:4)|(dur:4)]
 // ═══════════════════════════════════════════════════════════════════
 
 // Маски системных кнопок (пакет PICO_SYS_PKT = 0x43)

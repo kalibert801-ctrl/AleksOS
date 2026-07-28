@@ -34,11 +34,6 @@ void menuSetSearch(const char *q);  // apply search query (empty = clear)
 void menuClearSearch();             // clear search, redraw
 void menuDrawSearchKbBack();        // draw BACK button below search keyboard
 
-// -- Screenshot gallery ------------------------------------------------
-void galleryOpen();                 // scan /Screenshots/, build game list, draw
-void galleryDraw();                 // redraw current gallery state
-uint8_t galleryNavBtn(uint8_t btn); // BTN_B = exit gallery
-uint8_t galleryHandleTouch(int x, int y);
 
 // Accessors for theme plugins
 bool menuIsFavMode();

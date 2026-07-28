@@ -67,12 +67,13 @@ typedef struct {
     // Максимум 8 кодов, хранятся как 8-байтные строки (7 символов + \0).
     char          ggCodes[8][9];  // 8 слотов по 8 символов кода Game Genie + \0
     unsigned char ggEnabled;      // 1 = применять коды при запуске
-    // ── Sleep / Scanlines ────────────────────────────────────
+    // ── Sleep ────────────────────────────────────────────────
     unsigned char sleepTimeout;   // 0=off, 1=1мин, 2=2мин, 5=5мин, 10=10мин
-    unsigned char scanlines;      // 0=off, 1=on
     // ── Game Shark (Pro Action Replay) ───────────────────────
     char          gsCodes[8][8];  // 8 слотов по 6 символов "AAAAVV" + \0 + pad
     unsigned char gsEnabled;      // 1 = применять коды каждый кадр
+    // ── Bluetooth ────────────────────────────────────────────────
+    unsigned char btEnabled;      // 1 = запускать BT SPP сервер во время игры (2-й игрок)
 } Settings;
 
 /* ── Цвета темы RGB565 ──────────────────────────────────────────── */
@@ -133,9 +134,9 @@ inline void settingsDefault(Settings &s) {
     s.ggEnabled     = 0;
     memset(s.ggCodes, 0, sizeof(s.ggCodes));
     s.sleepTimeout  = 0;
-    s.scanlines     = 0;
     s.gsEnabled     = 0;
     memset(s.gsCodes, 0, sizeof(s.gsCodes));
+    s.btEnabled     = 0;
 }
 
 #endif /* __cplusplus */

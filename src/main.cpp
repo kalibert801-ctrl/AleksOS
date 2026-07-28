@@ -20,6 +20,7 @@
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
+#include "network/bt_manager.h"
 #include "network/web_manager.h"
 #include "network/web_console.h"
 #include "storage/game_stats.h"
@@ -27,7 +28,6 @@
 #include "emulator/game_shark.h"
 
 #include "ui/sdmgr.h"
-#include "gravity/gravity.h"
 
 Settings settings;
 
@@ -37,7 +37,7 @@ Settings settings;
 
 enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
              S_FILEMGR, S_FILEMGR_KB, S_GG, S_GG_KB, S_GS, S_GS_KB,
-             S_SEARCH_KB, S_GALLERY, S_WEBMGR, S_SDMGR, S_GRAVITY };
+             S_SEARCH_KB, S_WEBMGR, S_SDMGR };
 static State state = S_MENU;
 static bool  _settingsFromMenu = false;  // opened from main screen footer tap → Back returns to menu
 
@@ -72,24 +72,6 @@ static void toFileMgr()  { fadeOut(); state = S_FILEMGR;  fileMgrDraw();       f
 static void toGG()       { fadeOut(); state = S_GG;        ggScreenDraw();     fadeIn(); }
 static void toGS()       { fadeOut(); state = S_GS;        gsScreenDraw();     fadeIn(); }
 
-static void toGravity() {
-    State prev = state;
-    int league = 0, level = 0;
-    // Level select видно без fade — fade только перед загрузкой игры
-    if (!gravityLevelSelect(&league, &level)) {
-        if (prev == S_MENU) menuDraw();
-        return;
-    }
-    fadeOut();
-    if (!gravityOpen(league, level)) {
-        popupShow("Gravity Defied", "levels.mrg not found!\nCopy to SD root.", 3000);
-        fadeIn();
-        if (prev == S_MENU) menuDraw();
-        return;
-    }
-    state = S_GRAVITY;
-    fadeIn();
-}
 
 // WEB Manager screen — рисуется inline при переходе
 static void drawWebScreen() {
@@ -548,19 +530,10 @@ void loop() {
             state = S_SEARCH_KB;
             wifiKeyboardDraw("");
             menuDrawSearchKbBack();   // кнопка "← BACK" под клавиатурой
-        } else if (action == 0xD0) {
-            // 📷 Галерея скриншотов
-            soundClick();
-            state = S_GALLERY;
-            galleryOpen();
         } else if (action == 0xD2) {
             // 🌐 Веб-загрузчик файлов
             soundClick();
             toWebMgr();
-        } else if (action == 0xD3) {
-            // 🏍 Gravity Defied
-            soundClick();
-            toGravity();
         } else if (action == 0xE0) {
             // WiFi icon tap → System settings
             soundClick(); buttons.vibrate1(30);
@@ -880,21 +853,6 @@ void loop() {
         break;
     }
 
-    case S_GALLERY: {
-        // ── Галерея скриншотов ───────────────────────────────────────────────
-        if (shellBtn) {
-            uint8_t r = galleryNavBtn(shellBtn);
-            if (r == BTN_B) { soundBack(); toMenu(); }
-            else soundClick();
-            break;
-        }
-        if (!tapped) break;
-        {
-            uint8_t r = galleryHandleTouch(x, y);
-            if (r == BTN_B) { soundBack(); toMenu(); }
-        }
-        break;
-    }
 
     case S_WEBMGR: {
         webMgrHandle();   // обрабатываем HTTP запросы
@@ -930,29 +888,6 @@ void loop() {
         break;
     }
 
-    case S_GRAVITY: {
-        if (tapped) gravityHandleTouch(x, y); else gravityNoTouch();
-        // Physical START (raw 0x01) → exit game
-        if (btnPhys & 0x01) { gravityClose(); toMenu(); break; }
-        // Physical SELECT (raw 0x02) → pause menu
-        if (btnPhys & 0x02) {
-            if (!gravityPause()) { gravityClose(); toMenu(); break; }
-        }
-        // Game input: raw physical bits — A=gas(0x08), B=brake(0x04), no btnMap
-        gravityNavBtn(buttons.readCurrent());
-        int gr = gravityUpdate();
-        if (gr == 1 || gr == 2) {
-            // Level complete or crash → back to level select
-            delay(gr == 1 ? 2000 : 1500);
-            gravityClose();
-            toGravity();
-            if (state != S_GRAVITY) toMenu();
-        } else if (gr == 3) {
-            gravityClose();
-            toMenu();
-        }
-        break;
-    }
 
     case S_PLAYING:
         break;
@@ -1067,7 +1002,9 @@ static void runEmulator(int idx) {
     GameStats::save();
 
     if (settings.diagEmu) webConsolePrintf("[SYS] Starting nofrendo NES emulator\n");
+    if (settings.btEnabled) btMgrStart();
     int result = emu_run(path);
+    if (settings.btEnabled) btMgrStop();
 
     // Записываем время игры (в секундах)
     uint32_t _playSecs = (millis() - _playStart) / 1000;

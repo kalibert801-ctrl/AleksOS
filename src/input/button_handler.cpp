@@ -121,28 +121,35 @@ void ButtonHandler::sendCmd(uint8_t cmd, uint8_t data) {
 }
 
 // ── Вибро ────────────────────────────────────────────────────────
+// Протокол: data = (power_nibble << 4) | dur_nibble
+//   power_nibble 0-15 → PWM 0-255 (шаг 17)   — регулирует мощность мотора
+//   dur_nibble   0-15 → 10-150мс (×10мс)      — длительность импульса
+static uint8_t vibroEncode(uint16_t duration_ms) {
+    uint8_t pwr = (uint8_t)(settings.vibroStrength * 15 / 100); // 0-15
+    uint8_t dur = (uint8_t)min((int)(duration_ms / 10), 15);    // 0-15
+    if (dur == 0) dur = 1;
+    return (uint8_t)((pwr << 4) | dur);
+}
+
 void ButtonHandler::vibrate1(uint16_t duration_ms) {
     if (!isConnected() || !settings.vibroEnabled) return;
-    uint16_t scaled = (uint16_t)((uint32_t)duration_ms * settings.vibroStrength / 100);
-    uint8_t dur = (uint8_t)min((int)(scaled / 10), 255);
-    if (dur == 0) return;
-    sendCmd(PICO_CMD_HAPTIC1, dur);
+    uint8_t pwr = (uint8_t)(settings.vibroStrength * 15 / 100);
+    if (pwr == 0) return;
+    sendCmd(PICO_CMD_HAPTIC1, vibroEncode(duration_ms));
 }
 
 void ButtonHandler::vibrate2(uint16_t duration_ms) {
     if (!isConnected() || !settings.vibroEnabled) return;
-    uint16_t scaled = (uint16_t)((uint32_t)duration_ms * settings.vibroStrength / 100);
-    uint8_t dur = (uint8_t)min((int)(scaled / 10), 255);
-    if (dur == 0) return;
-    sendCmd(PICO_CMD_HAPTIC2, dur);
+    uint8_t pwr = (uint8_t)(settings.vibroStrength * 15 / 100);
+    if (pwr == 0) return;
+    sendCmd(PICO_CMD_HAPTIC2, vibroEncode(duration_ms));
 }
 
 void ButtonHandler::vibrateBoth(uint16_t duration_ms) {
     if (!isConnected() || !settings.vibroEnabled) return;
-    uint16_t scaled = (uint16_t)((uint32_t)duration_ms * settings.vibroStrength / 100);
-    uint8_t dur = (uint8_t)min((int)(scaled / 10), 255);
-    if (dur == 0) return;
-    sendCmd(PICO_CMD_HAPTIC_B, dur);  // 0x22 — оба мотора одновременно
+    uint8_t pwr = (uint8_t)(settings.vibroStrength * 15 / 100);
+    if (pwr == 0) return;
+    sendCmd(PICO_CMD_HAPTIC_B, vibroEncode(duration_ms));  // 0x22 — оба мотора одновременно
 }
 
 void ButtonHandler::picoHapticEnable(bool en) {

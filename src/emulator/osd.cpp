@@ -7,6 +7,7 @@
 #include "input/button_handler.h"
 #include "input/touch_handler.h"
 #include "network/web_console.h"
+#include "network/bt_manager.h"
 #include "config.h"
 #include "settings.h"
 #include "driver/i2s.h"
@@ -68,9 +69,11 @@ static ScaleParams getScaleParams() {
 }
 
 // ─── controller state (set from main task via emu_setController) ───────────
-static volatile uint8_t _pad = 0;
+static volatile uint8_t _pad  = 0;
+static volatile uint8_t _pad2 = 0;  // player 2 (Bluetooth)
 
-extern "C" void emu_setController(uint8_t state) { _pad = state; }
+extern "C" void emu_setController(uint8_t state)  { _pad  = state; }
+extern "C" void emu_setController2(uint8_t state) { _pad2 = state; }
 
 // ─── путь текущего ROM (устанавливается в osd_rom_load) ───────────────────────
 static char _romPath[PATH_MAX + 1] = {};
@@ -580,12 +583,6 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
             }
             yFp += yStep;
         }
-        if (settings.scanlines) {
-            for (int y = 1; y < sp.outH; y += 2)
-                for (int x = 0; x < sp.outW; x++)
-                    _frame[y * sp.outW + x] = ~((~_frame[y * sp.outW + x] & 0xF7DE) >> 1);
-        }
-
         // Передаём параметры Core 0 ДО сигнала (happens-before через семафор)
         _renderSp        = sp;
         _renderVolFrames = _volShowFrames;
@@ -1131,6 +1128,30 @@ extern "C" void osd_getinput(void) {
 
     // Синхронизируем глобальный _pad (используется emu_setController извне)
     _pad = pad;
+
+    // ── Player 2 (Bluetooth SPP) ───────────────────────────────────────────
+    if (settings.btEnabled) {
+        static uint8_t _prevPad2 = 0;
+        static const int ev2[8] = {
+            event_joypad2_a,      // бит 0 BTN_A   (0x01)
+            event_joypad2_b,      // бит 1 BTN_B   (0x02)
+            event_joypad2_select, // бит 2 BTN_SEL (0x04)
+            event_joypad2_start,  // бит 3 BTN_STA (0x08)
+            event_joypad2_up,     // бит 4
+            event_joypad2_down,   // бит 5
+            event_joypad2_left,   // бит 6
+            event_joypad2_right,  // бит 7
+        };
+        uint8_t pad2    = btMgrGetPad();
+        uint8_t changed2 = pad2 ^ _prevPad2;
+        _prevPad2 = pad2;
+        _pad2 = pad2;
+        for (int i = 0; i < 8; i++) {
+            if (!(changed2 & (1 << i))) continue;
+            event_t h = event_get(ev2[i]);
+            if (h) h((pad2 & (1 << i)) ? INP_STATE_MAKE : INP_STATE_BREAK);
+        }
+    }
 
     // ── Zapper (light gun) via touchscreen ─────────────────────────────────
     // zapperTouchISR (FALLING на GPIO36) обновляет zap->data=TRIG|HIT

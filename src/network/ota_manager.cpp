@@ -55,14 +55,14 @@ bool otaCheckUpdate(OTAInfo &out) {
 
     // ── JSON фильтр — читаем ТОЛЬКО нужные поля ─────────────────────────
     // GitHub API возвращает 15-50KB JSON, из которого нам нужны 3 поля.
-    // Фильтрация снижает потребность в RAM с ~32KB до ~1KB.
+    // Фильтрация снижает потребность в RAM с ~32KB до ~2KB.
     StaticJsonDocument<128> filter;
     filter["tag_name"] = true;
     filter["assets"][true]["name"] = true;
     filter["assets"][true]["browser_download_url"] = true;
 
-    // Буфер для отфильтрованных данных: tag + 2 ассета × ~120 байт
-    DynamicJsonDocument doc(2048);
+    // Буфер для отфильтрованных данных: tag + до 10 ассетов × ~150 байт
+    DynamicJsonDocument doc(4096);
 
     DeserializationError err = deserializeJson(
         doc, http.getStream(),
@@ -98,6 +98,15 @@ bool otaCheckUpdate(OTAInfo &out) {
                           "/releases/download/" + out.latestVersion + "/firmware.bin";
         Serial.println("[OTA] ESP32 URL not found in assets, using fallback URL");
     }
+
+    // Fallback URL для Pico — всегда строим стандартный URL,
+    // picoAvailable = true означает "нашли в ассетах ИЛИ это стандартный путь"
+    if (out.picoUrl.isEmpty()) {
+        out.picoUrl = String("https://github.com/") + GH_OWNER + "/" + GH_REPO +
+                      "/releases/download/" + out.latestVersion + "/pico_firmware.bin";
+        Serial.println("[OTA] Pico URL not found in assets, using fallback URL");
+    }
+    out.picoAvailable = true;  // URL построен — можно предложить обновление (UI решит по версии)
 
     out.available = isNewerVersion(out.latestVersion);
 

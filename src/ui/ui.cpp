@@ -674,16 +674,16 @@ static bool _menuConfirmDelete(const char *name) {
 }
 
 // ── Три-точечное контекстное меню ──────────────────────────────
-// Возвращает: 0=ничего, 1=Settings, 2=Gallery, 3=WebUpload, 4=Gravity
+// Возвращает: 0=ничего, 1=Settings, 2=WebUpload
 static uint8_t _menuDotMenu() {
     const Theme565& t = getTheme();
     bool ru = (settings.language==LANG_RU);
     // Используем String чтобы cyrStr-буферы не перезаписывались
     static const char *sortEN[] = {"Sort A-Z","Sort Z-A","Sort Size","* Favs First","Sort Default"};
     static const char *sortRU[] = {"А-Я","Я-А","По размеру","* Избр. верх","По умолч."};
-    static const char *itemEN[] = {"","Delete ROM","Gallery","Web Upload","Gravity","Settings"};
-    static const char *itemRU[] = {"","Удалить ROM","Галерея","Загрузить","Gravity","Настройки"};
-    const int N = 6;
+    static const char *itemEN[] = {"","Delete ROM","Web Upload","Settings"};
+    static const char *itemRU[] = {"","Удалить ROM","Загрузить","Настройки"};
+    const int N = 4;
     // Строим String-массив (копирует cyrStr-содержимое)
     String itemStrs[N];
     itemStrs[0] = ru ? cyrStr(sortRU[_sortMode % 5]) : sortEN[_sortMode % 5];
@@ -777,16 +777,10 @@ static uint8_t _menuDotMenu() {
             menuDraw();
             break;
         }
-        case 2:  // Gallery
+        case 2:  // Web Upload
             menuDraw();
             return 2;
-        case 3:  // Web Upload
-            menuDraw();
-            return 3;
-        case 4:  // Gravity Defied
-            menuDraw();
-            return 4;
-        case 5:  // Settings
+        case 3:  // Settings
             menuDraw();
             return 1;
         default:
@@ -1008,9 +1002,7 @@ uint8_t menuHandleTouch(int x, int y, int &romAction) {
             // ⋮ три точки
             uint8_t r = _menuDotMenu();
             if (r == 1) return BTN_SEL;  // → Settings
-            if (r == 2) return 0xD0;     // → Gallery
-            if (r == 3) return 0xD2;     // → Web Upload
-            if (r == 4) return 0xD3;     // → Gravity Defied
+            if (r == 2) return 0xD2;     // → Web Upload
             return 0;
         }
         return 0;
@@ -1632,9 +1624,9 @@ static const char* _catLabel(int cat) {
 // gi=24 → WiFi manager (0x80), gi=25 → Debug sub, gi=26 → OTA (0xA0)
 // gi=33 → Battery screen, gi=41 → Appearance sub, gi=42 → Controls sub, gi=43 → SD Mgr (0xD4)
 static const int _catItems[][10] = {
-    { 0, 4, 7, 34, 35, 41, 47, -1, -1, -1 },        // 0: Display  (41=Appearance→, 47=DateTime→)
+    { 0, 4, 7, 34, 41, 47, -1, -1, -1, -1 },         // 0: Display  (41=Appearance→, 47=DateTime→)
     { 1, 14, 8, 9, -1, -1, -1, -1, -1, -1 },        // 1: Audio
-    { 6, 19, 24, 26, 33, 42, 43, 25, -1, -1 },      // 2: System   (43=SD, 25=Debug→)
+    { 6, 19, 24, 48, 26, 33, 42, 43, 25, -1 },      // 2: System   (48=BT, 43=SD, 25=Debug→)
     { 10, 11, 28, -1, -1, -1, -1, -1, -1, -1 },     // 3: Info
     { 2, 3, 29, -1, -1, -1, -1, -1, -1, -1 },       // 4: Appearance virtual
     { 12, 13, 15, 16, 30, 31, 32, 36, -1, -1 },     // 5: Controls virtual
@@ -1749,6 +1741,7 @@ static String settingValue(int gi) {
             const char *pals[] = {"Default","Nestopia","FCEUX","Virtual"};
             return pals[settings.nesPalette % 4];
         }
+        case 48: return settings.btEnabled ? "On" : "Off";  // Bluetooth
         case 30: return settings.turboEnabled ? "On" : "Off";  // Turbo Buttons
         case 32: {  // Game Genie
             int n = 0;
@@ -1778,7 +1771,6 @@ static String settingValue(int gi) {
                     return ru ? cyrStr(lRuUTF[i]) : lEn[i];
             return ru ? cyrStr("Выкл") : "Off";
         }
-        case 35: return _onOff(settings.scanlines);  // Scanlines
         case 37: return ru ? cyrStr("Открыть >") : "Open >";
         case 38: {  // Web Debug toggle
             if (!webDbgRunning()) return (settings.language==LANG_RU) ? cyrStr("Выкл") : "Off";
@@ -1832,6 +1824,7 @@ static void settingInc(int gi) {
         case 22: settings.diagEmu     = !settings.diagEmu;     break;
         case 23: settings.diagTouch   = !settings.diagTouch;   break;
         case 29: settings.nesPalette = (settings.nesPalette + 1) % 4; break;  // NES Palette
+        case 48: settings.btEnabled = !settings.btEnabled; break;               // Bluetooth toggle
         case 30: settings.turboEnabled = !settings.turboEnabled; break;         // Turbo toggle
         case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
         case 31: {  // Turbo mode cycle: Off→A→B→A+B
@@ -1848,7 +1841,6 @@ static void settingInc(int gi) {
             settings.sleepTimeout = vals[(cur + 1) % 5];
             break;
         }
-        case 35: settings.scanlines = !settings.scanlines; break;  // Scanlines toggle
         case 36: settings.gsEnabled = !settings.gsEnabled; break;  // Game Shark toggle
         case 44: { uint8_t d=timeGetD(), m=timeGetMon(); int dim=31; // упрощённый rollover
                    if (++d > (uint8_t)dim) d=1; timeSetDate(d, m, timeGetY()); break; }
@@ -1886,6 +1878,7 @@ static void settingDec(int gi) {
         case 22: settings.diagEmu     = !settings.diagEmu;     break;
         case 23: settings.diagTouch   = !settings.diagTouch;   break;
         case 29: settings.nesPalette = (settings.nesPalette + 3) % 4; break;  // NES Palette (back)
+        case 48: settings.btEnabled = !settings.btEnabled; break;               // Bluetooth toggle
         case 30: settings.turboEnabled = !settings.turboEnabled; break;
         case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
         case 31: {  // Turbo mode cycle backward
@@ -1902,7 +1895,6 @@ static void settingDec(int gi) {
             settings.sleepTimeout = vals[(cur + 4) % 5];
             break;
         }
-        case 35: settings.scanlines = !settings.scanlines; break;  // Scanlines toggle
         case 36: settings.gsEnabled = !settings.gsEnabled; break;  // Game Shark toggle
         case 44: { uint8_t d=timeGetD(), m=timeGetMon(); if (--d < 1) d=31; timeSetDate(d, m, timeGetY()); break; }
         case 45: { uint8_t m=timeGetMon(); if (--m < 1) m=12; timeSetDate(timeGetD(), m, timeGetY()); break; }
@@ -2161,7 +2153,7 @@ static void buildInfoRows() {
 
 #define INFO_ROW_H  14
 #define INFO_DIV_H  18
-#define INFO_AREA   (DPAD_Y - HDR_H)
+#define INFO_AREA   (DPAD_Y - HDR_H - 8)
 
 static int infoTotalH() {
     int h=0;
@@ -2522,6 +2514,17 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
         case 22:            iconChip(cx,cy,c); break;    // diagEmu
         case 23:            iconLook(cx,cy,c); break;    // diagTouch
         case 24:            iconWifi(cx,cy,c); break;    // WiFi
+        case 48: {  // Bluetooth
+            // Стилизованный символ Bluetooth (вертикальная линия + ромб из стрелок)
+            lcd.drawFastVLine(cx, cy-7, 14, c);
+            lcd.drawLine(cx, cy-7, cx+5, cy-2, c);
+            lcd.drawLine(cx+5, cy-2, cx, cy+3, c);
+            lcd.drawLine(cx, cy+3, cx+5, cy+8, c);
+            lcd.drawLine(cx+5, cy+8, cx, cy+13, c);
+            lcd.drawLine(cx, cy-7, cx-3, cy-4, c);
+            lcd.drawLine(cx, cy+13, cx-3, cy+10, c);
+            break;
+        }
         case 25:            // Debug sub — terminal icon
             lcd.fillRect(cx-9, cy-6, 18, 13, c);
             lcd.fillRect(cx-8, cy-5, 16, 11, 0x1082);
@@ -2545,14 +2548,6 @@ static void drawSettingIcon(int gi, int cx, int cy, uint16_t c) {
         case 34: {  // Sleep — moon icon
             lcd.drawCircle(cx, cy, 6, c);
             lcd.fillCircle(cx+3, cy-2, 5, 0x0000);
-            break;
-        }
-        case 35: {  // Scanlines — horizontal lines icon
-            lcd.drawFastHLine(cx-6, cy-4, 12, c);
-            lcd.drawFastHLine(cx-6, cy-2, 12, c);
-            lcd.drawFastHLine(cx-6, cy,   12, c);
-            lcd.drawFastHLine(cx-6, cy+2, 12, c);
-            lcd.drawFastHLine(cx-6, cy+4, 12, c);
             break;
         }
         case 37: case 38: {  // Web Debug — WiFi icon с жучком
@@ -2601,6 +2596,7 @@ static const char* getLabelForGi(int gi) {
         case 22: return ru ? cyrStr("Лог эмулятора"): "Emu Log";
         case 23: return ru ? cyrStr("Лог касаний")  : "Touch Log";
         case 24: return "WiFi";
+        case 48: return ru ? cyrStr("Bluetooth") : "Bluetooth";
         case 25: return ru ? cyrStr("Отладка")      : "Debug";
         case 26: return ru ? cyrStr("Обновление")   : "Check Update";
         case 28: return ru ? cyrStr("Контроллер")   : "Pico Controller";
@@ -2610,7 +2606,6 @@ static const char* getLabelForGi(int gi) {
         case 32: return "Game Genie";
         case 33: return ru ? cyrStr("Батарея")      : "Battery";
         case 34: return ru ? cyrStr("Сон экрана")   : "Sleep";
-        case 35: return ru ? cyrStr("Сканлайны")    : "Scanlines";
         case 36: return "Game Shark";
         case 37: return ru ? cyrStr("Веб-отладка")  : "Web Debug";
         case 38: return ru ? cyrStr("Веб-консоль")  : "Web Debug";
@@ -3376,39 +3371,58 @@ static void kbClampCol() {
     if (_kbCurCol < 0)  _kbCurCol = 0;
 }
 
+// Вставить символ в позицию курсора и сдвинуть курсор вправо
+static void kbInsertChar(char c) {
+    if (_kbLen >= 63) return;
+    memmove(_kbPassword + _kbCursorPos + 1,
+            _kbPassword + _kbCursorPos,
+            _kbLen - _kbCursorPos + 1);
+    _kbPassword[_kbCursorPos] = c;
+    _kbLen++;
+    _kbCursorPos++;
+}
+
+// Удалить символ слева от курсора (backspace)
+static void kbBackspace() {
+    if (_kbCursorPos > 0) {
+        memmove(_kbPassword + _kbCursorPos - 1,
+                _kbPassword + _kbCursorPos,
+                _kbLen - _kbCursorPos + 1);
+        _kbLen--;
+        _kbCursorPos--;
+    }
+}
+
 // Activate the key currently under the cursor (called on BTN_A press)
 // Returns BTN_A if the "OK" key was activated, 0 otherwise.
 static uint8_t kbActivateCurrent() {
     const char **rows = _kbSymMode ? _kbSym : _kbAlpha;
-    auto addChar = [&](char c) {
-        if (_kbLen < 63) { _kbPassword[_kbLen++] = c; _kbPassword[_kbLen] = '\0'; }
-    };
     if (_kbCurRow == 0) {
         char c = rows[0][_kbCurCol];
         if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
-        addChar(c);
+        kbInsertChar(c);
     } else if (_kbCurRow == 1) {
         char c = rows[1][_kbCurCol];
         if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
-        addChar(c);
+        kbInsertChar(c);
     } else if (_kbCurRow == 2) {
         if (_kbCurCol == 0) {
             if (_kbSymMode) _kbSymMode = false;
             else            _kbCaps = !_kbCaps;
         } else if (_kbCurCol == 8) {
-            if (_kbLen > 0) { _kbPassword[--_kbLen] = '\0'; }
+            kbBackspace();
         } else {
             int ki = _kbCurCol - 1;  // maps col 1-7 → chars index 0-6
             char c = rows[2][ki];
             if (!_kbSymMode) c = _kbCaps ? toupper(c) : tolower(c);
-            addChar(c);
+            kbInsertChar(c);
         }
     } else if (_kbCurRow == 3) {
         if (_kbCurCol == 0) {
             _kbSymMode = !_kbSymMode;
             _kbCaps = false;
         } else if (_kbCurCol == 1) {
-            addChar(' ');
+            kbInsertChar(' ');
         } else if (_kbCurCol == 2) {
             return BTN_A;  // OK button
         }
@@ -3442,9 +3456,10 @@ void wifiKeyboardDraw(const char *ssid) {
     String sn = String(ssid); if(sn.length()>22) sn=sn.substring(0,20)+"..";
     lcd.drawString(sn.c_str(), 6, KB_HDR_H/2 + 8);
 
-    // Input field
-    lcd.fillRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, t.rowOdd);
-    lcd.drawRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, t.accent);
+    // Input field — подсвечивается жёлтым когда активен режим текстового курсора
+    bool cursorMode = (_kbCurRow == -1);
+    lcd.fillRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, cursorMode ? t.rowOdd : t.rowOdd);
+    lcd.drawRoundRect(4, KB_INP_Y+2, SCREEN_W-8, KB_INP_H-4, 5, cursorMode ? (uint16_t)COL_GOLD : t.accent);
     // Show text: masked (dots) for passwords, plain for rename
     String dots = "";
     if (_kbMask) {
@@ -3617,9 +3632,43 @@ uint8_t wifiKeyboardHandleTouch(int x, int y) {
 }
 
 uint8_t wifiKeyboardNavBtn(uint8_t btn) {
-    // D-pad: move cursor
+    // ── Режим перемещения текстового курсора (row == -1) ──────────────────
+    // Активируется: UP с первой строки клавиатуры (row 0)
+    // Выход: DOWN или BTN_A/STA
+    if (_kbCurRow == -1) {
+        if (btn & BTN_LEFT) {
+            if (_kbCursorPos > 0) _kbCursorPos--;
+            wifiKeyboardDraw(_kbSSID); return 0;
+        }
+        if (btn & BTN_RIGHT) {
+            if (_kbCursorPos < _kbLen) _kbCursorPos++;
+            wifiKeyboardDraw(_kbSSID); return 0;
+        }
+        if (btn & BTN_DOWN) {
+            _kbCurRow = 0;  // выход обратно на клавиатуру
+            wifiKeyboardDraw(_kbSSID); return 0;
+        }
+        if (btn & (BTN_A | BTN_STA)) {
+            _kbCurRow = 0;
+            wifiKeyboardDraw(_kbSSID); return 0;
+        }
+        if (btn & BTN_B) {
+            kbBackspace();
+            wifiKeyboardDraw(_kbSSID); return 0;
+        }
+        if (btn & BTN_SEL) return BTN_B;  // отмена
+        return 0;
+    }
+
+    // ── Обычный режим навигации по клавиатуре ─────────────────────────────
     if (btn & BTN_UP) {
-        if (_kbCurRow > 0) { _kbCurRow--; kbClampCol(); }
+        if (_kbCurRow > 0) {
+            _kbCurRow--;
+            kbClampCol();
+        } else if (!_kbMask && _kbLen > 0) {
+            // UP с первой строки (и не пароль) → режим текстового курсора
+            _kbCurRow = -1;
+        }
         wifiKeyboardDraw(_kbSSID); return 0;
     }
     if (btn & BTN_DOWN) {
@@ -3642,10 +3691,10 @@ uint8_t wifiKeyboardNavBtn(uint8_t btn) {
         wifiKeyboardDraw(_kbSSID);
         return r;  // BTN_A if OK was activated, else 0
     }
-    // B: backspace if text exists, cancel if empty
+    // B: backspace at cursor position; cancel if empty
     if (btn & BTN_B) {
         if (_kbLen > 0) {
-            _kbPassword[--_kbLen] = '\0';
+            kbBackspace();
             wifiKeyboardDraw(_kbSSID);
             return 0;
         }
@@ -3668,6 +3717,7 @@ void wifiKeyboardReset() {
     _kbMask = true;       // reset to password mode
     _kbCurRow = 0;        // cursor top-left
     _kbCurCol = 0;
+    // _kbCurRow может быть -1 после редактирования — сбрасываем явно
 }
 
 // Override the top label line (e.g. "Rename:" for file manager)
@@ -4218,23 +4268,33 @@ void otaScreen() {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // ШАГ 2: Обновление Pico (если доступно)
+    // ШАГ 2: Обновление Pico (если версия устарела)
+    // PICO_FW_VER_INT = ожидаемая версия (из config.h, совпадает с pico_controller.ino)
     // ════════════════════════════════════════════════════════════════════════
-    if (info.picoAvailable) {
+    int picoVer = getCachedPicoVer();
+    // picoVer < 0  — Pico не ответил (не подключён или ещё не опрошен)
+    // picoVer == 0 — неизвестно
+    // Обновление нужно если: Pico устарел ИЛИ не смогли узнать версию
+    bool picoNeedsUpdate = info.picoAvailable &&
+                           (picoVer < 0 || picoVer < PICO_FW_VER_INT);
+    if (picoNeedsUpdate) {
         anyAction = true;
         _otaDrawHeader("Update");
 
         fmd(); lcd.setTextColor((uint16_t)COL_GOLD); lcd.setTextDatum(MC_DATUM);
         lcd.drawString("Pico firmware available!", SCREEN_W/2, 72);
         fsm(); lcd.setTextColor(t.textSec);
-        int picoVer = getCachedPicoVer();
         if (picoVer > 0) {
             char buf[40];
-            snprintf(buf, sizeof(buf), "Current Pico: v%d.%d",
-                     picoVer/100, picoVer%100);
+            snprintf(buf, sizeof(buf), "Current Pico: v%d.%d  →  v%d.%d",
+                     picoVer/100, picoVer%100,
+                     PICO_FW_VER_MAJOR, PICO_FW_VER_MINOR);
             lcd.drawString(buf, SCREEN_W/2, 95);
         } else {
-            lcd.drawString("Current Pico: unknown", SCREEN_W/2, 95);
+            char buf[40];
+            snprintf(buf, sizeof(buf), "New: v%d.%d  (current: unknown)",
+                     PICO_FW_VER_MAJOR, PICO_FW_VER_MINOR);
+            lcd.drawString(buf, SCREEN_W/2, 95);
         }
         lcd.drawString("New firmware found in this release", SCREEN_W/2, 112);
         fmd(); lcd.setTextColor(t.textPri);
@@ -4872,548 +4932,4 @@ void gsCodeSaveToSlot(const char *code) {
     if (_gsSel < 1 || _gsSel > 8) return;
     strncpy(settings.gsCodes[_gsSel - 1], code, 6);
     settings.gsCodes[_gsSel - 1][6] = '\0';
-}
-
-// ══════════════════════════════════════════════════════════════
-// ГАЛЕРЕЯ СКРИНШОТОВ
-// ══════════════════════════════════════════════════════════════
-// Уровни:  0 = список игр   1 = список скриншотов   2 = полный экран
-//
-// Файловая схема:
-//   /Screenshots/<name>_NNN.raw  — нумерованные снимки
-//   /Screenshots/<name>.raw      — обложка (может отсутствовать)
-// ──────────────────────────────────────────────────────────────
-
-#define GAL_MAX_GAMES 50
-#define GAL_MAX_SHOTS 30
-#define GAL_ROWS      7    // строк на экране
-#define GAL_ROW_H     M_ROW_H
-
-static int   _galLevel    = 0;
-
-// Уровень 0 — список игр
-static char  _galGames[GAL_MAX_GAMES][48];
-static int   _galGameCnt  = 0;
-static int   _galGameSel  = 0;
-static int   _galGameOff  = 0;
-
-// Уровень 1 — список скриншотов выбранной игры
-static char  _galShots[GAL_MAX_SHOTS][96];
-static int   _galShotCnt  = 0;
-static int   _galShotSel  = 0;
-static int   _galShotOff  = 0;
-
-// ── Сканирование ──────────────────────────────────────────────────────────────
-
-// Сканирует /Screenshots/ и строит список имён игр, у которых есть <name>_NNN.bmp
-static void _galScanGames() {
-    _galGameCnt = 0;
-    File dir = SD.open("/Screenshots");
-    if (!dir) return;
-    File f = dir.openNextFile();
-    while (f) {
-        if (!f.isDirectory()) {
-            String nm = String(f.name());
-            int len = nm.length();
-            // Проверяем паттерн: <name>_NNN.bmp  (NNN = ровно 3 цифры)
-            if (len >= 9 && nm.endsWith(".bmp")) {
-                // Позиция суффикса _NNN.raw: len-8
-                if (nm[len-8] == '_' &&
-                    isdigit(nm[len-7]) && isdigit(nm[len-6]) && isdigit(nm[len-5])) {
-                    String game = nm.substring(0, len - 8);
-                    // Дедупликация
-                    bool found = false;
-                    for (int i = 0; i < _galGameCnt; i++) {
-                        if (strcmp(_galGames[i], game.c_str()) == 0) { found = true; break; }
-                    }
-                    if (!found && _galGameCnt < GAL_MAX_GAMES) {
-                        strncpy(_galGames[_galGameCnt], game.c_str(), 47);
-                        _galGames[_galGameCnt][47] = '\0';  // guarantee null-termination
-                        _galGameCnt++;
-                    }
-                }
-            }
-        }
-        f = dir.openNextFile();
-    }
-    dir.close();
-    // Сортировка (пузырёк, список маленький)
-    for (int i = 0; i < _galGameCnt - 1; i++)
-        for (int j = i + 1; j < _galGameCnt; j++)
-            if (strcmp(_galGames[i], _galGames[j]) > 0) {
-                char tmp[48]; strcpy(tmp, _galGames[i]);
-                strcpy(_galGames[i], _galGames[j]); strcpy(_galGames[j], tmp);
-            }
-}
-
-// Сканирует скриншоты конкретной игры
-static void _galScanShots(const char *gameName) {
-    _galShotCnt = 0;
-    File dir = SD.open("/Screenshots");
-    if (!dir) return;
-    char prefix[56];
-    snprintf(prefix, sizeof(prefix), "%s_", gameName);
-    int plen = strlen(prefix);
-    File f = dir.openNextFile();
-    while (f) {
-        if (!f.isDirectory()) {
-            String nm = String(f.name());
-            int len = nm.length();
-            if (len >= plen + 7 && nm.endsWith(".bmp")) {
-                if (strncmp(nm.c_str(), prefix, plen) == 0) {
-                    const char *numPart = nm.c_str() + plen;
-                    int numLen = len - plen - 4;  // без ".bmp"
-                    if (numLen == 3 && isdigit(numPart[0]) && isdigit(numPart[1]) && isdigit(numPart[2])) {
-                        if (_galShotCnt < GAL_MAX_SHOTS) {
-                            snprintf(_galShots[_galShotCnt++], 95,
-                                     "/Screenshots/%s", nm.c_str());
-                        }
-                    }
-                }
-            }
-        }
-        f = dir.openNextFile();
-    }
-    dir.close();
-    // Сортировка по имени файла = по номеру
-    for (int i = 0; i < _galShotCnt - 1; i++)
-        for (int j = i + 1; j < _galShotCnt; j++)
-            if (strcmp(_galShots[i], _galShots[j]) > 0) {
-                char tmp[96]; strcpy(tmp, _galShots[i]);
-                strcpy(_galShots[i], _galShots[j]); strcpy(_galShots[j], tmp);
-            }
-}
-
-// ── Конвертация BMP скриншота в RAW обложку ──────────────────────────────────
-// Читает .bmp (24-bit), конвертирует BGR888 → RGB565, пишет .raw (наш формат).
-static bool _galSetAsCover(const char *shotPath, const char *gameName) {
-    char coverPath[96];
-    snprintf(coverPath, sizeof(coverPath), "/Screenshots/%s.raw", gameName);
-
-    File src = SD.open(shotPath, FILE_READ);
-    if (!src) return false;
-    uint8_t hdr[54] = {};
-    if (src.read(hdr, 54) != 54 || hdr[0] != 'B' || hdr[1] != 'M') { src.close(); return false; }
-    uint32_t dataOff = (uint32_t)hdr[10] | ((uint32_t)hdr[11]<<8) | ((uint32_t)hdr[12]<<16) | ((uint32_t)hdr[13]<<24);
-    uint16_t srcW   = (uint16_t)hdr[18] | ((uint16_t)hdr[19] << 8);
-    int32_t  srcHs  = (int32_t)((uint32_t)hdr[22] | ((uint32_t)hdr[23]<<8) | ((uint32_t)hdr[24]<<16) | ((uint32_t)hdr[25]<<24));
-    uint16_t srcH   = (uint16_t)(srcHs < 0 ? -srcHs : srcHs);
-    uint32_t rowBytes = ((uint32_t)srcW * 3 + 3) & ~3u;
-
-    SD.remove(coverPath);
-    File dst = SD.open(coverPath, FILE_WRITE);
-    if (!dst) { src.close(); return false; }
-
-    uint8_t  ohdr[4] = { (uint8_t)(srcW & 0xFF), (uint8_t)(srcW >> 8),
-                         (uint8_t)(srcH & 0xFF), (uint8_t)(srcH >> 8) };
-    dst.write(ohdr, 4);
-
-    uint8_t  *rowBuf = (uint8_t  *)malloc(rowBytes);
-    uint16_t *pixBuf = (uint16_t *)malloc((size_t)srcW * 2);
-    bool ok = (rowBuf && pixBuf);
-    if (ok) {
-        src.seek(dataOff);
-        for (int y = 0; y < (int)srcH; y++) {
-            src.read(rowBuf, rowBytes);
-            for (int x = 0; x < (int)srcW; x++) {
-                uint8_t b = rowBuf[x*3+0], g = rowBuf[x*3+1], r = rowBuf[x*3+2];
-                pixBuf[x] = ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
-            }
-            dst.write((uint8_t *)pixBuf, (size_t)srcW * 2);
-        }
-    }
-    free(rowBuf); free(pixBuf);
-    dst.flush(); src.close(); dst.close();
-    return ok;
-}
-
-// ── Диалог «Установить как обложку?» ─────────────────────────────────────────
-static bool _galConfirmCover(const char *gameName) {
-    const Theme565& t = getTheme();
-    const int PX = 10, PY = 65, PW = 300, PH = 100;
-    const int BW = 130, BH = 26, BY = PY + 62;
-    lcd.fillRoundRect(PX, PY, PW, PH, 8, t.header);
-    lcd.drawRoundRect(PX, PY, PW, PH, 8, t.accent);
-    fmd(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.accent);
-    lcd.drawString("Set as cover art?", SCREEN_W / 2, PY + 18);
-    String gn = String(gameName); if (gn.length() > 26) gn = gn.substring(0, 24) + "..";
-    fsm(); lcd.setTextColor(t.textPri);
-    lcd.drawString(gn.c_str(), SCREEN_W / 2, PY + 38);
-    // sel: 0=YES выбран, 1=NO выбран
-    int sel = 0;
-    auto drawBtns = [&]() {
-        // YES — подсветка если sel==0
-        uint16_t yBg = (sel == 0) ? t.accent : t.ok;
-        lcd.fillRoundRect(PX + 8,           BY, BW, BH, 6, yBg);
-        // NO — подсветка если sel==1
-        uint16_t nBg = (sel == 1) ? t.accent : t.selected;
-        lcd.fillRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, nBg);
-        fsm(); lcd.setTextColor((uint16_t)COL_WHITE); lcd.setTextDatum(MC_DATUM);
-        lcd.drawString("YES - Set cover", PX + 8 + BW / 2,       BY + BH / 2);
-        lcd.setTextColor(sel == 1 ? (uint16_t)COL_WHITE : t.textSec);
-        lcd.drawString("NO - Cancel",     PX + PW - 8 - BW / 2,  BY + BH / 2);
-        // Рамка вокруг активной кнопки
-        if (sel == 0) lcd.drawRoundRect(PX + 8,           BY, BW, BH, 6, (uint16_t)COL_WHITE);
-        else          lcd.drawRoundRect(PX + PW - 8 - BW, BY, BW, BH, 6, (uint16_t)COL_WHITE);
-    };
-    drawBtns();
-    delay(300);
-    while (touch.isTouched()) delay(10);  // ждём отпускания START
-    uint32_t until = millis() + 8000;
-    while (millis() < until) {
-        if (touch.isTouched()) {
-            delay(40); int tx = 0, ty = 0; touch.getXY(tx, ty);
-            if (ty >= BY && ty < BY + BH) {
-                if (tx >= PX + 8 && tx < PX + 8 + BW) return true;
-                return false;
-            }
-            return false;
-        }
-        buttons.update();
-        uint8_t btn = buttons.applyBtnMap(buttons.readNew());
-        if (btn & (BTN_LEFT | BTN_UP))  { sel = 0; drawBtns(); until = millis() + 8000; }
-        if (btn & (BTN_RIGHT | BTN_DOWN)){ sel = 1; drawBtns(); until = millis() + 8000; }
-        if (btn & (BTN_A | BTN_STA))    return (sel == 0);
-        if (btn & BTN_B)                return false;
-        if (btn & BTN_SEL)              return false;
-        delay(20);
-    }
-    return false;
-}
-
-// ── Отрисовка ─────────────────────────────────────────────────────────────────
-
-static void _galDrawHeader(const char *title, int count, bool backArrow) {
-    const Theme565& t = getTheme();
-    lcd.fillRect(0, 0, SCREEN_W, M_HDR_H, t.header);
-    lcd.drawFastHLine(0, M_HDR_H - 1, SCREEN_W, t.accent);
-    fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textPri);
-    if (backArrow) {
-        lcd.setTextDatum(ML_DATUM);
-        lcd.drawString("<", 6, M_HDR_H / 2);
-        lcd.setTextDatum(MC_DATUM);
-    }
-    lcd.drawString(title, SCREEN_W / 2, M_HDR_H / 2);
-    if (count >= 0) {
-        char badge[8]; snprintf(badge, sizeof(badge), "%d", count);
-        fsm(); lcd.setTextDatum(MR_DATUM); lcd.setTextColor(t.accent);
-        lcd.drawString(badge, SCREEN_W - 8, M_HDR_H / 2);
-    }
-}
-
-static void _galDrawFooter(const char *leftHint, const char *rightHint) {
-    const Theme565& t = getTheme();
-    int by = M_DPAD_Y;
-    lcd.fillRect(0, by, SCREEN_W, M_BAR_H, t.header);
-    lcd.drawFastHLine(0, by, SCREEN_W, t.accent);
-    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(t.textSec);
-    lcd.drawString(leftHint,  8,            by + M_BAR_H / 2);
-    lcd.setTextDatum(MR_DATUM);
-    lcd.drawString(rightHint, SCREEN_W - 8, by + M_BAR_H / 2);
-}
-
-// Рисует одну строку в галерейном списке
-static void _galDrawRow(int slot, bool sel, const char *label, const char *badge) {
-    const Theme565& t = getTheme();
-    int y  = M_HDR_H + slot * GAL_ROW_H;
-    int cy = y + GAL_ROW_H / 2;
-    uint16_t bg = sel ? t.selected : ((slot % 2) ? t.rowOdd : t.rowEven);
-    lcd.fillRect(0, y, M_LIST_W - 1, GAL_ROW_H, bg);
-    if (slot < GAL_ROWS - 1)
-        lcd.drawFastHLine(0, y + GAL_ROW_H - 1, M_LIST_W - 1, t.header);
-    uint16_t tc = sel ? (t.selText ? t.selText : (uint16_t)COL_WHITE) : t.textPri;
-    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(tc);
-    // Метка обрезается; если есть счётчик — оставляем место
-    int maxLen = badge ? 14 : 17;
-    String lbl_s = String(label);
-    if ((int)lbl_s.length() > maxLen) lbl_s = lbl_s.substring(0, maxLen - 2) + "..";
-    lcd.drawString(lbl_s.c_str(), 8, cy);
-    if (badge) {
-        lcd.setTextDatum(MR_DATUM); lcd.setTextColor(sel ? tc : t.textSec);
-        lcd.drawString(badge, M_LIST_W - 6, cy);
-    }
-}
-
-// ── Уровень 0: список игр ────────────────────────────────────────────────────
-
-static void _galDrawGamesLevel() {
-    const Theme565& t = getTheme();
-    lcd.fillScreen(t.bg);
-    _galDrawHeader("GALLERY", _galGameCnt, false);
-    // Правая панель — превью выбранной игры
-    lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
-    lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
-    if (_galGameCnt > 0) {
-        char covPath[96];
-        snprintf(covPath, sizeof(covPath), "/Screenshots/%s.raw", _galGames[_galGameSel]);
-        _drawRawFile(covPath, M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
-        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
-        lcd.drawString(_galGames[_galGameSel], M_PANEL_X + M_PANEL_W / 2, M_INFO_Y + 12);
-    }
-    // Список игр
-    int visible = min(_galGameCnt - _galGameOff, GAL_ROWS);
-    for (int s = 0; s < GAL_ROWS; s++) {
-        int idx = _galGameOff + s;
-        if (idx >= _galGameCnt) {
-            lcd.fillRect(0, M_HDR_H + s * GAL_ROW_H, M_LIST_W - 1, GAL_ROW_H,
-                         (s % 2) ? t.rowOdd : t.rowEven);
-            continue;
-        }
-        // Подсчёт снимков для этой игры (кэш не нужен — список маленький)
-        char badge[6] = "";
-        // Не сканируем здесь — слишком медленно; показываем просто имя
-        _galDrawRow(s, idx == _galGameSel, _galGames[idx], nullptr);
-    }
-    (void)visible;
-    _galDrawFooter("B: Back", "A: Open");
-}
-
-// ── Уровень 1: список скриншотов ─────────────────────────────────────────────
-
-static void _galDrawShotsLevel() {
-    const Theme565& t = getTheme();
-    lcd.fillScreen(t.bg);
-    // Заголовок с именем игры
-    char hdr[52];
-    snprintf(hdr, sizeof(hdr), "< %s", _galGames[_galGameSel]);
-    _galDrawHeader(hdr, _galShotCnt, true);
-    // Разделитель и правая панель
-    lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
-    lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
-    // Превью выбранного скриншота
-    if (_galShotCnt > 0)
-        _drawBmpFile(_galShots[_galShotSel],
-                     M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
-    // Список скриншотов
-    for (int s = 0; s < GAL_ROWS; s++) {
-        int idx = _galShotOff + s;
-        if (idx >= _galShotCnt) {
-            lcd.fillRect(0, M_HDR_H + s * GAL_ROW_H, M_LIST_W - 1, GAL_ROW_H,
-                         (s % 2) ? t.rowOdd : t.rowEven);
-            continue;
-        }
-        // Имя из пути: "/Screenshots/Name_001.bmp" → "Shot 001"
-        const char *fn = strrchr(_galShots[idx], '/');
-        fn = fn ? fn + 1 : _galShots[idx];
-        // Берём последние 7 символов файла (NNN.bmp) → номер
-        int fnLen = strlen(fn);
-        char label[24] = "Shot ???";
-        if (fnLen >= 7) snprintf(label, sizeof(label), "Shot %c%c%c", fn[fnLen-7], fn[fnLen-6], fn[fnLen-5]);
-        _galDrawRow(s, idx == _galShotSel, label, nullptr);
-    }
-    _galDrawFooter("B: Back", "A: Fullscreen");
-}
-
-// ── Уровень 2: полный экран ───────────────────────────────────────────────────
-
-static void _galDrawFullscreen() {
-    if (_galShotCnt == 0) return;
-    // Рисуем скриншот на весь экран
-    _drawBmpFile(_galShots[_galShotSel], 0, 0, SCREEN_W, SCREEN_H, false);
-    // Нижняя панель-подсказка
-    const Theme565& t = getTheme();
-    lcd.fillRect(0, SCREEN_H - 28, SCREEN_W, 28, 0x0000u);
-    lcd.fillRect(0, SCREEN_H - 28, SCREEN_W, 1, t.accent);
-    fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor((uint16_t)COL_GOLD);
-    lcd.drawString("STA: Set cover", 8, SCREEN_H - 14);
-    lcd.setTextDatum(MR_DATUM); lcd.setTextColor(t.textSec);
-    lcd.drawString("B: Back", SCREEN_W - 8, SCREEN_H - 14);
-}
-
-// ── Частичное обновление правой панели (уровни 0 и 1) ───────────────────────
-
-static void _galUpdatePanel() {
-    const Theme565& t = getTheme();
-    lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
-    if (_galLevel == 0 && _galGameCnt > 0) {
-        char covPath[96];
-        snprintf(covPath, sizeof(covPath), "/Screenshots/%s.raw", _galGames[_galGameSel]);
-        _drawRawFile(covPath, M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
-        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
-        lcd.drawString(_galGames[_galGameSel], M_PANEL_X + M_PANEL_W / 2, M_INFO_Y + 12);
-    } else if (_galLevel == 1 && _galShotCnt > 0) {
-        _drawBmpFile(_galShots[_galShotSel],
-                     M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4, false);
-    }
-}
-
-// ── Переключение строки списка с частичной перерисовкой ──────────────────────
-
-static void _galMoveSel(int delta) {
-    if (_galLevel == 0) {
-        if (_galGameCnt == 0) return;
-        int oldSel = _galGameSel;
-        _galGameSel = constrain(_galGameSel + delta, 0, _galGameCnt - 1);
-        if (_galGameSel == oldSel) return;
-        // Прокрутка окна
-        if (_galGameSel < _galGameOff) _galGameOff = _galGameSel;
-        if (_galGameSel >= _galGameOff + GAL_ROWS) _galGameOff = _galGameSel - GAL_ROWS + 1;
-        // Перерисовываем затронутые строки
-        int olds = oldSel - _galGameOff, news = _galGameSel - _galGameOff;
-        if (olds >= 0 && olds < GAL_ROWS) {
-            const char *lbl = _galGames[oldSel];
-            _galDrawRow(olds, false, lbl, nullptr);
-        }
-        if (news >= 0 && news < GAL_ROWS) {
-            _galDrawRow(news, true, _galGames[_galGameSel], nullptr);
-        }
-        _galUpdatePanel();
-    } else if (_galLevel == 1) {
-        if (_galShotCnt == 0) return;
-        int oldSel = _galShotSel;
-        _galShotSel = constrain(_galShotSel + delta, 0, _galShotCnt - 1);
-        if (_galShotSel == oldSel) return;
-        if (_galShotSel < _galShotOff) _galShotOff = _galShotSel;
-        if (_galShotSel >= _galShotOff + GAL_ROWS) _galShotOff = _galShotSel - GAL_ROWS + 1;
-        int olds = oldSel - _galShotOff, news = _galShotSel - _galShotOff;
-        // Имя из пути для старой и новой строки
-        auto shotLabel = [](int idx, char *buf, int bufsz) {
-            const char *fn = strrchr(_galShots[idx], '/');
-            fn = fn ? fn + 1 : _galShots[idx];
-            int fnl = strlen(fn);
-            if (fnl >= 7) snprintf(buf, bufsz, "Shot %c%c%c", fn[fnl-7], fn[fnl-6], fn[fnl-5]);
-            else          snprintf(buf, bufsz, "Shot ???");
-        };
-        char lbl[24];
-        if (olds >= 0 && olds < GAL_ROWS) { shotLabel(oldSel, lbl, sizeof(lbl)); _galDrawRow(olds, false, lbl, nullptr); }
-        if (news >= 0 && news < GAL_ROWS) { shotLabel(_galShotSel, lbl, sizeof(lbl)); _galDrawRow(news, true, lbl, nullptr); }
-        _galUpdatePanel();
-    }
-}
-
-
-// ══════════════════════════════════════════════════════════════
-// PUBLIC GALLERY API
-// ══════════════════════════════════════════════════════════════
-
-void galleryOpen() {
-    _galLevel = 0;
-    _galGameSel = 0; _galGameOff = 0;
-    _galShotSel = 0; _galShotOff = 0;
-    _galScanGames();
-    _galDrawGamesLevel();
-}
-
-void galleryDraw() {
-    if      (_galLevel == 0) _galDrawGamesLevel();
-    else if (_galLevel == 1) _galDrawShotsLevel();
-    else if (_galLevel == 2) _galDrawFullscreen();
-}
-
-// Возвращает BTN_B когда пользователь вышел из галереи
-uint8_t galleryNavBtn(uint8_t btn) {
-    if (_galLevel == 2) {
-        // Полный экран: STA = установить обложку, B/SEL = назад
-        if (btn & BTN_STA) {
-            if (_galConfirmCover(_galGames[_galGameSel])) {
-                _galSetAsCover(_galShots[_galShotSel], _galGames[_galGameSel]);
-                _coverLastRom = -2;  // сбрасываем кэш обложки в меню
-            }
-            _galDrawFullscreen();
-            return 0;
-        }
-        if (btn & (BTN_B | BTN_SEL)) {
-            _galLevel = 1; _galDrawShotsLevel(); return 0;
-        }
-        return 0;
-    }
-    if (_galLevel == 1) {
-        if (btn & BTN_UP)   { _galMoveSel(-1); return 0; }
-        if (btn & BTN_DOWN) { _galMoveSel(+1); return 0; }
-        if (btn & (BTN_A | BTN_STA)) {
-            _galLevel = 2; _galDrawFullscreen(); return 0;
-        }
-        if (btn & (BTN_B | BTN_SEL)) {
-            _galLevel = 0; _galDrawGamesLevel(); return 0;
-        }
-        return 0;
-    }
-    // Уровень 0
-    if (btn & BTN_UP)   { _galMoveSel(-1); return 0; }
-    if (btn & BTN_DOWN) { _galMoveSel(+1); return 0; }
-    if (btn & (BTN_A | BTN_STA)) {
-        if (_galGameCnt == 0) return 0;
-        _galShotSel = 0; _galShotOff = 0;
-        _galScanShots(_galGames[_galGameSel]);
-        _galLevel = 1; _galDrawShotsLevel(); return 0;
-    }
-    if (btn & (BTN_B | BTN_SEL)) return BTN_B;  // выход из галереи
-    return 0;
-}
-
-uint8_t galleryHandleTouch(int x, int y) {
-    if (_galLevel == 2) {
-        // Нижняя панель (y >= SCREEN_H-28):
-        //   левая половина → Set cover  |  правая половина → Back
-        if (y >= SCREEN_H - 28) {
-            if (x < SCREEN_W / 2) {
-                // Установить обложку
-                if (_galConfirmCover(_galGames[_galGameSel])) {
-                    _galSetAsCover(_galShots[_galShotSel], _galGames[_galGameSel]);
-                    _coverLastRom = -2;
-                }
-                _galDrawFullscreen();
-            } else {
-                // Назад
-                _galLevel = 1; _galDrawShotsLevel();
-            }
-            return 0;
-        }
-        // Тап по картинке → назад
-        _galLevel = 1; _galDrawShotsLevel(); return 0;
-    }
-    if (_galLevel == 1) {
-        if (y < M_HDR_H) {
-            // Тап по заголовку (стрелка назад)
-            if (x < 30) { _galLevel = 0; _galDrawGamesLevel(); return 0; }
-            return 0;
-        }
-        if (y >= M_DPAD_Y) return 0;
-        if (x >= M_PANEL_X) {
-            // Тап по правой панели → полный экран
-            if (_galShotCnt > 0) { _galLevel = 2; _galDrawFullscreen(); } return 0;
-        }
-        int slot = (y - M_HDR_H) / GAL_ROW_H;
-        int idx  = _galShotOff + slot;
-        if (idx >= _galShotCnt) return 0;
-        if (idx == _galShotSel) {
-            _galLevel = 2; _galDrawFullscreen(); return 0;
-        }
-        int oldSel = _galShotSel; _galShotSel = idx;
-        if (_galShotSel < _galShotOff) _galShotOff = _galShotSel;
-        if (_galShotSel >= _galShotOff + GAL_ROWS) _galShotOff = _galShotSel - GAL_ROWS + 1;
-        char lbl[24];
-        auto shotLabel = [](int i, char *b, int bs) {
-            const char *fn = strrchr(_galShots[i], '/'); fn = fn ? fn + 1 : _galShots[i];
-            int fnl = strlen(fn);
-            if (fnl >= 7) snprintf(b, bs, "Shot %c%c%c", fn[fnl-7], fn[fnl-6], fn[fnl-5]);
-            else          snprintf(b, bs, "Shot ???");
-        };
-        int olds = oldSel - _galShotOff;
-        int news = _galShotSel - _galShotOff;
-        if (olds >= 0 && olds < GAL_ROWS) { shotLabel(oldSel, lbl, sizeof(lbl)); _galDrawRow(olds, false, lbl, nullptr); }
-        if (news >= 0 && news < GAL_ROWS) { shotLabel(_galShotSel, lbl, sizeof(lbl)); _galDrawRow(news, true, lbl, nullptr); }
-        _galUpdatePanel();
-        return 0;
-    }
-    // Уровень 0
-    if (y < M_HDR_H || y >= M_DPAD_Y) return 0;
-    if (x >= M_PANEL_X) return 0;
-    int slot = (y - M_HDR_H) / GAL_ROW_H;
-    int idx  = _galGameOff + slot;
-    if (idx >= _galGameCnt) return 0;
-    if (idx == _galGameSel) {
-        // Двойной тап = открыть список скриншотов
-        _galShotSel = 0; _galShotOff = 0;
-        _galScanShots(_galGames[_galGameSel]);
-        _galLevel = 1; _galDrawShotsLevel(); return 0;
-    }
-    int oldSel = _galGameSel; _galGameSel = idx;
-    if (_galGameSel < _galGameOff) _galGameOff = _galGameSel;
-    if (_galGameSel >= _galGameOff + GAL_ROWS) _galGameOff = _galGameSel - GAL_ROWS + 1;
-    int olds = oldSel - _galGameOff, news = _galGameSel - _galGameOff;
-    if (olds >= 0 && olds < GAL_ROWS) _galDrawRow(olds, false, _galGames[oldSel], nullptr);
-    if (news >= 0 && news < GAL_ROWS) _galDrawRow(news, true,  _galGames[_galGameSel], nullptr);
-    _galUpdatePanel();
-    return 0;
 }

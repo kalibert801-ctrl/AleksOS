@@ -2,7 +2,7 @@
 // ── Версионирование ───────────────────────────────────────
 // Правило: minor изменения = вторая цифра +1 (v8.4→v8.5)
 //          major изменения = первая цифра +1, вторая = 0 (v8.x→v9.0)
-#define FIRMWARE_VERSION "AleksOS BETA v15.64"
+#define FIRMWARE_VERSION "AleksOS v16.00"
 
 // ── Дисплей (VSPI) ────────────────────────────────────────
 #define TFT_CS   15
@@ -126,6 +126,15 @@
 // Настроить: BAT_CAL_GAIN = V_мультиметр / V_устройство
 // Пример: мультиметр 3.72В, устройство 3.45В → 3.72/3.45 = 1.078
 #define BAT_CAL_GAIN  1.078f
+
+// ── Версия прошивки Pico (для проверки обновлений) ───────────────
+// Должна совпадать с PICO_VER_MAJOR/MINOR в pico_controller.ino
+#define PICO_FW_VER_MAJOR  5
+#define PICO_FW_VER_MINOR  11
+#define PICO_FW_VER_INT    (PICO_FW_VER_MAJOR * 100 + PICO_FW_VER_MINOR)
+
+// ── Bluetooth ─────────────────────────────────────────────────
+#define BT_DEVICE_NAME  "AleksOS"   // имя SPP сервера (видно при сопряжении)
 
 // ── Пути ─────────────────────────────────────────────────
 #define ROM_DIR   "/FomiCon"

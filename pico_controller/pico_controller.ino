@@ -2,7 +2,7 @@
 //
 // ── Версія прошивки Pico ──────────────────────────────────────────────────────
 #define PICO_VER_MAJOR  5
-#define PICO_VER_MINOR  10
+#define PICO_VER_MINOR  11
 // ─────────────────────────────────────────────────────────────────────────────
 // ПРОТОКОЛ (звичайний режим):
 //   Pico→ESP32: [0xAA][0x42][btns][~btns]       — 4 байти, кожні 16мс (ігрові кнопки)
@@ -10,9 +10,9 @@
 //   ESP32→Pico: [0xAA][cmd][data][cmd^data]      — 4 байти
 //     0x01 = PING
 //     0x02 = VERSION   → відповідь [0xAA][0x56][hi][lo]
-//     0x20 = MOT1      data=duration×10ms  (0=стоп)
-//     0x21 = MOT2      data=duration×10ms  (0=стоп)
-//     0x22 = BOTH      data=duration×10ms  — обидва мотори одночасно
+//     0x20 = MOT1      data=[(power:4)|(dur:4)]  power=нібл×17→PWM, dur=нібл×10мс; 0=стоп
+//     0x21 = MOT2      data=[(power:4)|(dur:4)]  — маппується до MOT1
+//     0x22 = BOTH      data=[(power:4)|(dur:4)]  — обидва мотори одночасно
 //     0x23 = HAPTIC_EN data=0/1            — вмкн/вимкн авто-вібро від кнопок
 //     0xF0 = OTA       data=0  → починаємо оновлення прошивки
 //
@@ -176,10 +176,9 @@ void motorUpdate() {
     if (mot1_end && now >= mot1_end) { analogWrite(PIN_MOT1, 0); mot1_end = 0; }
 }
 
-void motorRun(uint8_t dur10ms) {
-    uint32_t ms = (uint32_t)dur10ms * 10;
-    mot1_end = millis() + ms;
-    analogWrite(PIN_MOT1, 255);
+void motorRun(uint8_t power255, uint8_t dur10ms) {
+    mot1_end = millis() + (uint32_t)dur10ms * 10;
+    analogWrite(PIN_MOT1, power255);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -222,10 +221,15 @@ void rxByte(uint8_t b) {
 
         case 0x20: // MOT1
         case 0x21: // (MOT2 removed — mapped to MOT1)
-        case 0x22: // BOTH — mapped to single motor
+        case 0x22: { // BOTH — mapped to single motor
             if (data == 0) { analogWrite(PIN_MOT1, 0); mot1_end = 0; }
-            else motorRun(data);
+            else {
+                uint8_t pwr = (uint8_t)((data >> 4) * 17); // нібл 0-15 → PWM 0-255
+                uint8_t dur = (data & 0x0F);                // нібл 0-15 → 0-150мс
+                if (pwr > 0 && dur > 0) motorRun(pwr, dur);
+            }
             break;
+        }
 
         case 0x23: // HAPTIC_EN
             hapticEnabled = (data != 0);
@@ -360,7 +364,7 @@ void setup() {
     pinMode(PIN_MOT1, OUTPUT); analogWrite(PIN_MOT1, 0);
     pinMode(LED_PIN,  OUTPUT);
     // Старт-сигнал: вібро 80мс
-    motorRun(8);
+    motorRun(255, 8);
 }
 
 void loop() {
@@ -377,7 +381,7 @@ void loop() {
         // Авто-вібро при натисканні кнопок (локально на Pico — без ESP32)
         if (hapticEnabled) {
             uint8_t newPress = b & ~prevBtn;
-            if (newPress) motorRun(BTN_HAPTIC_DUR);
+            if (newPress) motorRun(255, BTN_HAPTIC_DUR);
         }
         prevBtn = b;
 

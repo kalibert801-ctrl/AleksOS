@@ -70,8 +70,8 @@ void cfgLoad() {
     // ── Game Genie ──────────────────────────────────────────────────────────
     settings.ggEnabled    = doc["gg_en"]       | 0;
     settings.sleepTimeout = doc["sleep_to"]    | 0;
-    settings.scanlines    = doc["scanlines"]   | 0;
     settings.gsEnabled    = doc["gs_en"]       | 0;
+    settings.btEnabled    = doc["bt_en"]       | 0;
     memset(settings.gsCodes, 0, sizeof(settings.gsCodes));
     if (doc.containsKey("gs")) {
         JsonArray gsArr = doc["gs"].as<JsonArray>();
@@ -163,8 +163,8 @@ void cfgSave() {
     // ── Game Genie ─────────────────────────────────────────────────────────
     doc["gg_en"]      = settings.ggEnabled;
     doc["sleep_to"]   = settings.sleepTimeout;
-    doc["scanlines"]  = settings.scanlines;
     doc["gs_en"]      = settings.gsEnabled;
+    doc["bt_en"]      = settings.btEnabled;
     JsonArray gsArr = doc.createNestedArray("gs");
     for (int i = 0; i < 8; i++) gsArr.add(settings.gsCodes[i]);
     JsonArray ggArr = doc.createNestedArray("gg");
