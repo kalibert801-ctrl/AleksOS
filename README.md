@@ -153,16 +153,24 @@ ESP32 → Pico:  [0xAA] [cmd]  [data]   [cmd ^ data]
 
 ### Прошивка Pico
 
-Исходники — папка `pico_controller/`. Прошивается через Arduino IDE.
+Исходники — папка `pico_controller/`.
 
 > ⚠️ **Перед прошивкой Pico отключить провода от ESP32 (GP0, GP1, 3V3, GND).**  
 > USB питает Pico на 5V → через 3.3V на ESP32 → перегружает стабилизатор Pico.
 
-1. Отключить Pico от ESP32
-2. Подключить по USB к ПК
-3. Открыть `pico_controller/` в Arduino IDE, плата "Raspberry Pi Pico"
-4. Загрузить прошивку
-5. Подключить обратно к ESP32
+**Способ 1 — UF2 (быстро, без IDE):**
+
+1. Зажать BOOTSEL на Pico и подключить по USB — появится диск `RPI-RP2`
+2. Скопировать `pico_controller/build/rp2040.rp2040.rpipico/pico_controller.ino.uf2` на этот диск
+3. Pico перезагрузится автоматически
+4. Подключить обратно к ESP32
+
+**Способ 2 — Arduino IDE:**
+
+1. Отключить Pico от ESP32, подключить по USB к ПК
+2. Открыть `pico_controller/pico_controller.ino` в Arduino IDE, плата "Raspberry Pi Pico"
+3. Загрузить прошивку
+4. Подключить обратно к ESP32
 
 > При прошивке **ESP32** отключать Pico не нужно.
 
@@ -190,7 +198,7 @@ flutter build apk --release
 
 ---
 
-## Сборка и прошивка
+## Сборка и прошивка ESP32
 
 ```bash
 # Установить PlatformIO
@@ -200,12 +208,21 @@ pip install platformio
 git clone https://github.com/kalibert801-ctrl/AleksOS.git
 cd AleksOS
 pio run
-
-# Прошивка (зажать BOOT, затем:)
-pio run --target upload
 ```
 
-Готовый бинарник: `releases/firmware.bin` — прошивается через esptool или через `/update` в веб-менеджере.
+Собранный бинарник: `.pio/build/esp32-2432S028R/firmware.bin`
+
+**Способы прошивки:**
+
+- **PlatformIO** (USB, зажать BOOT на плате):
+  ```bash
+  pio run --target upload
+  ```
+- **Веб-менеджер** (OTA по WiFi): открыть `http://<ip>/update`, загрузить `firmware.bin`
+- **esptool** (ручная прошивка):
+  ```bash
+  esptool.py --chip esp32 --baud 921600 write_flash 0x10000 firmware.bin
+  ```
 
 ---
 
