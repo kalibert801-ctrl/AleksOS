@@ -152,10 +152,19 @@ uint8 input_get(int types)
    return value;
 }
 
+/* clear all registered inputs — call before event_init() on each game session */
+void input_reset(void)
+{
+   active_entries = 0;
+}
+
 /* register an input type */
 void input_register(nesinput_t *input)
 {
    if (NULL == input)
+      return;
+
+   if (active_entries >= MAX_CONTROLLERS)
       return;
 
    nes_input[active_entries] = input;

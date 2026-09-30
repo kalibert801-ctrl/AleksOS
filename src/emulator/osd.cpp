@@ -956,6 +956,11 @@ static void _ingameMenu(void) {
                     showIcon(true, 1);  // камера
                     break;
                 case 4:  // Exit to Menu
+                    if (settings.autoSave) {
+                        state_setslot(0);
+                        int ar = state_save();
+                        showIcon(ar == 0, ar == 0 ? 0 : 2);  // дискета или X
+                    }
                     _emuExitReq = true;
                     nes_poweroff();
                     return;
@@ -1064,6 +1069,7 @@ extern "C" void osd_getinput(void) {
         if (++_inp_exitFrames >= 60) {
             _inp_exitFrames = 0;
             printf("[EMU] SELECT+START held → exit\n");
+            if (settings.autoSave) { state_setslot(0); state_save(); }
             _emuExitReq = true;
             nes_poweroff();
             return;
@@ -1154,19 +1160,18 @@ extern "C" void osd_getinput(void) {
     }
 
     // ── Zapper (light gun) via touchscreen ─────────────────────────────────
-    // zapperTouchISR (FALLING на GPIO36) обновляет zap->data=TRIG|HIT
-    // немедленно внутри nes_renderframe() — нет задержки в кадр.
-    // osd_getinput() только поддерживает активность пока держим палец
-    // и сбрасывает в MISS когда таймаут истёк.
+    // Two detection paths (OR logic for maximum compatibility):
+    //   1. digitalRead(TOUCH_IRQ): fast GPIO check if PENIRQ is wired to GPIO36
+    //   2. touch.zapperTouched():  direct SPI Z-pressure read — works even if
+    //      PENIRQ is not connected on this board revision
     {
         nesinput_t *zap = _zapInputPtr;
         if (zap) {
-            if (digitalRead(TOUCH_IRQ) == LOW) {
-                // палец держим — продлеваем окно
+            bool touching = (digitalRead(TOUCH_IRQ) == LOW) || touch.zapperTouched();
+            if (touching) {
                 _zapCountdown = 8;
                 zap->data = INP_ZAPPER_TRIG | INP_ZAPPER_HIT;
             } else if (_zapCountdown > 0) {
-                // палец отпустили — ещё 8 кадров активности
                 _zapCountdown--;
                 zap->data = INP_ZAPPER_TRIG | INP_ZAPPER_HIT;
             } else {
@@ -1370,4 +1375,8 @@ extern "C" void osd_shutdown(void) {
     ** free(_fb) would trigger heap-poisoning panic → reboot.
     ** It is allocated once and reused across sessions (osd_init checks !_fb). */
     audio_deinit();
+
+    detachInterrupt(digitalPinToInterrupt(TOUCH_IRQ));
+    _zapInputPtr = nullptr;
+    _zapCountdown = 0;
 }

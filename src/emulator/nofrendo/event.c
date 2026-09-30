@@ -534,6 +534,16 @@ static event_t *event_system_table[NUM_SUPPORTED_SYSTEMS] =
 
 void event_init(void)
 {
+   /* Reset stale button state from previous session. Without this, buttons
+   ** held at exit remain "pressed" at the start of the next game. */
+   kb_input.data     = 0;
+   kb_alt_input.data = 0;
+   zapper_input.data = INP_ZAPPER_MISS;
+
+   /* Clear accumulated registrations. active_entries grows by 3 each session
+   ** and would overflow nes_input[MAX_CONTROLLERS=32] after 10 sessions. */
+   input_reset();
+
    input_register(&kb_input);
    input_register(&kb_alt_input);
    input_register(&zapper_input);

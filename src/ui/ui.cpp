@@ -537,6 +537,7 @@ static void _menuDrawFooter() {
 
 // ── Правая панель (обложка + инфо) ─────────────────────────────
 static void _menuDrawRightPanel(int romIdx) {
+    if (romIdx == _coverLastRom) return;  // тот же ROM — не читать SD повторно
     const Theme565& t = getTheme();
     lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
 
@@ -795,6 +796,7 @@ static uint8_t _menuDotMenu() {
 // ══════════════════════════════════════════════════════════════
 
 void menuDraw() {
+    _coverLastRom = -2;  // сбросить кэш — полная перерисовка включая правую панель
     const ThemePlugin* tp = ThemeRegistry::active();
     const Theme565& t     = getTheme();
 
@@ -823,10 +825,12 @@ void menuDraw() {
     } else {
         if (!tp) { lcd.fillRect(0, M_HDR_H, M_LIST_W, M_DPAD_Y - M_HDR_H, t.bg); }
         else {
+            lcd.startWrite();
             int end = min(_menuOffset + M_ROWS, total);
             for (int i = _menuOffset; i < end; i++)
                 tp->drawRomRow(_menuActual(i), i - _menuOffset, i == _menuSel);
             _menuDrawScrollArrows(total);
+            lcd.endWrite();
         }
     }
 
@@ -938,10 +942,12 @@ static void _menuRefreshListArea() {
             fsm(); lcd.drawString(cyrStr(S().noRomsHint), M_LIST_W / 2, ey + 10);
         }
     } else if (tp) {
+        lcd.startWrite();
         int end = min(_menuOffset + M_ROWS, total);
         for (int i = _menuOffset; i < end; i++)
             tp->drawRomRow(_menuActual(i), i - _menuOffset, i == _menuSel);
         _menuDrawScrollArrows(total);
+        lcd.endWrite();
     }
 
     _menuDrawRightPanel(_menuActual(_menuSel));

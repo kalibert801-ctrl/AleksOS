@@ -41,6 +41,10 @@ enum State { S_MENU, S_SETTINGS, S_REMAP, S_PLAYING, S_WIFI, S_WIFI_KB,
 static State state = S_MENU;
 static bool  _settingsFromMenu = false;  // opened from main screen footer tap → Back returns to menu
 
+// ── Sleep state (file-scope so runEmulator() can reset after game exit) ──────
+static bool     _sleeping       = false;
+static uint32_t _lastActivityMs = 0;
+
 // ── Screen-transition helpers ─────────────────────────────────────────────
 // fadeOut: dim to black in 5 steps × 10 ms ≈ 50 ms
 // fadeIn : restore brightness in 5 steps × 10 ms ≈ 50 ms
@@ -397,8 +401,6 @@ void loop() {
     // Отслеживаем активность; при таймауте гасим экран.
     // Любое нажатие/тап во время сна просыпает устройство (ввод поглощается).
     {
-        static uint32_t _lastActivityMs = 0;
-        static bool     _sleeping       = false;
         bool anyInput = (btnPhys != 0) || tapped;
 
         if (anyInput) {
@@ -923,7 +925,7 @@ void loop() {
 
     }
 
-    delay(16);
+    delay(6);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1016,6 +1018,11 @@ static void runEmulator(int idx) {
     if (settings.diagEmu)
         webConsolePrintf("[SYS] Emulator exited: result=%d  heap=%uKB  playtime=%us\n",
                          result, (unsigned)(ESP.getFreeHeap()/1024), (unsigned)_playSecs);
+
+    // Сбрасываем таймер сна — за время игры он мог накопить давно прошедшее время
+    _sleeping = false;
+    _lastActivityMs = millis();
+    setBrightness(settings.brightness);
 
     initDisplay();
     touch.init();

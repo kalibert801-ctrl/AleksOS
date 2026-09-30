@@ -53,6 +53,23 @@ bool TouchHandler::rawTouched() {
     return true;
 }
 
+bool TouchHandler::zapperTouched() {
+    // Direct XPT2046 Z-pressure read via SPI — works regardless of PENIRQ/isrWake.
+    // Called from Core 1 (emulator); VSPI (touch) is separate from HSPI (display) — no conflict.
+    // Protocol: send cmd byte → read 16 bits (null + 12-bit result + 3 zeros) → shift right 3.
+    tsSPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(TOUCH_CS, LOW);
+    delayMicroseconds(1);
+    tsSPI.transfer(0xB1);                               // Z1 conversion command
+    int16_t z1 = (int16_t)(tsSPI.transfer16(0) >> 3);  // read Z1 result (12-bit)
+    tsSPI.transfer(0xC1);                               // Z2 conversion command
+    int16_t z2 = (int16_t)(tsSPI.transfer16(0) >> 3);  // read Z2 result (12-bit)
+    tsSPI.transfer(0x00);                               // power-down XPT2046
+    digitalWrite(TOUCH_CS, HIGH);
+    tsSPI.endTransaction();
+    return (z1 + 4095 - z2) > 400;
+}
+
 TapType TouchHandler::checkDoubleTap(int x, int y, int row) {
     (void)x; (void)y;
     uint32_t now = millis();

@@ -79,6 +79,7 @@ typedef struct nesinput_s
 
 extern uint8 input_get(int type);
 extern void input_register(nesinput_t *input);
+extern void input_reset(void);
 extern void input_event(nesinput_t *input, int state, int value);
 extern void input_strobe(void);
 

@@ -8,6 +8,7 @@ public:
     void init();
     bool isTouched();           // edge: true only on new press
     bool rawTouched();          // level: true WHILE finger is held down (for NES controls)
+    bool zapperTouched();       // direct SPI Z-pressure read — works during NES emulation
     void getXY(int &x, int &y);
     TapType checkDoubleTap(int x, int y, int row);
 private:
