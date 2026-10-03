@@ -198,6 +198,7 @@ static void renderOutputTask(void*) {
 
         if (_renderVolFrames > 0) {
             const int bx = SCREEN_W - 82, by = 4, bw = 78, bh = 20;
+            lcd.startWrite();
             lcd.fillRect(bx - 1, by - 1, bw + 2, bh + 2, 0x0000);
             lcd.drawRect(bx, by, bw, bh, 0xFFFF);
             int fill = (bw - 2) * settings.emuVolume / 100;
@@ -208,6 +209,7 @@ static void renderOutputTask(void*) {
             lcd.setTextDatum(MC_DATUM);
             lcd.setTextColor(settings.emuVolume > 50 ? 0x0000 : 0xFFFF);
             lcd.drawString(vbuf, bx + bw / 2, by + bh / 2 + 1);
+            lcd.endWrite();
         }
 
         xSemaphoreGive(_renderDone);
@@ -282,18 +284,24 @@ static void audio_frame(void) {
     if (need <= 0) return;
 
     uint8_t vol = settings.emuVolume > 100 ? 100 : settings.emuVolume;
+    // Q15-масштаб громкости: предвычисляем один раз вне цикла.
+    // (s * vol_q15) >> 15 заменяет s * vol / 100 без деления в каждом сэмпле.
+    const int32_t vol_q15 = (int32_t)vol * 32768 / 100;
 
     while (need > 0) {
         int n = need > NES_FRAG_SAMPLES ? NES_FRAG_SAMPLES : need;
         _audio_cb(_audio_buf, n);
 
+        // Снимок _rTail до цикла: volatile-чтение вынесено из горячего пути.
+        const uint32_t tailSnap = _rTail;
+
         for (int i = 0; i < n; i++) {
             int32_t s = (int32_t)(int16_t)_audio_buf[i];  // signed int16 из APU
-            s = s * (int32_t)vol / 100;
+            s = (s * vol_q15) >> 15;
             // DC-блокер: y[n] = x[n] − x[n-1] + 0.999·y[n-1], fc ≈ 7 Гц.
-            // Убирает DC-смещение от DMC-канала и асимметрии меандров.
+            // _dcY - (_dcY >> 10) ≈ _dcY * 0.999023 (ошибка <0.003% vs 0.999).
             {
-                int32_t ny = s - _dcX + _dcY * 999 / 1000;
+                int32_t ny = s - _dcX + (_dcY - (_dcY >> 10));
                 _dcX = s;
                 _dcY = ny;
                 s = ny;
@@ -310,15 +318,13 @@ static void audio_frame(void) {
                     s = s < 0 ? -a : a;
                 }
             }
-            // Нормируем к 8-bit DAC. Делитель 120: ±15000 → ±125 → DAC 3..253 (98%),
-            // лимитер выше защищает от перегрузки. Было (s+0x8000)&0xFF00 — только 46%.
             int32_t dv = s / 120 + 128;
             if (dv < 0) dv = 0; else if (dv > 255) dv = 255;
             uint16_t out = (uint16_t)dv << 8;
 
-            // SPSC запись в моно-кольцо
+            // SPSC запись в моно-кольцо (используем снимок tailSnap)
             uint32_t h = _rHead;
-            if ((int)(RING_SAMPLES - (h - _rTail)) > 0) {
+            if ((int)(RING_SAMPLES - (h - tailSnap)) > 0) {
                 _ring[h & (RING_SAMPLES - 1u)] = out;
                 __sync_synchronize();  // RELEASE: данные в PSRAM ДО обновления _rHead
                 _rHead = h + 1u;
@@ -527,17 +533,31 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
     // (≈93 мс) защищает от переполнения без капа.
 
     // ── Game Shark: пишем коды в RAM NES каждый кадр ────────────────────────
+    // Декодирование текстовых строк кэшируется: gs_decode вызывается только
+    // при изменении кодов, а не 60 раз/с на каждый кадр.
     if (settings.gsEnabled) {
+        struct GsEntry { uint16_t addr; uint8_t val; bool valid; };
+        static GsEntry gsCache[8] = {};
+        static char gsCacheKeys[8][7] = {};  // копия последних кодов
+
+        for (int gi = 0; gi < 8; gi++) {
+            if (strncmp(settings.gsCodes[gi], gsCacheKeys[gi], 6) != 0) {
+                strncpy(gsCacheKeys[gi], settings.gsCodes[gi], 6);
+                uint16_t a = 0; uint8_t v = 0;
+                gsCache[gi].valid = (settings.gsCodes[gi][0] &&
+                                     gs_decode(settings.gsCodes[gi], &a, &v));
+                gsCache[gi].addr = a;
+                gsCache[gi].val  = v;
+            }
+        }
+
         nes_t *_nesCtx = nes_getcontextptr();
         if (_nesCtx && _nesCtx->cpu) {
-            for (int _gi = 0; _gi < 8; _gi++) {
-                if (!settings.gsCodes[_gi][0]) continue;
-                uint16_t _addr; uint8_t _val;
-                if (gs_decode(settings.gsCodes[_gi], &_addr, &_val)) {
-                    int _bank = _addr >> NES6502_BANKSHIFT;
-                    if (_bank < NES6502_NUMBANKS && _nesCtx->cpu->mem_page[_bank])
-                        _nesCtx->cpu->mem_page[_bank][_addr & NES6502_BANKMASK] = _val;
-                }
+            for (int gi = 0; gi < 8; gi++) {
+                if (!gsCache[gi].valid) continue;
+                int bank = gsCache[gi].addr >> NES6502_BANKSHIFT;
+                if (bank < NES6502_NUMBANKS && _nesCtx->cpu->mem_page[bank])
+                    _nesCtx->cpu->mem_page[bank][gsCache[gi].addr & NES6502_BANKMASK] = gsCache[gi].val;
             }
         }
     }

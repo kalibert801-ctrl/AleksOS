@@ -3917,12 +3917,7 @@ static bool _sdNumpad(const char *correctPin) {
                             return strncmp(entered, correctPin, 5) == 0;
                         }
                     } else {
-                        int digit = (i == 10) ? 0 : (i + 1);
-                        if (i >= 1 && i <= 8) digit = i + 1;
-                        if (i == 0) digit = 1;
-                        // Recalculate: keys[0]="1"..keys[8]="9", keys[10]="0"
-                        if (i <= 8) digit = i + 1;
-                        else digit = 0;
+                        int digit = (i <= 8) ? i + 1 : 0;  // keys 0..8 = "1".."9", key 10 = "0"
                         if (elen < 4) { entered[elen] = '0' + digit; elen++; entered[elen] = '\0'; }
                     }
                     drawCells();
@@ -3969,6 +3964,7 @@ static void _sdFlashFirmware(const char *filename) {
 
     uint8_t chunkBuf[512];
     size_t written = 0;
+    int lastPct = -1;
     while (written < fsize) {
         int toRead = min((size_t)512, fsize - written);
         int n = f.read(chunkBuf, toRead);
@@ -3976,12 +3972,15 @@ static void _sdFlashFirmware(const char *filename) {
         Update.write(chunkBuf, n);
         written += n;
         int pct = (int)(written * 100 / fsize);
-        int filled = (barW - 2) * pct / 100;
-        lcd.fillRoundRect(barX+1, barY+1, filled > 1 ? filled : 1, barH-2, 3, t.accent);
-        char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
-        lcd.fillRect(barX, barY+barH+4, barW, 16, t.bg);
-        fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
-        lcd.drawString(pctStr, SCREEN_W/2, barY+barH+12);
+        if (pct >= lastPct + 2 || pct == 100) {  // обновляем LCD каждые 2%, не каждые 512 байт
+            lastPct = pct;
+            int filled = (barW - 2) * pct / 100;
+            lcd.fillRoundRect(barX+1, barY+1, filled > 1 ? filled : 1, barH-2, 3, t.accent);
+            char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+            lcd.fillRect(barX, barY+barH+4, barW, 16, t.bg);
+            fsm(); lcd.setTextDatum(MC_DATUM); lcd.setTextColor(t.textSec);
+            lcd.drawString(pctStr, SCREEN_W/2, barY+barH+12);
+        }
     }
     f.close();
 

@@ -66,16 +66,16 @@ static void def_drawRomRow(int romIdx, int slot, bool sel) {
     int cy = y + M_ROW_H / 2;
     uint16_t stc = t.selText ? t.selText : TH_WHITE;
 
-    bool isFav  = GameStats::favCheck(sdMgr.get(romIdx).path.c_str());
-    uint16_t sc = isFav ? TH_GOLD : (uint16_t)0x2965u;  // золото : тёмно-серый
+    const ROMInfo& rom = sdMgr.get(romIdx);  // одно обращение — не дважды
+    bool isFav  = GameStats::favCheck(rom.path.c_str());
+    uint16_t sc = isFav ? TH_GOLD : (uint16_t)0x2965u;
 
-    // Максимальная длина имени: оставляем 18px для звезды
     int maxLen = sel ? 16 : 18;
-    String name = th_trimName(sdMgr.get(romIdx).name, maxLen);
+    String name = th_trimName(rom.name, maxLen);
 
+    lcd.startWrite();
     if (sel) {
         lcd.fillRoundRect(1, y + 1, M_LIST_W - 18, M_ROW_H - 2, 4, t.selected);
-        // Треугольник-плей
         lcd.fillTriangle(7, cy - 5, 7, cy + 5, 15, cy, TH_GOLD);
         th_fsm(); lcd.setTextDatum(ML_DATUM); lcd.setTextColor(stc);
         lcd.drawString(name.c_str(), 19, cy);
@@ -87,10 +87,9 @@ static void def_drawRomRow(int romIdx, int slot, bool sel) {
 
     // Звёздочка (6-конечная: два треугольника) — правый край строки
     int sx = M_LIST_W - 11;
-    // Верхний треугольник ▲
     lcd.fillTriangle(sx, cy - 4, sx - 3, cy + 2, sx + 3, cy + 2, sc);
-    // Нижний треугольник ▼
     lcd.fillTriangle(sx, cy + 3, sx - 3, cy - 2, sx + 3, cy - 2, sc);
+    lcd.endWrite();
 }
 
 // ════════════════════════════════════════════════════════════════════

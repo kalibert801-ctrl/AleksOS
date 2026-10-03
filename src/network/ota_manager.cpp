@@ -56,19 +56,23 @@ bool otaCheckUpdate(OTAInfo &out) {
     // ── JSON фильтр — читаем ТОЛЬКО нужные поля ─────────────────────────
     // GitHub API возвращает 15-50KB JSON, из которого нам нужны 3 поля.
     // Фильтрация снижает потребность в RAM с ~32KB до ~2KB.
-    StaticJsonDocument<128> filter;
+    // [0] = фильтрация массивов в ArduinoJson 6 (не [true])
+    StaticJsonDocument<256> filter;
     filter["tag_name"] = true;
-    filter["assets"][true]["name"] = true;
-    filter["assets"][true]["browser_download_url"] = true;
+    filter["assets"][0]["name"] = true;
+    filter["assets"][0]["browser_download_url"] = true;
 
-    // Буфер для отфильтрованных данных: tag + до 10 ассетов × ~150 байт
+    // DynamicJsonDocument — heap-аллокация (4KB на стеке вызовов опасна на ESP32)
     DynamicJsonDocument doc(4096);
 
+    String body = http.getString();
+    http.end();
+    Serial.printf("[OTA] Response length: %d bytes\n", body.length());
+
     DeserializationError err = deserializeJson(
-        doc, http.getStream(),
+        doc, body,
         DeserializationOption::Filter(filter)
     );
-    http.end();
 
     if (err) {
         Serial.printf("[OTA] JSON parse error: %s\n", err.c_str());

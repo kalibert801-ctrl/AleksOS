@@ -3,6 +3,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <algorithm>
+#include <cctype>
 
 static SPIClass hspi(HSPI);
 SDManager sdMgr;
@@ -65,12 +66,17 @@ void SDManager::scan() {
         scanDir(_roms, "/");
     }
 
-    // Сортировка по имени (без учёта регистра)
+    // Сортировка по имени (без учёта регистра) — без heap-аллокаций в лямбде
     std::sort(_roms.begin(), _roms.end(),
         [](const ROMInfo &a, const ROMInfo &b) {
-            String an = a.name; an.toLowerCase();
-            String bn = b.name; bn.toLowerCase();
-            return an < bn;
+            const char *pa = a.name.c_str();
+            const char *pb = b.name.c_str();
+            while (*pa && *pb) {
+                int ca = tolower((unsigned char)*pa++);
+                int cb = tolower((unsigned char)*pb++);
+                if (ca != cb) return ca < cb;
+            }
+            return *pa < *pb;
         });
 
     Serial.printf("SD: total %d ROMs\n", (int)_roms.size());
