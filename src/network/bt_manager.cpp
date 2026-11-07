@@ -1,6 +1,7 @@
 #include "network/bt_manager.h"
 #include "config.h"
 #include <NimBLEDevice.h>
+#include "esp_bt.h"
 
 // Nordic UART Service — widely supported by BLE serial apps on Android
 #define NUS_SVC "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -27,8 +28,24 @@ class _CharCB : public NimBLECharacteristicCallbacks {
     }
 };
 
+static bool _bleMemFreed = false;
+
+// Контроллер BT с самого старта держит ~55 КБ внутренней RAM, и NimBLE не даёт
+// Arduino их вернуть (btStarted() в NimBLEDevice). Classic BT проекту не нужен
+// никогда, а при выключенном 2-player BT не нужен и BLE. Без этой памяти HTTPS
+// (OTA через GitHub) не помещался: mbedTLS берёт память только из внутренней RAM.
+void btMgrReleaseMemory(bool keepBle) {
+    if (keepBle) {
+        esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    } else if (esp_bt_mem_release(ESP_BT_MODE_BTDM) == ESP_OK) {
+        _bleMemFreed = true;
+    }
+}
+
+bool btMgrAvailable() { return !_bleMemFreed; }
+
 void btMgrStart() {
-    if (_running) return;
+    if (_running || _bleMemFreed) return;   // память BLE отдана — контроллер не поднять до перезагрузки
     _pad = 0; _connected = false;
 
     NimBLEDevice::init(BT_DEVICE_NAME);

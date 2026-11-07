@@ -1,6 +1,7 @@
 // main.cpp — RetroESP AleksOS
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include "config.h"
 #include "settings.h"
 #include "display/display_manager.h"
@@ -311,6 +312,12 @@ void setup() {
         bootProgress(20, "SD error! No card?");
         for (int i = 0; i < 12; i++) { bootTick(); delay(50); }
     }
+
+    // Память контроллера Bluetooth — обратно в кучу (нужно знать settings.btEnabled)
+    btMgrReleaseMemory(settings.btEnabled);
+    webConsolePrintf("[MEM] internal: free %u KB, largest block %u KB\n",
+        (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+        (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
 
     // ── Периферия ─────────────────────────────────────────────
     bootProgress(88, "Init audio...");

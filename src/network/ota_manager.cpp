@@ -5,6 +5,15 @@
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 #include <ArduinoJson.h>
+#include <esp_heap_caps.h>
+
+// mbedTLS (HTTPS) берёт память только из внутренней RAM: ~16 КБ одним куском
+// под буфер приёма плюс рукопожатие. Печатаем запас — при сбое сразу видно причину.
+static void _logInternalHeap(const char *where) {
+    Serial.printf("[OTA] %s: internal free %u KB, largest block %u KB\n", where,
+                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                  (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
+}
 
 // ── GitHub repo info ──────────────────────────────────────────────────────
 #define GH_OWNER  "kalibert801-ctrl"
@@ -45,12 +54,12 @@ bool otaCheckUpdate(OTAInfo &out) {
     http.setTimeout(20000);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
+    _logInternalHeap("Before API request");
     int code = http.GET();
-    Serial.printf("[OTA] GitHub API HTTP code: %d\n", code);
-    Serial.printf("[OTA] Free heap before JSON: %d\n", ESP.getFreeHeap());
+    Serial.printf("[OTA] GitHub API HTTP code: %d %s\n", code,
+                  code < 0 ? http.errorToString(code).c_str() : "");
 
     if (code != HTTP_CODE_OK) {
-        Serial.printf("[OTA] API error: HTTP %d\n", code);
         http.end();
         return false;
     }
@@ -132,6 +141,7 @@ bool otaDownloadAndFlash(const char *url, void (*progressCb)(int pct)) {
     httpUpdate.rebootOnUpdate(true);
 
     Serial.printf("[OTA] Downloading: %s\n", url);
+    _logInternalHeap("Before download");
     t_httpUpdate_return ret = httpUpdate.update(client, url);
 
     switch (ret) {

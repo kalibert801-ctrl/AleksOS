@@ -6,6 +6,7 @@
 #include "network/ntp_manager.h"
 #include "network/ota_manager.h"
 #include "network/pico_ota.h"
+#include "network/bt_manager.h"
 #include <Update.h>
 
 // ── Forward declarations для иконок и меню (используются до определения) ────
@@ -1900,6 +1901,15 @@ static String settingValue(int gi) {
     return "";
 }
 
+// Память BLE отдаётся в кучу при старте, если BT был выключен, — включённый
+// после этого BT заработает только после перезагрузки.
+static void _btToggled() {
+    if (!settings.btEnabled || btMgrAvailable()) return;
+    popupShow("Bluetooth", settings.language == LANG_RU
+                  ? cyrStr("Перезагрузите для включения BT")
+                  : "Restart to enable Bluetooth", 2500);
+}
+
 static void settingInc(int gi) {
     switch(gi) {
         case 0: settings.brightness=min(100,(int)settings.brightness+10); setBrightness(settings.brightness); break;
@@ -1929,7 +1939,7 @@ static void settingInc(int gi) {
         case 22: settings.diagEmu     = !settings.diagEmu;     break;
         case 23: settings.diagTouch   = !settings.diagTouch;   break;
         case 29: settings.nesPalette = (settings.nesPalette + 1) % 4; break;  // NES Palette
-        case 48: settings.btEnabled = !settings.btEnabled; break;               // Bluetooth toggle
+        case 48: settings.btEnabled = !settings.btEnabled; _btToggled(); break;  // Bluetooth toggle
         case 30: settings.turboEnabled = !settings.turboEnabled; break;         // Turbo toggle
         case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
         case 31: {  // Turbo mode cycle: Off→A→B→A+B
@@ -1983,7 +1993,7 @@ static void settingDec(int gi) {
         case 22: settings.diagEmu     = !settings.diagEmu;     break;
         case 23: settings.diagTouch   = !settings.diagTouch;   break;
         case 29: settings.nesPalette = (settings.nesPalette + 3) % 4; break;  // NES Palette (back)
-        case 48: settings.btEnabled = !settings.btEnabled; break;               // Bluetooth toggle
+        case 48: settings.btEnabled = !settings.btEnabled; _btToggled(); break;  // Bluetooth toggle
         case 30: settings.turboEnabled = !settings.turboEnabled; break;
         case 32: settings.ggEnabled = !settings.ggEnabled; break;               // Game Genie toggle
         case 31: {  // Turbo mode cycle backward
