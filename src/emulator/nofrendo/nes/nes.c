@@ -52,6 +52,8 @@
 
 static nes_t nes;
 
+uint32 nes_framecount = 0;
+
 /* find out if a file is ours */
 int nes_isourfile(const char *filename)
 {
@@ -331,6 +333,7 @@ static void nes_renderframe(bool draw_flag)
    }
 
    nes.scanline = 0;
+   nes_framecount++;
 }
 
 static void system_video(bool draw)

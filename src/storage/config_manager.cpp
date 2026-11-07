@@ -4,8 +4,13 @@
 #include <SD.h>
 #include <ArduinoJson.h>
 
+#define CFG_TMP "/config.tmp"
+
 void cfgLoad() {
+    // Если питание пропало между удалением старого конфига и rename в cfgSave(),
+    // остаётся только полностью записанный временный файл — берём его.
     File f = SD.open(CFG_FILE);
+    if (!f) f = SD.open(CFG_TMP);
     if (!f) return;
     StaticJsonDocument<2048> doc;
     if (deserializeJson(doc, f)) { f.close(); return; }
@@ -119,9 +124,9 @@ void cfgLoad() {
 
 void cfgSave() {
     // Write to temp file first — if power dies mid-write, old config survives.
-    // SD.rename() is atomic on FAT: only replaces CFG_FILE after a full write.
-    const char *tmpPath = "/config.tmp";
-    SD.remove(tmpPath);
+    // Between remove() and rename() only the temp file exists — cfgLoad() falls back to it.
+    const char *tmpPath = CFG_TMP;
+    if (SD.exists(tmpPath)) SD.remove(tmpPath);
     File f = SD.open(tmpPath, FILE_WRITE);
     if (!f) return;
     StaticJsonDocument<2048> doc;
@@ -176,7 +181,6 @@ void cfgSave() {
 
     serializeJson(doc, f);
     f.flush(); f.close();
-    // Atomically replace old config with new one
-    SD.remove(CFG_FILE);
+    if (SD.exists(CFG_FILE)) SD.remove(CFG_FILE);
     SD.rename(tmpPath, CFG_FILE);
 }

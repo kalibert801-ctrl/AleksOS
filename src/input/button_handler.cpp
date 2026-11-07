@@ -31,6 +31,14 @@ void ButtonHandler::_processByte(uint8_t b) {
     }
 }
 
+// Pico после старта (или своей перезагрузки) держит авто-вибро включённым,
+// поэтому настройку отправляем при каждом появлении связи. Раньше она слалась
+// один раз из setup(), когда пакетов ещё не было, и isConnected() её отбрасывал.
+void ButtonHandler::_picoAlive() {
+    if (!isConnected()) _hapticSync = true;
+    _lastPkt = millis();
+}
+
 void ButtonHandler::_handlePacket() {
     uint8_t type = _rxBuf[0];
     uint8_t data = _rxBuf[1];
@@ -52,13 +60,13 @@ void ButtonHandler::_handlePacket() {
                         (data == 0)   ? " release" : "");
                 }
                 _state   = data;
-                _lastPkt = millis();
+                _picoAlive();
             }
             break;
         case PICO_SYS_PKT:               // 0x43 — системные кнопки (HOME и т.д.)
             if (chk == (uint8_t)(~data)) {
                 _sysState = data;
-                _lastPkt  = millis();
+                _picoAlive();
                 if (settings.diagButtons && data) {
                     webConsolePrintf("[BTN] SYS=0x%02X%s\n", data,
                                     (data & BTN_SYS_HOME) ? " HOME" : "");
@@ -66,7 +74,7 @@ void ButtonHandler::_handlePacket() {
             }
             break;
         case 0x50:                       // PONG
-            _lastPkt = millis();
+            _picoAlive();
             break;
         default:
             break;
@@ -77,6 +85,10 @@ void ButtonHandler::update() {
     int avail = PICO_SERIAL.available();
     while (avail-- > 0)
         _processByte((uint8_t)PICO_SERIAL.read());
+    if (_hapticSync) {
+        _hapticSync = false;
+        sendCmd(PICO_CMD_HAPTIC_EN, settings.vibroEnabled ? 1 : 0);
+    }
 }
 
 uint8_t ButtonHandler::read() {

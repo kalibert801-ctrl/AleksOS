@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 
 #define STATS_FILE    "/game_stats.json"
+#define STATS_TMP     "/game_stats.tmp"
 #define RECENT_MAX    10    // максимум недавних игр
 
 static std::vector<String> _recent;
@@ -73,7 +74,9 @@ uint32_t GameStats::playTimeGet(const char *path) {
 void GameStats::load() {
     _recent.clear(); _favs.clear(); _ptKeys.clear(); _ptVals.clear();
 
+    // Питание пропало между remove() и rename() в save() — остался только tmp
     File f = SD.open(STATS_FILE);
+    if (!f) f = SD.open(STATS_TMP);
     if (!f) return;
 
     // Файл может быть большим из-за времени игры — используем Dynamic doc
@@ -110,13 +113,13 @@ void GameStats::save() {
     for (int i = 0; i < (int)_ptKeys.size(); i++)
         pt[_ptKeys[i]] = _ptVals[i];
 
-    // Atomic write через temp файл
-    const char *tmp = "/game_stats.tmp";
+    // Запись через temp файл; между remove() и rename() load() подхватит tmp
+    const char *tmp = STATS_TMP;
     if (SD.exists(tmp)) SD.remove(tmp);
     File f = SD.open(tmp, FILE_WRITE);
     if (!f) return;
     serializeJson(doc, f);
     f.flush(); f.close();
-    SD.remove(STATS_FILE);
+    if (SD.exists(STATS_FILE)) SD.remove(STATS_FILE);
     SD.rename(tmp, STATS_FILE);
 }

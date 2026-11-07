@@ -51,20 +51,25 @@ int picoOtaGetVersion() {
     uint8_t cmd[4] = {0xAA, 0x02, 0x00, 0x02};
     Serial2.write(cmd, 4);
 
-    Serial2.setTimeout(1500);
-    uint8_t resp[4];
-    if (Serial2.readBytes(resp, 4) != 4) {
-        Serial.println("[PICOTA] No version response");
-        return -1;
+    // Pico шлёт пакет кнопок [AA 42 ..] каждые 16 мс, и он мог прийти раньше ответа.
+    // Поэтому ищем в потоке [AA 56 hi lo], а не берём первые 4 байта. В пакетах
+    // кнопок за 0xAA никогда не идёт 0x56 (там 0x42/0x43 или ~0xAA = 0x55).
+    uint8_t win[4] = {};
+    int got = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 1500) {
+        if (!Serial2.available()) { delay(1); continue; }
+        win[0] = win[1]; win[1] = win[2]; win[2] = win[3];
+        win[3] = (uint8_t)Serial2.read();
+        if (++got >= 4 && win[0] == 0xAA && win[1] == 0x56) {
+            int ver = ((int)win[2] << 8) | win[3];
+            Serial.printf("[PICOTA] Pico version: %d.%d (encoded %d)\n",
+                          ver / 100, ver % 100, ver);
+            return ver;
+        }
     }
-    if (resp[0] != 0xAA || resp[1] != 0x56) {
-        Serial.printf("[PICOTA] Bad version response: %02X %02X\n", resp[0], resp[1]);
-        return -1;
-    }
-    int ver = ((int)resp[2] << 8) | resp[3];
-    Serial.printf("[PICOTA] Pico version: %d.%d (encoded %d)\n",
-                  ver / 100, ver % 100, ver);
-    return ver;
+    Serial.println("[PICOTA] No version response");
+    return -1;
 }
 
 // ── URL builder ──────────────────────────────────────────────────────────────

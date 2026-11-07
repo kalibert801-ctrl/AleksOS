@@ -40,12 +40,14 @@ bool otaCheckUpdate(OTAInfo &out) {
 
     HTTPClient http;
     http.begin(client, GH_API);
-    http.addHeader("User-Agent", "RetroESP-OTA/1.0");
+    http.addHeader("User-Agent", "AleksOS-OTA/1.0");
     http.addHeader("Accept", "application/vnd.github.v3+json");
-    http.setTimeout(15000);
+    http.setTimeout(20000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
     int code = http.GET();
     Serial.printf("[OTA] GitHub API HTTP code: %d\n", code);
+    Serial.printf("[OTA] Free heap before JSON: %d\n", ESP.getFreeHeap());
 
     if (code != HTTP_CODE_OK) {
         Serial.printf("[OTA] API error: HTTP %d\n", code);
@@ -55,24 +57,20 @@ bool otaCheckUpdate(OTAInfo &out) {
 
     // ── JSON фильтр — читаем ТОЛЬКО нужные поля ─────────────────────────
     // GitHub API возвращает 15-50KB JSON, из которого нам нужны 3 поля.
-    // Фильтрация снижает потребность в RAM с ~32KB до ~2KB.
+    // Фильтрация через stream: парсим + фильтруем за один проход, без буфера.
     // [0] = фильтрация массивов в ArduinoJson 6 (не [true])
     StaticJsonDocument<256> filter;
     filter["tag_name"] = true;
     filter["assets"][0]["name"] = true;
     filter["assets"][0]["browser_download_url"] = true;
 
-    // DynamicJsonDocument — heap-аллокация (4KB на стеке вызовов опасна на ESP32)
     DynamicJsonDocument doc(4096);
 
-    String body = http.getString();
-    http.end();
-    Serial.printf("[OTA] Response length: %d bytes\n", body.length());
-
     DeserializationError err = deserializeJson(
-        doc, body,
+        doc, http.getStream(),
         DeserializationOption::Filter(filter)
     );
+    http.end();
 
     if (err) {
         Serial.printf("[OTA] JSON parse error: %s\n", err.c_str());

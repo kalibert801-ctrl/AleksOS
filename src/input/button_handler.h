@@ -71,9 +71,11 @@ private:
     uint8_t  _rxIdx  = 0;
     bool     _inPkt  = false;
     uint32_t _lastPkt = 0;
+    bool     _hapticSync = false;  // Pico (пере)подключился — отправить ему настройку вибро
 
     void _processByte(uint8_t b);
     void _handlePacket();
+    void _picoAlive();
 
     volatile uint8_t  _webMask  = 0;
     volatile uint32_t _webExpMs = 0;

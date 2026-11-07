@@ -9,7 +9,8 @@
 
 // ── ADC / charging ────────────────────────────────────────────────────────────
 void  batteryInit();        // вызывать в setup() (ADC init + первое измерение)
-void  batteryUpdate();      // вызывать раз в ~5 с (menuTimeTick делает это)
+void  batteryUpdate();      // блокирующий замер (~21 мс): для старта и экрана батареи
+bool  batteryPoll();        // один отсчёт АЦП за вызов; true — после 16-го, значения обновлены
 int   batteryPercent();     // 0-100, или -1 если не подключён
 float batteryVoltage();     // напряжение батареи в вольтах
 bool  batteryCharging();    // true если TP4056 заряжает (по тренду)

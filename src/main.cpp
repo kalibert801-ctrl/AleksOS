@@ -326,8 +326,7 @@ void setup() {
 
     bootProgress(98, "Reading Pico fw...");
     settingsPrefetchPicoVer();
-    // Синхронизация настройки виброотклика кнопок с Pico
-    buttons.picoHapticEnable(settings.vibroEnabled);
+    // Настройку виброотклика ButtonHandler отправит Pico сам, как только тот выйдет на связь
 
     // ── Время (читает settings.timeH/timeM после cfgLoad) ─────
     timeInit();
@@ -357,7 +356,7 @@ void setup() {
 void loop() {
     ledUpdate();
     audioUpdate();
-    updateAutoBrightness();
+    if (!_sleeping) updateAutoBrightness();   // во сне не трогать подсветку — иначе экран загорается сам
     buttons.update();
     if (webDbgRunning()) webDbgHandle();   // фоновый debug-сервер работает в любом состоянии
 
@@ -451,6 +450,7 @@ void loop() {
     case S_MENU: {
         menuTimeTick();          // обновляет время в нижней панели (раз в минуту)
         menuBatteryAnimTick();   // анимация зарядки (600 мс, только если charging)
+        menuCoverTick();         // обложка выбранной игры, когда прокрутка остановилась
 
         // ── Авто-прокрутка при удержании кнопки ─────────────────────────
         {

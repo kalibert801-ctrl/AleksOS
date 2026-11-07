@@ -55,7 +55,8 @@ bool TouchHandler::rawTouched() {
 
 bool TouchHandler::zapperTouched() {
     // Direct XPT2046 Z-pressure read via SPI — works regardless of PENIRQ/isrWake.
-    // Called from Core 1 (emulator); VSPI (touch) is separate from HSPI (display) — no conflict.
+    // Тач и дисплей на одном SPI3 (общий мьютекс шины): во время эмуляции вызывать
+    // только из renderOutputTask на Core 0, иначе Core 1 ждёт конца отправки кадра.
     // Protocol: send cmd byte → read 16 bits (null + 12-bit result + 3 zeros) → shift right 3.
     tsSPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
     digitalWrite(TOUCH_CS, LOW);

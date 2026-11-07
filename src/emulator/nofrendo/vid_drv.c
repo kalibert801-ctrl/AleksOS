@@ -370,7 +370,9 @@ int vid_setmode(int width, int height)
 //   if (NULL != back_buffer)
 //      bmp_destroy(&back_buffer);
 
-   primary_buffer = bmp_create(width, height, 0); /* no overdraw */
+   /* PPU рендерит прямо сюда: фон — 33 тайла со сдвигом до 7 px влево, спрайты —
+   ** до 7 px за правый край. Без запаса 8 px он писал за границы блока и портил кучу. */
+   primary_buffer = bmp_create(width, height, 8);
    if (NULL == primary_buffer)
       return -1;
 

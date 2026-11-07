@@ -10,11 +10,19 @@ SDManager sdMgr;
 
 bool SDManager::init() {
     hspi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-    if (!SD.begin(SD_CS, hspi)) {
+    // 20 МГц вместо 4 МГц по умолчанию: обложки, звуки и ROM читаются ~в 5 раз быстрее.
+    // Не каждая карта тянет 20 МГц через GPIO-матрицу — тогда откатываемся на 4 МГц.
+    uint32_t freq = 20000000;
+    bool ok = SD.begin(SD_CS, hspi, freq);
+    if (!ok) {
+        freq = 4000000;
+        ok = SD.begin(SD_CS, hspi, freq);
+    }
+    if (!ok) {
         Serial.println("SD: FAILED");
         return false;
     }
-    Serial.printf("SD: OK, type=%d\n", SD.cardType());
+    Serial.printf("SD: OK, type=%d, %u MHz\n", SD.cardType(), (unsigned)(freq / 1000000));
     scan();
     return true;
 }

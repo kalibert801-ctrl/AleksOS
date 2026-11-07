@@ -21,6 +21,7 @@ void menuScrollUp();
 void menuScrollDown();
 void menuTimeTick();          // call in loop() -- updates clock in bottom bar
 void menuBatteryAnimTick();   // call in loop() -- charging animation (600ms steps)
+void menuCoverTick();         // call in loop() -- draws the deferred cover once selection settles
 void settingsBatteryTick();   // call in loop() -- refreshes battery screen every 5s
 int  menuSelected();
 void showRomInfo(int idx);

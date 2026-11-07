@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 
 #define BAT_STATS_FILE  "/battery_stats.json"
+#define BAT_STATS_TMP   "/battery_stats.tmp"
 #define BAT_SAVE_EVERY  300u   // авто-сохранение каждые 300 с (5 мин)
 
 // ── Кривая разряда LiPo 1S ───────────────────────────────────────────────────
@@ -78,9 +79,11 @@ void batteryInit() {
 #endif
 }
 
+static void _batApply(float newV);
+
 void batteryUpdate() {
 #if BAT_ADC_PIN >= 0
-    // 16 замеров × 2 мс = 32 мс.
+    // 16 замеров × ~1 мс. Блокирует ~21 мс — в цикле меню вместо этого batteryPoll().
     // ТРЕБУЕТСЯ: конденсатор 100нФ между GPIO35 и GND для стабилизации напряжения.
     delay(5);   // пре-settle: даём конденсатору зарядиться перед первым замером
     int32_t sum = 0;
@@ -88,8 +91,25 @@ void batteryUpdate() {
         sum += analogRead(BAT_ADC_PIN);
         delay(1);
     }
-    float newV = _rawToVbat(sum >> 4);
+    _batApply(_rawToVbat(sum >> 4));
+#endif
+}
 
+bool batteryPoll() {
+#if BAT_ADC_PIN >= 0
+    static int32_t sum = 0;
+    static int     n   = 0;
+    sum += analogRead(BAT_ADC_PIN);
+    if (++n < 16) return false;
+    _batApply(_rawToVbat(sum >> 4));
+    sum = 0;
+    n   = 0;
+#endif
+    return true;
+}
+
+static void _batApply(float newV) {
+#if BAT_ADC_PIN >= 0
     // ── Детектирование зарядки ────────────────────────────────────────────────
     // Два критерия: порог напряжения (CV-режим TP4056 при высоком заряде)
     // ИЛИ резкий скачок напряжения (CC-режим при низком заряде — зарядник только подключили).
@@ -150,7 +170,9 @@ bool  batteryCharging() { return _charging; }
 // ── Публичное API: статистика ────────────────────────────────────────────────
 
 void batteryStatsLoad() {
+    // Питание пропало между remove() и rename() в batteryStatsSave() — остался только tmp
     File f = SD.open(BAT_STATS_FILE, FILE_READ);
+    if (!f) f = SD.open(BAT_STATS_TMP, FILE_READ);
     if (!f) { _statsLoaded = true; return; }   // файла нет — состояние чистое, разрешаем сохранять
     StaticJsonDocument<128> doc;
     if (!deserializeJson(doc, f)) {
@@ -166,7 +188,10 @@ void batteryStatsLoad() {
 }
 
 void batteryStatsSave() {
-    File f = SD.open(BAT_STATS_FILE, FILE_WRITE);
+    // Пишем через temp файл: сохранение бывает и на почти пустой батарее, и
+    // обрыв питания посреди прямой перезаписи обнулял статистику.
+    if (SD.exists(BAT_STATS_TMP)) SD.remove(BAT_STATS_TMP);
+    File f = SD.open(BAT_STATS_TMP, FILE_WRITE);
     if (!f) return;
     StaticJsonDocument<128> doc;
     doc["session"] = _stats.sessionSec;
@@ -174,7 +199,9 @@ void batteryStatsSave() {
     doc["cycles"]  = _stats.cycles;
     if (_batPct >= 0) doc["pct"] = _batPct;   // сохраняем последний % для старта с зарядником
     serializeJson(doc, f);
-    f.close();
+    f.flush(); f.close();
+    if (SD.exists(BAT_STATS_FILE)) SD.remove(BAT_STATS_FILE);
+    SD.rename(BAT_STATS_TMP, BAT_STATS_FILE);
     _lastSaveMs = millis();
 }
 

@@ -19,6 +19,8 @@
 #include <SD.h>
 #include <WiFi.h>
 #include <Arduino.h>
+#include "esp_rom_gpio.h"
+#include "soc/gpio_sig_map.h"
 
 // NES framebuffer accessors (defined in osd.cpp)
 extern const void* osdFramePtr();
@@ -636,13 +638,21 @@ static void handleScreen() {
     uint16_t    fh    = osdFrameH();
 
     // Если NES не запущена — снимаем экран меню через LCD readback.
-    // readRect() читает GRAM из ST7789 по MISO. Оба (loop и этот task) на Core 0,
-    // поэтому SPI-bus свободен когда нас вызывают (preemption между завершёнными операциями).
+    // readRect() читает GRAM из ST7789 по MISO.
     if (!frame || !fsz) {
         if (!_uiCapBuf)
             _uiCapBuf = (uint16_t*)ps_malloc((size_t)SCREEN_W * SCREEN_H * 2);
         if (_uiCapBuf) {
-            lcd.readRect(0, 0, SCREEN_W, SCREEN_H, _uiCapBuf);
+            // Дисплей и тач на одной шине SPI3, а вход MISO у неё один: после touch.init()
+            // он подключён к тачу (GPIO39), и readRect читал мусор. На время чтения
+            // (шина захвачена startWrite) переключаем вход на MISO дисплея и возвращаем.
+            // rgb565_t — тот же порядок байтов, что у кадра игры (uint16_t* отдал бы
+            // байты переставленными).
+            lcd.startWrite();
+            esp_rom_gpio_connect_in_signal(TFT_MISO, VSPIQ_IN_IDX, false);
+            lcd.readRect(0, 0, SCREEN_W, SCREEN_H, (lgfx::rgb565_t*)_uiCapBuf);
+            esp_rom_gpio_connect_in_signal(TOUCH_OUT, VSPIQ_IN_IDX, false);
+            lcd.endWrite();
             frame = _uiCapBuf;
             fsz   = (size_t)SCREEN_W * SCREEN_H * 2;
             fw    = SCREEN_W;

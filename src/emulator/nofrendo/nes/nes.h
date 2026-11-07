@@ -110,6 +110,9 @@ extern void nes_nmi(void);
 extern void nes_irq(void);
 extern void nes_emulate(void);
 
+/* все эмулированные кадры, с отрисовкой и без (autoframeskip) */
+extern uint32 nes_framecount;
+
 extern void nes_reset(int reset_type);
 
 extern void nes_poweroff(void);

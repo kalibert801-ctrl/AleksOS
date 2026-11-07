@@ -26,17 +26,18 @@ void updateAutoBrightness() {
     if (!settings.autoBrightness) return;
     static uint32_t lastRead = 0;
     static int      smoothed = -1;   // -1 = not initialized yet
-    if (millis() - lastRead < 1500) return;  // check every 1.5s
-    lastRead = millis();
+    static int      sum = 0, n = 0;
+    if (n == 0 && millis() - lastRead < 1500) return;  // check every 1.5s
 
-    // GPIO34 (ADC1_CH6) — фоторезистор.
-    // Делаем 4 замера и усредняем для стабильности.
-    int sum = 0;
-    for (int i = 0; i < 4; i++) {
-        sum += analogRead(LIGHT_SENSOR);
-        delay(2);
-    }
+    // GPIO34 (ADC1_CH6) — фоторезистор. 4 замера усредняем для стабильности:
+    // по одному за вызов (loop() идёт раз в ~6 мс), без delay — иначе меню
+    // замирало на 8 мс каждые 1.5 с.
+    sum += analogRead(LIGHT_SENSOR);
+    if (++n < 4) return;
     int raw = sum / 4;   // 0 (bright) … 4095 (dark)
+    sum = 0;
+    n   = 0;
+    lastRead = millis();
 
     // Экспоненциальное сглаживание (α = 0.25):
     // сглаживает резкие колебания, не тормозит реакцию

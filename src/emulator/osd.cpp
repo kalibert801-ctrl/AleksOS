@@ -16,7 +16,6 @@
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
 #include "freertos/semphr.h"
 #include "esp_attr.h"
 #include <string.h>
@@ -92,6 +91,7 @@ extern "C" bool osd_exit_requested(void) { return _emuExitReq; }
 // Это устраняет задержку в 1 кадр (16 мс) которая была при опросе в osd_getinput().
 static volatile int  _zapCountdown = 0;
 static nesinput_t   *_zapInputPtr  = nullptr;
+static volatile bool _zapTouched   = false;  // пишет Core 0 (renderOutputTask), читает Core 1
 
 static void IRAM_ATTR zapperTouchISR() {
     if (_zapInputPtr) {
@@ -165,6 +165,7 @@ static SemaphoreHandle_t _renderDone     = nullptr;
 static TaskHandle_t      _renderTask     = nullptr;
 static ScaleParams       _renderSp       = {};
 static int               _renderVolFrames = 0;
+static volatile uint32_t _statShown      = 0;   // кадров отправлено на дисплей (для [FPS])
 
 // Forward declarations — полные определения ниже (после структур nofrendo).
 static uint16_t *_frame        = nullptr;
@@ -195,6 +196,7 @@ static void renderOutputTask(void*) {
             lcd.writePixels(_frame, (size_t)sp.outW * sp.outH, true);
         }
         lcd.endWrite();
+        _statShown++;
 
         if (_renderVolFrames > 0) {
             const int bx = SCREEN_W - 82, by = 4, bw = 78, bh = 20;
@@ -211,6 +213,10 @@ static void renderOutputTask(void*) {
             lcd.drawString(vbuf, bx + bw / 2, by + bh / 2 + 1);
             lcd.endWrite();
         }
+
+        // Тач и дисплей делят SPI3 с общим мьютексом: опрос из эмулятора (Core 1)
+        // ждал бы конца отправки кадра, поэтому опрашиваем здесь, пока шина свободна.
+        if (_zapInputPtr) _zapTouched = touch.zapperTouched();
 
         xSemaphoreGive(_renderDone);
     }
@@ -277,7 +283,9 @@ static void audio_frame(void) {
     __sync_synchronize();
     int fill = (int)(_rHead - _rTail);
     int need = ONE_FRAME * 5 - fill;
-    if (need < ONE_FRAME)     need = ONE_FRAME;
+    // Нижняя граница ниже реального расхода за кадр (44100 / 60.1 ≈ 734), иначе
+    // кольцо медленно переполняется и звук отстаёт. 7/8 — запас на неточный I2S-клок при WiFi.
+    if (need < ONE_FRAME * 7 / 8) need = ONE_FRAME * 7 / 8;
     if (need > ONE_FRAME * 6) need = ONE_FRAME * 6;
     int free_space = (int)RING_SAMPLES - fill;
     if (need > free_space) need = free_space;
@@ -455,11 +463,9 @@ static int  drv_init(int w, int h) {
     return 0;
 }
 static void drv_shutdown(void) {
-    /* vid_shutdown() calls bmp_destroy(&primary_buffer) which frees the
-    ** bitmap_t struct that _bmp also points to.  Clear _bmp here so that
-    ** osd_shutdown() does not attempt a second bmp_destroy on freed memory
-    ** (which reads garbage, may call free() on _fb PSRAM → CORRUPT HEAP). */
-    _bmp = nullptr;
+    // _bmp — отдельная структура поверх _fb (hardware: сам _fb не освобождается).
+    // Простое обнуление теряло ~1 КБ внутренней RAM на каждый запуск игры.
+    bmp_destroy(&_bmp);
 }
 static int  drv_set_mode(int w, int h) { return 0; }
 static void drv_clear(uint8 color)     {}
@@ -497,30 +503,36 @@ static void drv_free_write(int nd, rect_t *dr) {}
 #define VID_FIRST_LINE  ((NES_SCREEN_HEIGHT - NES_VISIBLE_HEIGHT) / 2)  // 8
 
 // ── FPS / resource diagnostics ──────────────────────────────────────────────
+// emu   — все эмулированные кадры: скорость игры, 60.1 = полная
+// drawn — кадры, нарисованные PPU (не пропущенные autoframeskip)
+// shown — кадры, реально отправленные на дисплей
+static uint32_t _statDrawn   = 0;
+static bool     _statRunning = false;  // false → следующий кадр начинает новое окно
+
 static void blit_print_stats(void) {
-    static uint32_t _frameCount = 0;
-    static uint32_t _lastMs     = 0;
-    if (_lastMs == 0) { _lastMs = millis(); return; } // пропустить первое неполное окно
-    _frameCount++;
-    uint32_t now     = millis();
-    uint32_t elapsed = now - _lastMs;
-    if (elapsed >= 3000) {
-        if (settings.diagFPS) {
-            float fps      = _frameCount * 1000.0f / elapsed;
-            uint32_t heap  = ESP.getFreeHeap()  / 1024;
-            uint32_t psram = ESP.getFreePsram() / 1024;
-            webConsolePrintf("[FPS] %.1f  heap=%u KB  psram=%u KB\n", fps, heap, psram);
-        }
-        _frameCount = 0;
-        _lastMs     = now;
+    static uint32_t t0, emu0, drawn0, shown0;
+    _statDrawn++;
+    uint32_t now = millis();
+    if (_statRunning && now - t0 < 3000) return;
+    if (_statRunning && settings.diagFPS) {
+        const float k = 1000.0f / (float)(now - t0);
+        webConsolePrintf("[FPS] emu %.1f  drawn %.1f  shown %.1f  heap=%u KB  psram=%u KB\n",
+                         (nes_framecount - emu0) * k, (_statDrawn - drawn0) * k,
+                         (_statShown - shown0) * k,
+                         ESP.getFreeHeap() / 1024, ESP.getFreePsram() / 1024);
     }
+    _statRunning = true;
+    t0     = now;
+    emu0   = nes_framecount;
+    drawn0 = _statDrawn;
+    shown0 = _statShown;
 }
 
 // _line_buf объявлен выше (перед renderOutputTask) для видимости обоим контекстам.
 
 static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
     _blitBmp = bmp;  // сохраняем primary_buffer для скриншота
-    // ── Тактирование: nofrendo_ticks (60 Гц FreeRTOS таймер) ─────────────────
+    // ── Тактирование: nofrendo_ticks (60.1 Гц esp_timer) ─────────────────────
     // FPS кап УБРАН (v14.52) — он был причиной дёрганья картинки.
     //
     // Причина: vTaskDelay/busy-wait внутри blit блокировал Core 1 на 8–16 мс.
@@ -629,6 +641,7 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
             yFp += yStep;
         }
         lcd.endWrite();
+        _statShown++;
 
         if (_volShowFrames > 0) {
             _volShowFrames--;
@@ -645,6 +658,7 @@ static void drv_custom_blit(bitmap_t *bmp, int nd, rect_t *dr) {
             lcd.drawString(vbuf, bx + bw / 2, by + bh / 2 + 1);
         }
 
+        if (_zapInputPtr) _zapTouched = touch.zapperTouched();
         xSemaphoreGive(_renderDone);
     }
 
@@ -671,25 +685,31 @@ extern "C" void osd_getvideoinfo(vidinfo_t *info) {
 }
 
 // ─── timer ─────────────────────────────────────────────────────────────────
-static TimerHandle_t _nesTimer = nullptr;   // BUG-1 fix: track handle to avoid leak
+static esp_timer_handle_t _nesTimer = nullptr;
+static uint64_t           _nesPeriodUs = 16639;
+
+static void _nesTimerStop(void) {
+    if (_nesTimer) {
+        esp_timer_stop(_nesTimer);
+        esp_timer_delete(_nesTimer);
+        _nesTimer = nullptr;
+    }
+}
 
 extern "C" int osd_installtimer(int frequency, void *func, int funcsize,
                                 void *counter, int countersize) {
-    // Stop and delete any timer from the previous emulator session.
-    if (_nesTimer) {
-        xTimerStop(_nesTimer, 0);
-        xTimerDelete(_nesTimer, portMAX_DELAY);
+    _nesTimerStop();  // таймер прошлой игровой сессии
+    // esp_timer считает в микросекундах. FreeRTOS-таймер с шагом 1 мс давал
+    // 17 мс = 58.8 Гц, и игры шли на 2% медленнее. NTSC NES = 60.0988 Гц → 16639 мкс.
+    _nesPeriodUs = (frequency == 60) ? 16639 : 1000000 / frequency;
+    esp_timer_create_args_t args = {};
+    args.callback = (esp_timer_cb_t)func;
+    args.name     = "nes";
+    if (esp_timer_create(&args, &_nesTimer) != ESP_OK) {
         _nesTimer = nullptr;
+        return -1;
     }
-    // Округлённое деление: (1000 + 30) / 60 = 17 тиков вместо 16.
-    // Без округления: 1000/60 = 16 → 62.5 Гц; с округлением: 17 → 58.8 Гц.
-    // Оба варианта имеют погрешность ~4%, т.к. 60 Гц не делится нацело на 1000 Гц.
-    // Округление вверх предпочтительнее: NES работает чуть медленнее реального
-    // времени (58.8 вместо 62.5) → аудиокольцо не переполняется, нет пропусков.
-    _nesTimer = xTimerCreate("nes",
-        (configTICK_RATE_HZ + frequency/2) / frequency, pdTRUE, nullptr,
-        (TimerCallbackFunction_t)func);
-    xTimerStart(_nesTimer, 0);
+    esp_timer_start_periodic(_nesTimer, _nesPeriodUs);
     return 0;
 }
 
@@ -836,9 +856,14 @@ static void _takeScreenshot(void) {
     }
 }
 
-// ─── Remote view: expose current NES framebuffer ─────────────────────────────
-const void* osdFramePtr()  { return _frame; }
-size_t      osdFrameSize() { return _frame ? _framePixels * 2 : 0; }
+// ─── Remote view: кадр NES, пока идёт игра ───────────────────────────────────
+// _frame живёт и после выхода из эмулятора: без _emuActive веб-просмотр в меню
+// показывал последний кадр игры вместо экрана меню.
+static volatile bool _emuActive = false;
+const void* osdFramePtr()  { return _emuActive ? _frame : nullptr; }
+size_t      osdFrameSize() {
+    return (_emuActive && _frame) ? (size_t)_renderSp.outW * _renderSp.outH * 2 : 0;
+}
 uint16_t    osdFrameW()    { return (uint16_t)_renderSp.outW; }
 uint16_t    osdFrameH()    { return (uint16_t)_renderSp.outH; }
 
@@ -1063,8 +1088,12 @@ extern "C" void osd_getinput(void) {
         if (++_inp_homeFrames >= 3) {
             _inp_homeFrames = 0;
             printf("[EMU] HOME → pause menu\n");
+            // Таймер кадров стоит на паузе: иначе тики копятся и после меню nofrendo
+            // без отрисовки «догоняет» всё время паузы (экран замирает, игра убегает вперёд).
+            esp_timer_stop(_nesTimer);
             _ingameMenu();  // блокирует до выбора пользователем
             if (_emuExitReq) return;
+            _statRunning = false;  // время паузы не должно попасть в окно [FPS]
             // ── Защита от повторного открытия: ждём отпускания HOME ──────────
             // _ingameMenu() уже ждёт отпускания в начале, но если пользователь
             // нажал HOME для закрытия и ещё держит — сбрасываем счётчик здесь.
@@ -1075,6 +1104,7 @@ extern "C" void osd_getinput(void) {
                     vTaskDelay(pdMS_TO_TICKS(16));
                 }
             }
+            esp_timer_start_periodic(_nesTimer, _nesPeriodUs);
             _inp_homeFrames = 0;
             _inp_exitFrames = 0;
             return;
@@ -1182,12 +1212,11 @@ extern "C" void osd_getinput(void) {
     // ── Zapper (light gun) via touchscreen ─────────────────────────────────
     // Two detection paths (OR logic for maximum compatibility):
     //   1. digitalRead(TOUCH_IRQ): fast GPIO check if PENIRQ is wired to GPIO36
-    //   2. touch.zapperTouched():  direct SPI Z-pressure read — works even if
-    //      PENIRQ is not connected on this board revision
+    //   2. _zapTouched: SPI Z-pressure read, выполняется на Core 0 после отправки кадра
     {
         nesinput_t *zap = _zapInputPtr;
         if (zap) {
-            bool touching = (digitalRead(TOUCH_IRQ) == LOW) || touch.zapperTouched();
+            bool touching = (digitalRead(TOUCH_IRQ) == LOW) || _zapTouched;
             if (touching) {
                 _zapCountdown = 8;
                 zap->data = INP_ZAPPER_TRIG | INP_ZAPPER_HIT;
@@ -1287,6 +1316,7 @@ extern "C" int osd_init(void) {
     _inp_prevPad    = 0;
     _volShowFrames  = 0;      // скрываем OSD громкости
     _volAdjLastMs   = 0;
+    _statRunning    = false;  // окно [FPS] начинается заново, без времени в меню
     _dcX = 0; _dcY = 0;       // DC-блокер: чистый старт в каждой игровой сессии
     log_chain_logfunc(logprint);
 
@@ -1366,16 +1396,13 @@ extern "C" int osd_init(void) {
         _zapInputPtr->data = INP_ZAPPER_MISS;
         attachInterrupt(digitalPinToInterrupt(TOUCH_IRQ), zapperTouchISR, FALLING);
     }
+    _emuActive = true;
     return ret;
 }
 
 extern "C" void osd_shutdown(void) {
-    // Stop timer before tearing down audio/video (timer callback touches ring buf)
-    if (_nesTimer) {
-        xTimerStop(_nesTimer, 0);
-        xTimerDelete(_nesTimer, portMAX_DELAY);
-        _nesTimer = nullptr;
-    }
+    _emuActive = false;
+    _nesTimerStop();
     if (_bmp)   { bmp_destroy(&_bmp);    _bmp   = nullptr; }
 
     // Ждём завершения текущего SPI-буста Core 0 перед освобождением _frame.
@@ -1399,4 +1426,5 @@ extern "C" void osd_shutdown(void) {
     detachInterrupt(digitalPinToInterrupt(TOUCH_IRQ));
     _zapInputPtr = nullptr;
     _zapCountdown = 0;
+    _zapTouched = false;
 }

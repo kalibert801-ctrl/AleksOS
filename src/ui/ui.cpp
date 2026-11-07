@@ -14,8 +14,8 @@ static void iconChip(int cx,int cy,uint16_t c);
 static void iconSave(int cx,int cy,uint16_t c);
 static void iconClock2(int cx,int cy,uint16_t c);
 // Вспомогательные из showRomInfo-секции (нужны в новом меню)
-static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint = true, const char *saveThmAs = nullptr);
-static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh);
+static bool _drawRawFile(const char *path, int dx, int dy, int dw, int dh, bool noArtHint = true, const char *saveThmAs = nullptr, uint16_t *capture = nullptr);
+static int  _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh, uint16_t *capture = nullptr);
 static void _uiRomName(const char *path, char *out, size_t maxLen);
 static String _fmtPlaytime(uint32_t secs);
 // ─────────────────────────────────────────────────────────────────────────
@@ -535,9 +535,77 @@ static void _menuDrawFooter() {
     _mBattery(293, cy);
 }
 
+// ── Обложка правой панели: отложенная загрузка + кэш в PSRAM ───
+// Чтение обложки с SD на каждом шаге прокрутки тормозило список. Теперь при
+// прокрутке инфо рисуется сразу, а обложка — когда выбор простоит kCoverDeferMs
+// (menuCoverTick). Последние kCoverCacheN обложек хранятся в PSRAM уже
+// отмасштабированными. Кэш сбрасывается в menuDraw(): обложки меняются только
+// вне главного меню (скриншот в игре, галерея, веб-менеджер).
+static constexpr int      kCovX = M_PANEL_X + 2, kCovY = M_HDR_H + 2;
+static constexpr int      kCovW = M_PANEL_W - 4, kCovH = M_COVER_H - 4;
+static constexpr uint32_t kCoverDeferMs = 150;
+static constexpr int      kCoverCacheN  = 8;
+
+struct CoverCacheEntry {
+    char      name[64];   // имя ROM; пусто = слот свободен
+    bool      hasArt;     // false: обложки нет — SD повторно не трогаем
+    uint16_t *px;         // kCovW × kCovH RGB565 в PSRAM
+    uint32_t  lastUse;
+};
+static CoverCacheEntry _coverCache[kCoverCacheN];
+static int      _coverPendingRom = -1;
+static uint32_t _coverDueMs      = 0;
+
+static void _coverCacheClear() {
+    for (auto &e : _coverCache) e.name[0] = '\0';
+}
+
+static CoverCacheEntry *_coverCacheFind(const char *name) {
+    for (auto &e : _coverCache)
+        if (e.name[0] && strcmp(e.name, name) == 0) return &e;
+    return nullptr;
+}
+
+// Свободный слот или самый давно использованный; nullptr, если не хватило PSRAM
+static CoverCacheEntry *_coverCacheTake() {
+    CoverCacheEntry *v = &_coverCache[0];
+    for (auto &e : _coverCache) {
+        if (!e.name[0]) { v = &e; break; }
+        if (e.lastUse < v->lastUse) v = &e;
+    }
+    v->name[0] = '\0';
+    if (!v->px)
+        v->px = (uint16_t *)heap_caps_malloc((size_t)kCovW * kCovH * 2, MALLOC_CAP_SPIRAM);
+    return v->px ? v : nullptr;
+}
+
+static void _menuDrawCover(const char *romName) {
+    CoverCacheEntry *e = _coverCacheFind(romName);
+    if (e) {
+        e->lastUse = millis();
+        if (e->hasArt) {
+            lcd.startWrite();
+            lcd.setAddrWindow(kCovX, kCovY, kCovW, kCovH);
+            lcd.writePixels(e->px, kCovW * kCovH, true);
+            lcd.endWrite();
+        }
+        return;
+    }
+    e = _coverCacheTake();
+    int r = _drawCoverArt(romName, kCovX, kCovY, kCovW, kCovH, e ? e->px : nullptr);
+    if (e && r >= 0) {
+        strncpy(e->name, romName, sizeof(e->name) - 1);
+        e->name[sizeof(e->name) - 1] = '\0';
+        e->hasArt  = (r == 1);
+        e->lastUse = millis();
+    }
+}
+
 // ── Правая панель (обложка + инфо) ─────────────────────────────
-static void _menuDrawRightPanel(int romIdx) {
-    if (romIdx == _coverLastRom) return;  // тот же ROM — не читать SD повторно
+// deferCover: обложку не из кэша дорисует menuCoverTick(), когда выбор замрёт
+static void _menuDrawRightPanel(int romIdx, bool deferCover = false) {
+    if (romIdx == _coverLastRom) return;  // тот же ROM — панель уже нарисована
+    _coverPendingRom = -1;
     const Theme565& t = getTheme();
     lcd.fillRect(M_PANEL_X, M_HDR_H, M_PANEL_W, M_DPAD_Y - M_HDR_H, t.bg);
 
@@ -554,7 +622,12 @@ static void _menuDrawRightPanel(int romIdx) {
     // ── Обложка (cover art) ──────────────────────────────────
     char romName[64];
     _uiRomName(rom.path.c_str(), romName, sizeof(romName));
-    _drawCoverArt(romName, M_PANEL_X + 2, M_HDR_H + 2, M_PANEL_W - 4, M_COVER_H - 4);
+    if (deferCover && !_coverCacheFind(romName)) {
+        _coverPendingRom = romIdx;
+        _coverDueMs      = millis() + kCoverDeferMs;
+    } else {
+        _menuDrawCover(romName);
+    }
 
     // ── Инфо-секция (y=138..200) ─────────────────────────────
     lcd.fillRect(M_PANEL_X, M_INFO_Y, M_PANEL_W, M_INFO_H, t.header);
@@ -586,6 +659,17 @@ static void _menuDrawRightPanel(int romIdx) {
     lcd.setTextColor(t.textSec); lcd.drawString(sName.c_str(), ix, iy);
 
     _coverLastRom = romIdx;
+}
+
+// Дорисовывает отложенную обложку, когда выбор простоял kCoverDeferMs (из loop() в меню)
+void menuCoverTick() {
+    if (_coverPendingRom < 0 || (int32_t)(millis() - _coverDueMs) < 0) return;
+    int romIdx = _coverPendingRom;
+    _coverPendingRom = -1;
+    if (romIdx != _coverLastRom || romIdx >= sdMgr.count()) return;
+    char romName[64];
+    _uiRomName(sdMgr.get(romIdx).path.c_str(), romName, sizeof(romName));
+    _menuDrawCover(romName);
 }
 
 // ── Стрелки прокрутки (в списке, правый край) ──────────────────
@@ -629,7 +713,7 @@ static void _menuPartialUpdate(int oldIdx, int newIdx) {
     _menuDrawScrollArrows(total);
 
     // Правая панель
-    _menuDrawRightPanel(_menuActual(newIdx));
+    _menuDrawRightPanel(_menuActual(newIdx), true);
 }
 
 // ── Диалог подтверждения удаления ──────────────────────────────
@@ -796,7 +880,8 @@ static uint8_t _menuDotMenu() {
 // ══════════════════════════════════════════════════════════════
 
 void menuDraw() {
-    _coverLastRom = -2;  // сбросить кэш — полная перерисовка включая правую панель
+    _coverLastRom = -2;  // полная перерисовка, включая правую панель
+    _coverCacheClear();  // вне меню обложки могли смениться (скриншот, галерея, веб)
     const ThemePlugin* tp = ThemeRegistry::active();
     const Theme565& t     = getTheme();
 
@@ -852,12 +937,16 @@ void menuTimeTick() {
 
     // Батарея: обновляем показания каждые 5 секунд
     // (быстрое определение зарядки: при подключении TP4056 напряжение
-    //  резко растёт, детектируем за 1 цикл = 5 с вместо 30 с)
-    if (ms - _batLastMs >= 5000u || _batLastMs == 0) {
-        _batLastMs = ms;
-        batteryUpdate();
+    //  резко растёт, детектируем за 1 цикл = 5 с вместо 30 с).
+    // batteryPoll() берёт по одному отсчёту АЦП за проход цикла: блокирующий
+    // batteryUpdate() замораживал меню на ~21 мс каждые 5 с.
+    static bool _batMeasuring = false;
+    if (!_batMeasuring && (ms - _batLastMs >= 5000u || _batLastMs == 0)) {
+        _batLastMs    = ms;
+        _batMeasuring = true;
         batteryStatsAddTime(5);  // +5 сек к session + total (0 если идёт зарядка)
     }
+    if (_batMeasuring && batteryPoll()) _batMeasuring = false;
 
     if (m == _menuLastMin) return;  // время не изменилось — перерисовывать не надо
     _menuLastMin = m;
@@ -928,7 +1017,8 @@ static void _menuRefreshListArea() {
     const Theme565& t = getTheme();
     int total = _menuListCount();
 
-    lcd.fillRect(0, M_HDR_H, SCREEN_W, M_DPAD_Y - M_HDR_H, t.bg);
+    // Только область списка: правая панель перерисуется ниже лишь при смене ROM
+    lcd.fillRect(0, M_HDR_H, M_PANEL_X - 1, M_DPAD_Y - M_HDR_H, t.bg);
     lcd.drawFastVLine(M_PANEL_X - 1, M_HDR_H, M_DPAD_Y - M_HDR_H, t.accent);
 
     if (total == 0) {
@@ -950,7 +1040,7 @@ static void _menuRefreshListArea() {
         lcd.endWrite();
     }
 
-    _menuDrawRightPanel(_menuActual(_menuSel));
+    _menuDrawRightPanel(_menuActual(_menuSel), true);
 }
 
 void menuScrollUp() {
@@ -1161,8 +1251,10 @@ static String _fmtPlaytime(uint32_t secs) {
 // Читает строго ПОСЛЕДОВАТЕЛЬНО все строки — без seek, надёжно на любой SD.
 // Пиксели в файле pre-inverted (~rgb565). Делаем un-invert через pushImage().
 // noArtHint — показывать подсказку если файл не найден.
-static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
-                         bool noArtHint, const char *saveThmAs) {
+// capture (dw×dh) — копия выведенных пикселей для кэша обложек.
+// Возвращает true, если картинка выведена целиком (и capture заполнен).
+static bool _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
+                         bool noArtHint, const char *saveThmAs, uint16_t *capture) {
     lcd.fillRect(dx, dy, dw, dh, 0x18C3);
     lcd.drawRect(dx, dy, dw, dh, 0x4208);
 
@@ -1176,7 +1268,7 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
             lcd.setTextColor(0x2965);
             lcd.drawString("HOME>Screenshot", dx + dw / 2, dy + dh / 2 + 7);
         }
-        return;
+        return false;
     }
 
     uint8_t hdr[4] = {};
@@ -1185,7 +1277,7 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
     uint16_t srcH = (uint16_t)(hdr[2] | (hdr[3] << 8));
 
     if (srcW == 0 || srcH == 0 || srcW > 400 || srcH > 300) {
-        f.close(); return;
+        f.close(); return false;
     }
 
     // Быстрый путь: весь файл в PSRAM одним чтением
@@ -1194,7 +1286,7 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
     if (!fullBuf || f.read((uint8_t *)fullBuf, totalPx * 2) != (int)(totalPx * 2)) {
         // Запасной путь: построчное чтение
         heap_caps_free(fullBuf); fullBuf = nullptr;
-        if (f.seek(4) == false) { f.close(); return; }  // перемотка после хедера
+        if (f.seek(4) == false) { f.close(); return false; }  // перемотка после хедера
     }
     f.close();
 
@@ -1212,8 +1304,10 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
 
     uint16_t *dstBuf = (uint16_t *)heap_caps_malloc(dw * sizeof(uint16_t),
                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    bool drawn = false;
     if (fullBuf) {
         // Быстрый путь: данные в PSRAM, один setAddrWindow на весь блок
+        drawn = ((int)srcW == dw) || dstBuf;
         lcd.startWrite();
         lcd.setAddrWindow(dx, dy, dw, dh);
         for (int dstY = 0; dstY < dh; dstY++) {
@@ -1223,12 +1317,14 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
                 // Thumbnail 1:1 — прямая передача без копирования
                 lcd.writePixels(srcRow, dw, true);
                 if (thmFile) thmFile.write((const uint8_t *)srcRow, dw * 2);
+                if (capture) memcpy(capture + (size_t)dstY * dw, srcRow, (size_t)dw * 2);
             } else {
                 if (dstBuf) {
                     for (int x = 0; x < dw; x++)
                         dstBuf[x] = srcRow[(x * (int)srcW) / dw];
                     lcd.writePixels(dstBuf, dw, true);
                     if (thmFile) thmFile.write((uint8_t *)dstBuf, dw * 2);
+                    if (capture) memcpy(capture + (size_t)dstY * dw, dstBuf, (size_t)dw * 2);
                 }
             }
         }
@@ -1268,6 +1364,7 @@ static void _drawRawFile(const char *path, int dx, int dy, int dw, int dh,
 
     if (thmFile) { thmFile.flush(); thmFile.close(); }
     heap_caps_free(dstBuf);
+    return drawn;
 }
 
 // ── Отрисовка стандартного BMP файла (24-bit RGB) ─────────────────────────────
@@ -1437,19 +1534,21 @@ void uiPreCacheThumbnails(void (*onProgress)(int cur, int total)) {
 // ── Обёртка для обложки игры (по имени ROM) ───────────────────────────────────
 // Первый показ: грузит полный .raw (150KB) и сохраняет .thm (27KB) для следующего раза.
 // Последующие показы: грузит .thm (27KB) — в ~5 раз быстрее.
-static void _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh) {
+// Возврат: 1 — обложка выведена (и захвачена в capture), 0 — обложки нет, -1 — сбой.
+static int _drawCoverArt(const char *romName, int dx, int dy, int dw, int dh, uint16_t *capture) {
     char rawPath[96], thmPath[96];
     snprintf(rawPath, sizeof(rawPath), "/Screenshots/%s.raw", romName);
     snprintf(thmPath, sizeof(thmPath), "/Screenshots/%s.thm", romName);
 
     if (SD.exists(thmPath)) {
         // Thumbnail уже есть — грузим маленький файл
-        _drawRawFile(thmPath, dx, dy, dw, dh, /*noArtHint=*/true);
-    } else if (SD.exists(rawPath)) {
-        // Первый раз: грузим полный и попутно сохраняем thumbnail
-        _drawRawFile(rawPath, dx, dy, dw, dh, /*noArtHint=*/true, thmPath);
+        return _drawRawFile(thmPath, dx, dy, dw, dh, /*noArtHint=*/true, nullptr, capture) ? 1 : -1;
     }
-    // Иначе: обложки нет — рисуем ничего (без ошибок SD)
+    if (SD.exists(rawPath)) {
+        // Первый раз: грузим полный и попутно сохраняем thumbnail
+        return _drawRawFile(rawPath, dx, dy, dw, dh, /*noArtHint=*/true, thmPath, capture) ? 1 : -1;
+    }
+    return 0;  // обложки нет — ничего не рисуем (без ошибок SD)
 }
 
 // ── Main ROM info popup ────────────────────────────────────────────────────────

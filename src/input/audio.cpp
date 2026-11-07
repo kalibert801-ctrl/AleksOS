@@ -42,14 +42,28 @@ static void buildSineTable() {
 // ── Структуры нот и запросов ───────────────────────────────────
 struct Note { uint16_t freq; uint16_t ms; };
 
-enum AudioReqType { AUDIO_NONE, AUDIO_WAV, AUDIO_TONE };
+enum AudioReqType { AUDIO_NONE, AUDIO_WAV, AUDIO_CLIP, AUDIO_TONE };
 
 struct AudioReq {
     AudioReqType type;
     char  path[128];    // для AUDIO_WAV (до 120 символов пути)
+    int   clip;         // для AUDIO_CLIP — индекс в _clips
     Note  notes[8];     // для AUDIO_TONE
     int   noteCount;
 };
+
+// ── UI-звуки в памяти ──────────────────────────────────────────
+// Щелчок при прокрутке каждый раз открывал WAV на SD: медленно и мешало
+// загрузке обложек. Короткие клипы читаются в PSRAM один раз при старте.
+struct WavClip {
+    uint8_t *data;      // PCM в PSRAM; nullptr — не загружен
+    uint32_t size, rate;
+    uint16_t channels, bits;
+};
+static const char *const kClipNames[] = { "click", "select", "back", "error", "ok" };
+static constexpr int      kClipCount    = sizeof(kClipNames) / sizeof(kClipNames[0]);
+static constexpr uint32_t kClipMaxBytes = 256 * 1024;   // больше — играем с SD
+static WavClip _clips[kClipCount] = {};
 
 static AudioReq      _req;
 static volatile bool _busy    = false;
@@ -112,62 +126,67 @@ static uint16_t rd16(File &f) {
     return (uint16_t)b[0] | ((uint16_t)b[1]<<8);
 }
 
-// ── Воспроизведение WAV файла ─────────────────────────────────
-static void playWavFile(const char *path) {
-    File f = SD.open(path, FILE_READ);
-    if (!f) return;
-
-    // Разбор заголовка WAV
+// ── Разбор заголовка WAV ───────────────────────────────────────
+// При успехе файл стоит на начале PCM-данных.
+static bool wavOpen(File &f, uint32_t &rate, uint16_t &channels,
+                    uint16_t &bits, uint32_t &dataSize) {
     uint8_t tag[4];
     f.read(tag, 4);
-    if (memcmp(tag, "RIFF", 4) != 0) { f.close(); return; }
+    if (memcmp(tag, "RIFF", 4) != 0) return false;
     rd32(f); f.read(tag, 4); f.read(tag, 4);
-    uint32_t fmtSz         = rd32(f);
-    uint16_t audioFmt      = rd16(f);
-    uint16_t channels      = rd16(f);
-    uint32_t sampleRate    = rd32(f);
+    uint32_t fmtSz    = rd32(f);
+    uint16_t audioFmt = rd16(f);
+    channels          = rd16(f);
+    rate              = rd32(f);
     rd32(f); rd16(f);
-    uint16_t bitsPerSample = rd16(f);
+    bits              = rd16(f);
     if (fmtSz > 16) f.seek(f.position() + (fmtSz - 16));
 
-    uint32_t dataSize = 0; bool found = false;
+    bool found = false;
     for (int i = 0; i < 10 && !found; i++) {
         f.read(tag, 4); uint32_t sz = rd32(f);
         if (memcmp(tag, "data", 4) == 0) { dataSize = sz; found = true; }
         else f.seek(f.position() + sz);
     }
-    if (!found || audioFmt != 1 || channels < 1 || channels > 2
-               || bitsPerSample > 16 || sampleRate == 0) { f.close(); return; }
+    return found && audioFmt == 1 && channels >= 1 && channels <= 2
+        && bits <= 16 && rate != 0;
+}
 
-    if (!i2sStart(sampleRate)) { f.close(); return; }
+// ── Вывод PCM в I2S: из памяти (mem) или из файла (file) ───────
+static void playPcm(const uint8_t *mem, File *file, uint32_t dataSize,
+                    uint32_t rate, uint16_t channels, uint16_t bits) {
+    if (!i2sStart(rate)) return;
 
-    const int frameBytes = ((bitsPerSample == 8) ? 1 : 2) * (int)channels;
+    const int frameBytes = ((bits == 8) ? 1 : 2) * (int)channels;
     uint8_t readBuf[512];
     uint32_t pos = 0;
     bool ok = true;
     const int vol = settings.volume > 100 ? 100 : (int)settings.volume;
 
-    while (ok && pos < dataSize && f.available() && !_stopReq) {
+    while (ok && pos < dataSize && (mem || file->available()) && !_stopReq) {
         int toRead = (int)min((uint32_t)sizeof(readBuf), dataSize - pos);
         toRead = (toRead / frameBytes) * frameBytes;
         if (toRead <= 0) break;
-        int got = f.read(readBuf, toRead);
+        const uint8_t *src = readBuf;
+        int got = toRead;
+        if (mem) src = mem + pos;
+        else     got = file->read(readBuf, toRead);
         if (got <= 0) break;
 
         int samples = got / frameBytes;
         if (samples > WAV_DMA_LEN) samples = WAV_DMA_LEN;
         for (int i = 0; i < samples; i++) {
             uint16_t dacWord;
-            if (bitsPerSample == 8) {
+            if (bits == 8) {
                 int mono = (channels == 2)
-                    ? ((int)readBuf[i * frameBytes] + (int)readBuf[i * frameBytes + 1]) / 2
-                    : (int)readBuf[i * frameBytes];
+                    ? ((int)src[i * frameBytes] + (int)src[i * frameBytes + 1]) / 2
+                    : (int)src[i * frameBytes];
                 dacWord = (uint16_t)(uint8_t)mono << 8;
             } else {
-                int16_t l = (int16_t)(readBuf[i * frameBytes] | (readBuf[i * frameBytes + 1] << 8));
+                int16_t l = (int16_t)(src[i * frameBytes] | (src[i * frameBytes + 1] << 8));
                 int16_t s;
                 if (channels == 2) {
-                    int16_t r = (int16_t)(readBuf[i * frameBytes + 2] | (readBuf[i * frameBytes + 3] << 8));
+                    int16_t r = (int16_t)(src[i * frameBytes + 2] | (src[i * frameBytes + 3] << 8));
                     s = (int16_t)(((int32_t)l + r) / 2);
                 } else {
                     s = l;
@@ -187,8 +206,41 @@ static void playWavFile(const char *path) {
         pos += got;
     }
 
-    f.close();
     i2sStop();
+}
+
+// ── Воспроизведение WAV файла с SD ─────────────────────────────
+static void playWavFile(const char *path) {
+    File f = SD.open(path, FILE_READ);
+    if (!f) return;
+    uint32_t rate = 0, dataSize = 0;
+    uint16_t channels = 0, bits = 0;
+    if (wavOpen(f, rate, channels, bits, dataSize))
+        playPcm(nullptr, &f, dataSize, rate, channels, bits);
+    f.close();
+}
+
+// ── Загрузка UI-клипов в PSRAM (один раз при старте) ───────────
+static int preloadClips() {
+    int loaded = 0;
+    for (int i = 0; i < kClipCount; i++) {
+        char path[40];
+        snprintf(path, sizeof(path), "/sounds/%s.wav", kClipNames[i]);
+        File f = SD.open(path, FILE_READ);
+        if (!f) continue;
+        WavClip c = {};
+        if (wavOpen(f, c.rate, c.channels, c.bits, c.size) && c.size <= kClipMaxBytes) {
+            c.data = (uint8_t *)ps_malloc(c.size ? c.size : 1);
+            if (c.data && f.read(c.data, c.size) == (int)c.size) {
+                _clips[i] = c;
+                loaded++;
+            } else {
+                free(c.data);
+            }
+        }
+        f.close();
+    }
+    return loaded;
 }
 
 // ── Синтез синус-волны (I2S DAC) ──────────────────────────────
@@ -238,7 +290,10 @@ static void audioTask(void*) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (!settings.soundEnabled) { _busy = false; continue; }
 
-        if (_req.type == AUDIO_WAV) {
+        if (_req.type == AUDIO_CLIP) {
+            const WavClip &c = _clips[_req.clip];
+            playPcm(c.data, nullptr, c.size, c.rate, c.channels, c.bits);
+        } else if (_req.type == AUDIO_WAV) {
             playWavFile(_req.path);
         } else if (_req.type == AUDIO_TONE) {
             playSineSeq(_req.notes, _req.noteCount);
@@ -251,8 +306,16 @@ static void audioTask(void*) {
 // ── Вспомогательные функции отправки запросов ─────────────────
 static void triggerWav(const char *name) {
     if (!_sdSounds || !_task || _busy) return;
-    snprintf(_req.path, sizeof(_req.path), "/sounds/%s.wav", name);
     _req.type = AUDIO_WAV;
+    for (int i = 0; i < kClipCount; i++) {
+        if (_clips[i].data && strcmp(kClipNames[i], name) == 0) {
+            _req.type = AUDIO_CLIP;
+            _req.clip = i;
+            break;
+        }
+    }
+    if (_req.type == AUDIO_WAV)
+        snprintf(_req.path, sizeof(_req.path), "/sounds/%s.wav", name);
     _busy = true;
     xTaskNotifyGive(_task);
 }
@@ -277,12 +340,16 @@ void audioInit() {
 
     if (SD.exists("/sounds")) {
         _sdSounds = true;
-        Serial.println("[AUD] SD sounds enabled — WAV + I2S sine fallback");
+        int n = preloadClips();
+        Serial.printf("[AUD] SD sounds enabled — %d/%d clips in RAM, WAV + I2S sine fallback\n",
+                      n, kClipCount);
     } else {
         Serial.println("[AUD] No /sounds — I2S sine tones (clean sine, no LEDC buzz)");
     }
 
-    xTaskCreatePinnedToCore(audioTask, "aud", 32768, nullptr, 5, &_task, 1);
+    // Стек 8 КБ (было 32 КБ): задаче хватает буфера 512 Б и вызовов I2S/SD,
+    // а внутренней RAM мало — эмулятору перед стартом остаётся ~55 КБ.
+    xTaskCreatePinnedToCore(audioTask, "aud", 8192, nullptr, 5, &_task, 1);
 }
 
 void audioUpdate() {
